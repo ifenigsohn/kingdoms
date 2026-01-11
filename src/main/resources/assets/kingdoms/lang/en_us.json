@@ -1,0 +1,128 @@
+{
+  "item.kingdoms.border_wand": "Border Wand",
+  
+  "item.kingdoms.political_map": "Political Map",
+
+  "block.kingdoms.kingdom_block": "Kingdom Block",
+  "item.kingdoms.kingdom_block": "Kingdom Block",
+
+  "block.kingdoms.grain_block": "Grain Farm Block",
+  "item.kingdoms.grain_block": "Grain Farm Block",
+
+  "block.kingdoms.butcher_block": "Butcher Block",
+  "item.kingdoms.butcher_block": "Butcher Block",
+
+  "block.kingdoms.fish_block": "Fisherman Block",
+  "item.kingdoms.fish_block": "Fisherman Block",
+
+  "block.kingdoms.stable_block": "Stable Block",
+  "item.kingdoms.stable_block": "Stable Block",
+
+  "block.kingdoms.metal_block": "Ore Mine Block",
+  "item.kingdoms.metal_block": "Ore Mine Block",
+
+  "block.kingdoms.gem_block": "Gem Mine Block",
+  "item.kingdoms.gem_block": "Gem Mine Block",
+
+  "block.kingdoms.wood_block": "Woodcutter Block",
+  "item.kingdoms.wood_block": "Woodcutter Block",
+
+  "block.kingdoms.alchemy_block": "Alchemy Block",
+  "item.kingdoms.alchemy_block": "Alchemy Block",
+
+  "block.kingdoms.weapon_block": "Blacksmith Block",
+  "item.kingdoms.weapon_block": "Blacksmith Block",
+
+  "block.kingdoms.armor_block": "Armorer Block",
+  "item.kingdoms.armor_block": "Armorer Block",
+
+  "block.kingdoms.guard_block": "Guard Block",
+  "item.kingdoms.guard_block": "Guard Block",
+
+  "block.kingdoms.training_block": "Training Camp Block",
+  "item.kingdoms.training_block": "Training Camp Block",
+
+  "block.kingdoms.garrison_block": "Garrison Block",
+  "item.kingdoms.garrison_block": "Garrison Block",
+
+  "block.kingdoms.chapel_block": "Chapel Block",
+  "item.kingdoms.chapel_block": "Chapel Block",
+
+  "block.kingdoms.tavern_block": "Tavern Block",
+  "item.kingdoms.tavern_block": "Tavern Block",
+
+  "block.kingdoms.shop_block": "Shop Block",
+  "item.kingdoms.shop_block": "Shop Block",
+
+  "block.kingdoms.nobility_block": "Nobility Block",
+  "item.kingdoms.nobility_block": "Nobility Block",
+
+  "block.kingdoms.treasure_block": "Treasure Block",
+  "item.kingdoms.treasure_block": "Treasure Block",
+
+  "tooltip.kingdoms.border_wand": "Select kingdom borders by marking corners.",
+
+  "tooltip.kingdoms.kingdom_block": "Creates and manages a kingdom at this location.",
+  "tooltip.kingdoms.treasure_block": "Treasury interface: view resources and buy job blocks.",
+
+  "tooltip.kingdoms.grain_block": "Farm building. Produces grain each work cycle.",
+  "tooltip.kingdoms.butcher_block": "Butchery building. Produces meat each work cycle.",
+  "tooltip.kingdoms.fish_block": "Fishing hut. Produces fish each work cycle.",
+  "tooltip.kingdoms.wood_block": "Lumber camp. Produces wood each work cycle.",
+  "tooltip.kingdoms.metal_block": "Ore mine. Produces metal each work cycle.",
+  "tooltip.kingdoms.gem_block": "Gem mine. Produces gems each work cycle.",
+
+  "tooltip.kingdoms.alchemy_block": "Alchemy lab. Produces potions each work cycle.",
+  "tooltip.kingdoms.weapon_block": "Blacksmith. Produces weapons each work cycle.",
+  "tooltip.kingdoms.armor_block": "Armorer. Produces armor each work cycle.",
+  "tooltip.kingdoms.stable_block": "Stable. Produces horses each work cycle.",
+
+  "tooltip.kingdoms.guard_block": "Guard post. Consumes supplies to maintain guards.",
+  "tooltip.kingdoms.training_block": "Training yard. Consumes supplies to train troops.",
+  "tooltip.kingdoms.garrison_block": "Garrison. Consumes supplies to maintain a standing force.",
+
+  "tooltip.kingdoms.chapel_block": "Chapel. Consumes supplies to provide stability and services.",
+  "tooltip.kingdoms.tavern_block": "Tavern. Consumes supplies and generates income.",
+  "tooltip.kingdoms.shop_block": "Shop. Converts materials into gold through trade.",
+  "tooltip.kingdoms.nobility_block": "Noble estate. Generates gold and governance capacity.",
+  
+  "job.kingdoms.farm": "Farmer",
+  "job.kingdoms.butcher": "Butcher",
+  "job.kingdoms.fishing": "Fisher",
+  "job.kingdoms.wood": "Woodcutter",
+  "job.kingdoms.metal": "Miner",
+  "job.kingdoms.gem": "Gem Miner",
+
+  "job.kingdoms.alchemy": "Alchemist",
+  "job.kingdoms.weapon": "Blacksmith",
+  "job.kingdoms.armor": "Armorer",
+  "job.kingdoms.stable": "Farrier",
+
+  "job.kingdoms.guard": "Guard",
+  "job.kingdoms.training": "Marshal",
+  "job.kingdoms.garrison": "Soldier",
+
+  "job.kingdoms.chapel": "Cleric",
+  "job.kingdoms.tavern": "Innkeeper",
+  "job.kingdoms.shop": "Merchant",
+  "job.kingdoms.nobility": "Noble",
+
+  "block.kingdoms.ai_kingdom_kingspawner": "AI Kingdom King Spawner",
+  "item.kingdoms.ai_kingdom_kingspawner": "AI Kingdom King Spawner",
+
+ "block.kingdoms.ai_kingdom_guardspawner": "AI Kingdom Guard Spawner",
+  "item.kingdoms.ai_kingdom_guardspawner": "AI Kingdom Guard Spawner",
+
+ "block.kingdoms.ai_kingdom_civilianspawner": "AI Kingdom Civ Spawner",
+  "item.kingdoms.ai_kingdom_civilianspawner": "AI Kingdom Civ Spawner",
+
+ "block.kingdoms.ai_kingdom_noblespawner": "AI Kingdom Noble Spawner",
+  "item.kingdoms.ai_kingdom_noblespawner": "AI Kingdom Noble Spawner",
+  
+  "item.kingdoms.kingdom_map": "Kingdom Map",
+  
+  "effect.kingdoms.respawning": "Respawning",
+
+  "item.kingdoms.war_command": "War Command Baton"
+
+}

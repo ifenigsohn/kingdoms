@@ -1,0 +1,6 @@
+{
+  "model": {
+    "type": "minecraft:model",
+    "model": "kingdoms:item/kingdom_map"
+  }
+}

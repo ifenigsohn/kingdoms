@@ -1,0 +1,264 @@
+package name.kingdoms.blueprint;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.StairBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.levelgen.Heightmap;
+
+import java.util.*;
+
+public final class RoadAStar {
+    private RoadAStar() {}
+
+    private static final int MAX_ITERS = 250_000;
+
+    // How far outside a footprint we treat as blocked (keeps roads off walls)
+    public static final int FOOTPRINT_MARGIN = 2;
+
+    // Limit search region so A* can't wander forever looking for a gentle slope.
+    private static final int SEARCH_PADDING = 96; // tune (64..192)
+
+    // Penalize turns so road doesn't "stair-step" in XZ.
+    private static final double TURN_PENALTY = 2.5;
+
+    // Strongly prefer flat over climbing/descending
+    private static final double GRADE_PENALTY = 12.0;
+    private static final double UPHILL_EXTRA = 2.0;
+
+    // Smoothness penalties (reduce "jittery" elevation)
+    private static final double DY_CHANGE_PENALTY = 3.0;     // dy differs from lastDy
+    private static final double SIGN_FLIP_PENALTY  = 6.0;    // lastDy and dy opposite signs
+    private static final double STEP_RUN_PENALTY   = 1.25;   // extended runs of dy!=0
+
+    public static List<BlockPos> findPath(ServerLevel level, long regionKey, BlockPos start, BlockPos goal) {
+        NodeKey startK = new NodeKey(start.getX(), start.getZ());
+        NodeKey goalK  = new NodeKey(goal.getX(),  goal.getZ());
+
+        int minX = Math.min(start.getX(), goal.getX()) - SEARCH_PADDING;
+        int maxX = Math.max(start.getX(), goal.getX()) + SEARCH_PADDING;
+        int minZ = Math.min(start.getZ(), goal.getZ()) - SEARCH_PADDING;
+        int maxZ = Math.max(start.getZ(), goal.getZ()) + SEARCH_PADDING;
+
+        PriorityQueue<Node> open = new PriorityQueue<>(Comparator.comparingDouble(n -> n.f));
+        HashMap<NodeKey, NodeRec> best = new HashMap<>(8192);
+
+        // start lastDy=0, stepRun=0
+        NodeRec sRec = new NodeRec(startK, start.getY(), null, 0.0, 0, 0);
+        sRec.f = heuristic(start.getX(), start.getZ(), goal.getX(), goal.getZ());
+        best.put(startK, sRec);
+        open.add(new Node(startK, sRec.f));
+
+        int iters = 0;
+
+        while (!open.isEmpty() && iters++ < MAX_ITERS) {
+            Node curN = open.poll();
+            NodeRec cur = best.get(curN.k);
+            if (cur == null) continue;
+
+            // stale queue entries check
+            if (curN.f > cur.f + 1e-9) continue;
+
+            if (cur.k.equals(goalK)) {
+                return reconstruct(cur);
+            }
+
+            int cx = cur.k.x;
+            int cz = cur.k.z;
+            int cy = cur.y;
+
+            step(level, regionKey, cur, cx + 1, cz, cy, goal, best, open, minX, maxX, minZ, maxZ);
+            step(level, regionKey, cur, cx - 1, cz, cy, goal, best, open, minX, maxX, minZ, maxZ);
+            step(level, regionKey, cur, cx, cz + 1, cy, goal, best, open, minX, maxX, minZ, maxZ);
+            step(level, regionKey, cur, cx, cz - 1, cy, goal, best, open, minX, maxX, minZ, maxZ);
+        }
+
+        return fallbackLine(level, regionKey, start, goal);
+    }
+
+    private static void step(ServerLevel level,
+                             long regionKey,
+                             NodeRec cur,
+                             int nx, int nz, int curY,
+                             BlockPos goal,
+                             HashMap<NodeKey, NodeRec> best,
+                             PriorityQueue<Node> open,
+                             int minX, int maxX, int minZ, int maxZ) {
+
+        if (nx < minX || nx > maxX || nz < minZ || nz > maxZ) return;
+        if (!level.hasChunk(nx >> 4, nz >> 4)) return;
+
+        boolean isGoal = (nx == goal.getX() && nz == goal.getZ());
+        if (!isGoal && isFootprintBlocked(level, regionKey, nx, nz, FOOTPRINT_MARGIN)) return;
+
+        int surf = surfaceY(level, nx, nz);
+
+        int dy = surf - curY;
+        if (dy < -1 || dy > 1) return; // enforce 1-step maximum
+
+        // base move cost + grade penalty
+        double g2 = cur.g + 1.0 + Math.abs(dy) * GRADE_PENALTY;
+        if (dy > 0) g2 += UPHILL_EXTRA;
+
+        // mild water penalty (still allowed)
+        if (isWaterAtOrBelow(level, nx, surf, nz)) g2 += 2.0;
+
+        // turn penalty
+        if (cur.prev != null) {
+            int pdx = cur.k.x - cur.prev.k.x;
+            int pdz = cur.k.z - cur.prev.k.z;
+            int ndx = nx - cur.k.x;
+            int ndz = nz - cur.k.z;
+            if (pdx != ndx || pdz != ndz) g2 += TURN_PENALTY;
+        }
+
+        // ---- smoothness penalties using lastDy/stepRun ----
+        int newStepRun = (dy != 0) ? (cur.stepRun + 1) : 0;
+
+        if (dy != cur.lastDy) g2 += DY_CHANGE_PENALTY;
+
+        // penalize immediate "up then down" or "down then up"
+        if (cur.lastDy != 0 && dy != 0 && Integer.signum(cur.lastDy) != Integer.signum(dy)) {
+            g2 += SIGN_FLIP_PENALTY;
+        }
+
+        // penalize long continuous climbs/descents so it prefers landing-ish flats
+        if (newStepRun > 2) {
+            g2 += (newStepRun - 2) * STEP_RUN_PENALTY;
+        }
+
+        NodeKey nk = new NodeKey(nx, nz);
+
+        NodeRec prevBest = best.get(nk);
+        if (prevBest == null || g2 < prevBest.g) {
+            NodeRec nr = new NodeRec(nk, surf, cur, g2, dy, newStepRun);
+            nr.f = g2 + heuristic(nx, nz, goal.getX(), goal.getZ());
+            best.put(nk, nr);
+            open.add(new Node(nk, nr.f));
+        }
+    }
+
+    private static int surfaceY(ServerLevel level, int x, int z) {
+        int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
+        y = Math.max(level.getMinY() + 1, y);
+
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos(x, y, z);
+
+        // Walk DOWN if we landed on our own road materials (prevents A* feedback),
+        // but IMPORTANT: once we step off the road, the surface is one ABOVE that.
+        while (p.getY() > level.getMinY() + 1) {
+            BlockState bs = level.getBlockState(p);
+
+            boolean isRoad =
+                    bs.is(Blocks.DIRT_PATH) ||
+                    bs.is(Blocks.COBBLESTONE) ||
+                    bs.is(Blocks.SPRUCE_PLANKS) ||
+                    (bs.getBlock() instanceof StairBlock);
+
+            if (!isRoad) break;
+
+            p.move(0, -1, 0);
+        }
+
+        // ✅ FIX: we stopped on the block BELOW the road, so return +1
+        return Math.min(level.getMaxY() - 1, p.getY() + 1);
+    }
+
+    private static boolean isWaterAtOrBelow(ServerLevel level, int x, int y, int z) {
+        var p = new BlockPos.MutableBlockPos(x, y, z);
+        if (!level.getBlockState(p).getFluidState().isEmpty()) return true;
+        p.setY(y - 1);
+        return !level.getBlockState(p).getFluidState().isEmpty();
+    }
+
+    private static double heuristic(int x, int z, int gx, int gz) {
+        return Math.abs(gx - x) + Math.abs(gz - z);
+    }
+
+    private static List<BlockPos> reconstruct(NodeRec end) {
+        ArrayList<BlockPos> out = new ArrayList<>();
+        NodeRec cur = end;
+        while (cur != null) {
+            out.add(new BlockPos(cur.k.x, cur.y, cur.k.z));
+            cur = cur.prev;
+        }
+        Collections.reverse(out);
+        return out;
+    }
+
+    private static List<BlockPos> fallbackLine(ServerLevel level, long regionKey, BlockPos a, BlockPos b) {
+        ArrayList<BlockPos> out = new ArrayList<>();
+        int x = a.getX(), z = a.getZ();
+        int tx = b.getX(), tz = b.getZ();
+        int y = a.getY();
+
+        out.add(new BlockPos(x, y, z));
+
+        int guard = 0;
+        while ((x != tx || z != tz) && guard++ < 20000) {
+            int dx = Integer.compare(tx, x);
+            int dz = Integer.compare(tz, z);
+
+            int candX = x, candZ = z;
+            if (Math.abs(tx - x) > Math.abs(tz - z)) candX = x + dx;
+            else candZ = z + dz;
+
+            boolean candIsGoal = (candX == tx && candZ == tz);
+
+            if (!candIsGoal && isFootprintBlocked(level, regionKey, candX, candZ, FOOTPRINT_MARGIN)) {
+                int altX = x + dx;
+                int altZ = z + dz;
+
+                boolean altOkX = (altX != x) && ((altX == tx && z == tz) || !isFootprintBlocked(level, regionKey, altX, z, FOOTPRINT_MARGIN));
+                boolean altOkZ = (altZ != z) && ((x == tx && altZ == tz) || !isFootprintBlocked(level, regionKey, x, altZ, FOOTPRINT_MARGIN));
+
+                if (altOkX && !altOkZ) { candX = altX; candZ = z; }
+                else if (!altOkX && altOkZ) { candX = x; candZ = altZ; }
+                else if (altOkX) { candX = altX; candZ = z; }
+                else break;
+            }
+
+            x = candX;
+            z = candZ;
+
+            if (!level.hasChunk(x >> 4, z >> 4)) break;
+
+            int ny = surfaceY(level, x, z);
+            int step = ny - y;
+            if (step < -1) ny = y - 1;
+            if (step > 1)  ny = y + 1;
+            y = ny;
+
+            out.add(new BlockPos(x, y, z));
+        }
+
+        return out;
+    }
+
+    private static boolean isFootprintBlocked(ServerLevel level, long regionKey, int x, int z, int margin) {
+        return BlueprintFootprintState.get(level).isBlocked(regionKey, x, z, margin);
+    }
+
+    private record Node(NodeKey k, double f) {}
+    private record NodeKey(int x, int z) {}
+
+    private static final class NodeRec {
+        final NodeKey k;
+        final int y;
+        final NodeRec prev;
+        final double g;
+        final int lastDy;
+        final int stepRun;
+        double f;
+
+        NodeRec(NodeKey k, int y, NodeRec prev, double g, int lastDy, int stepRun) {
+            this.k = k;
+            this.y = y;
+            this.prev = prev;
+            this.g = g;
+            this.lastDy = lastDy;
+            this.stepRun = stepRun;
+        }
+    }
+}

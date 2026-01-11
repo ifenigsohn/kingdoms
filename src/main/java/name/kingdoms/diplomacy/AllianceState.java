@@ -1,0 +1,126 @@
+package name.kingdoms.diplomacy;
+
+import com.mojang.serialization.Codec;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.saveddata.SavedData;
+import net.minecraft.world.level.saveddata.SavedDataType;
+
+import java.util.*;
+
+public final class AllianceState extends SavedData {
+    private static final String DATA_NAME = "kingdoms_alliances";
+    private static final int MAX_ALLIES = 3;
+
+    // kingdomId -> set of allied kingdomIds
+    private final Map<UUID, Set<UUID>> allies = new HashMap<>();
+
+    public AllianceState() {}
+
+    private AllianceState(Map<UUID, List<UUID>> decoded) {
+        allies.clear();
+        for (var e : decoded.entrySet()) {
+            if (e.getKey() == null) continue;
+            Set<UUID> set = new HashSet<>();
+            if (e.getValue() != null) {
+                for (UUID id : e.getValue()) if (id != null) set.add(id);
+            }
+            allies.put(e.getKey(), set);
+        }
+        // ensure symmetry
+        normalizeSymmetry();
+    }
+
+    private void normalizeSymmetry() {
+        for (var e : new HashMap<>(allies).entrySet()) {
+            UUID a = e.getKey();
+            for (UUID b : new HashSet<>(e.getValue())) {
+                if (a.equals(b)) { e.getValue().remove(b); continue; }
+                allies.computeIfAbsent(b, k -> new HashSet<>()).add(a);
+            }
+        }
+    }
+
+    // -------------------------
+    // SavedData plumbing
+    // -------------------------
+
+    private static final Codec<UUID> UUID_CODEC =
+            Codec.STRING.xmap(UUID::fromString, UUID::toString);
+
+    private static final Codec<Map<UUID, List<UUID>>> STATE_MAP_CODEC =
+            Codec.unboundedMap(UUID_CODEC, UUID_CODEC.listOf());
+
+    private static final Codec<AllianceState> STATE_CODEC =
+            RecordCodecBuilder.create(inst -> inst.group(
+                    STATE_MAP_CODEC.optionalFieldOf("allies", Map.of())
+                            .forGetter(s -> {
+                                // encode Set as List
+                                Map<UUID, List<UUID>> out = new HashMap<>();
+                                for (var e : s.allies.entrySet()) {
+                                    out.put(e.getKey(), new ArrayList<>(e.getValue()));
+                                }
+                                return out;
+                            })
+            ).apply(inst, AllianceState::new));
+
+    public static final SavedDataType<AllianceState> TYPE =
+            new SavedDataType<>(DATA_NAME, AllianceState::new, STATE_CODEC, null);
+
+    public static AllianceState get(MinecraftServer server) {
+        ServerLevel level = server.overworld();
+        return level.getDataStorage().computeIfAbsent(TYPE);
+    }
+
+    // -------------------------
+    // API
+    // -------------------------
+
+    public boolean isAllied(UUID a, UUID b) {
+        if (a == null || b == null) return false;
+        if (a.equals(b)) return false;
+        Set<UUID> s = allies.get(a);
+        return s != null && s.contains(b);
+    }
+
+    public Set<UUID> alliesOf(UUID a) {
+        Set<UUID> s = allies.get(a);
+        return (s == null) ? Set.of() : Collections.unmodifiableSet(s);
+    }
+
+    public boolean canAlly(UUID a, UUID b) {
+        if (a == null || b == null) return false;
+        if (a.equals(b)) return false;
+        if (isAllied(a, b)) return true;
+
+        int asz = allies.getOrDefault(a, Set.of()).size();
+        int bsz = allies.getOrDefault(b, Set.of()).size();
+        return asz < MAX_ALLIES && bsz < MAX_ALLIES;
+    }
+
+    /** Adds alliance symmetrically if both have capacity. */
+    public boolean addAlliance(UUID a, UUID b) {
+        if (!canAlly(a, b)) return false;
+
+        allies.computeIfAbsent(a, k -> new HashSet<>()).add(b);
+        allies.computeIfAbsent(b, k -> new HashSet<>()).add(a);
+        setDirty();
+        return true;
+    }
+
+    /** Breaks alliance symmetrically. */
+    public boolean breakAlliance(UUID a, UUID b) {
+        boolean changed = false;
+        Set<UUID> sa = allies.get(a);
+        if (sa != null) changed |= sa.remove(b);
+        Set<UUID> sb = allies.get(b);
+        if (sb != null) changed |= sb.remove(a);
+
+        if (sa != null && sa.isEmpty()) allies.remove(a);
+        if (sb != null && sb.isEmpty()) allies.remove(b);
+
+        if (changed) setDirty();
+        return changed;
+    }
+}

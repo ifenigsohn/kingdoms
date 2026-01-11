@@ -1,0 +1,419 @@
+package name.kingdoms.diplomacy;
+
+import name.kingdoms.aiKingdomState;
+import name.kingdoms.kingdomState;
+import name.kingdoms.network.serverMail;
+
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.Level;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+public final class DiplomacyMailGenerator {
+
+    // tune
+    private static final int PERIOD_TICKS = 20 * 60 * 2; // every 2 minutes
+    private static final double CHANCE_PER_PERIOD = 0.30;
+    private static final long EXPIRE_TICKS = 20L * 60L * 10L; // 10 min
+
+    private static final double RANGE = 6000.0;
+    private static final double RANGE_SQ = RANGE * RANGE;
+
+    private static int tickCounter = 0;
+
+    private DiplomacyMailGenerator() {}
+
+    public static void init() {
+        ServerTickEvents.END_SERVER_TICK.register(DiplomacyMailGenerator::onServerTick);
+    }
+
+    // ------------------------------------------
+    // AI stock helpers
+    // ------------------------------------------
+    private static double getStock(aiKingdomState.AiKingdom k, ResourceType t) {
+        return switch (t) {
+            case GOLD -> k.gold;
+            case MEAT -> k.meat;
+            case GRAIN -> k.grain;
+            case FISH -> k.fish;
+            case WOOD -> k.wood;
+            case METAL -> k.metal;
+            case ARMOR -> k.armor;
+            case WEAPONS -> k.weapons;
+            case GEMS -> k.gems;
+            case HORSES -> k.horses;
+            case POTIONS -> k.potions;
+        };
+    }
+
+    private static double clamp(double v, double lo, double hi) {
+        if (v < lo) return lo;
+        if (v > hi) return hi;
+        return v;
+    }
+
+    private static double clamp01(double v) {
+        return Math.max(0.0, Math.min(1.0, v));
+    }
+
+    // ------------------------------------------
+    // Need model (aligns with evaluator)
+    // ------------------------------------------
+    private static final java.util.EnumMap<ResourceType, Double> TARGET = new java.util.EnumMap<>(ResourceType.class);
+    static {
+        TARGET.put(ResourceType.GOLD, 200.0);
+        TARGET.put(ResourceType.WOOD, 250.0);
+        TARGET.put(ResourceType.METAL, 140.0);
+        TARGET.put(ResourceType.GRAIN, 320.0);
+        TARGET.put(ResourceType.MEAT, 160.0);
+        TARGET.put(ResourceType.FISH, 140.0);
+        TARGET.put(ResourceType.GEMS, 40.0);
+        TARGET.put(ResourceType.POTIONS, 25.0);
+        TARGET.put(ResourceType.ARMOR, 60.0);
+        TARGET.put(ResourceType.WEAPONS, 70.0);
+        TARGET.put(ResourceType.HORSES, 35.0);
+    }
+
+    private static double needFactor(aiKingdomState.AiKingdom ai, ResourceType t) {
+        double target = TARGET.getOrDefault(t, 200.0);
+        if (target <= 0) return 0.0;
+        double stock = getStock(ai, t);
+        return clamp01((target - stock) / target); // 0..1
+    }
+
+    private static double surplusFactor(aiKingdomState.AiKingdom ai, ResourceType t) {
+        double target = TARGET.getOrDefault(t, 200.0);
+        if (target <= 0) return clamp01(getStock(ai, t) / 200.0);
+        double stock = getStock(ai, t);
+        return clamp01((stock - target) / target); // 0..1
+    }
+
+    private static ResourceType pickMostNeeded(aiKingdomState.AiKingdom k) {
+        ResourceType best = ResourceType.GOLD;
+        double bestNeed = -1.0;
+        for (ResourceType t : ResourceType.values()) {
+            double n = needFactor(k, t);
+            if (n > bestNeed) { bestNeed = n; best = t; }
+        }
+        return best;
+    }
+
+    private static ResourceType pickMostSurplus(aiKingdomState.AiKingdom k) {
+        ResourceType best = ResourceType.GOLD;
+        double bestSur = -1.0;
+        for (ResourceType t : ResourceType.values()) {
+            double s = surplusFactor(k, t);
+            if (s > bestSur) { bestSur = s; best = t; }
+        }
+        return best;
+    }
+
+    // ------------------------------------------
+    // Tick
+    // ------------------------------------------
+    private static void onServerTick(MinecraftServer server) {
+        aiKingdomState ai = aiKingdomState.get(server);
+
+        tickCounter++;
+        if (tickCounter < PERIOD_TICKS) return;
+        tickCounter = 0;
+
+        ServerLevel level = server.getLevel(Level.OVERWORLD);
+        if (level == null) return;
+
+        RandomSource rand = level.getRandom();
+
+        kingdomState ks = kingdomState.get(server);
+        DiplomacyMailboxState mailbox = DiplomacyMailboxState.get(level);
+
+        // ✅ relations are now single source of truth
+        DiplomacyRelationsState relState = DiplomacyRelationsState.get(server);
+
+        // ✅ war + alliance context for gating letter kinds
+        var warState = name.kingdoms.war.WarState.get(server);
+        var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
+
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            kingdomState.Kingdom playerKingdom = ks.getPlayerKingdom(player.getUUID());
+            if (playerKingdom == null) continue; // only players with kingdoms
+
+            boolean playerWarEligible =
+                playerKingdom.active.getOrDefault("garrison", 0) > 0
+            || playerKingdom.placed.getOrDefault("garrison", 0) > 0;
+
+
+            List<kingdomState.Kingdom> nearby = findNearbyKingdoms(server, ks, player, playerKingdom);
+
+            for (kingdomState.Kingdom from : nearby) {
+                // only AI kingdoms can send letters
+                if (!ai.isAiKingdom(from.id)) continue;
+
+                // chance gate
+                if (rand.nextDouble() > CHANCE_PER_PERIOD) continue;
+
+                // need AI entry (for personality + stocks)
+                aiKingdomState.AiKingdom aiK = ai.getById(from.id);
+                if (aiK == null) continue;
+
+                int rel = relState.getRelation(player.getUUID(), from.id);
+                
+                boolean atWar = warState.isAtWar(playerKingdom.id, from.id);
+                boolean allied = alliance.isAllied(playerKingdom.id, from.id);
+
+                // -------------------------------------------------
+                // WAR MODE: AI only sends peace letters to enemies
+                // -------------------------------------------------
+                if (atWar) {
+                    // Strength model: AI alive/tickets vs player's estimated tickets
+                    int aiAlive = Math.max(0, aiK.aliveSoldiers);
+                    int aiTotal = Math.max(1, aiK.maxSoldiers);
+
+                    int garrisons = playerKingdom.active.getOrDefault("garrison", 0);
+                    int enemyTotal = Math.max(1, garrisons * 50);
+                    int enemyAlive = enemyTotal; // until you track player losses
+
+                    if (!PeaceEvaluator.shouldOfferPeace(rand, aiAlive, aiTotal, enemyAlive, enemyTotal)) {
+                        continue;
+                    }
+
+                    Letter.Kind peaceKind = (rand.nextDouble() < 0.25) ? Letter.Kind.SURRENDER : Letter.Kind.WHITE_PEACE;
+
+                    String fromName = (from.name != null && !from.name.isBlank()) ? from.name : "Unknown Kingdom";
+                    long nowTick = server.getTickCount();
+                    long expires = nowTick + EXPIRE_TICKS;
+
+                    Letter peaceLetter = (peaceKind == Letter.Kind.SURRENDER)
+                            ? Letter.surrender(from.id, true, fromName, player.getUUID(), nowTick, expires, "We offer terms.")
+                            : Letter.whitePeace(from.id, true, fromName, player.getUUID(), nowTick, expires, "Let us end this war.");
+
+                    mailbox.addLetter(player.getUUID(), peaceLetter);
+                    serverMail.syncInbox(player, mailbox.getInbox(player.getUUID()));
+                    continue; // do not send normal diplomacy letters while at war
+                }
+
+
+                Optional<Letter.Kind> kindOpt = DiplomacyLetterPolicy.chooseOutgoing(
+                        rand,
+                        rel,
+                        aiK.personality,
+                        atWar,
+                        allied
+                );
+
+                if (kindOpt.isEmpty()) continue;
+
+               Letter.Kind kind = kindOpt.get();
+
+                // Block escalation until player has at least 1 garrison
+                if (!playerWarEligible && (kind == Letter.Kind.ULTIMATUM || kind == Letter.Kind.WAR_DECLARATION)) {
+                    continue;
+                }
+
+                
+
+                String fromName = (from.name != null && !from.name.isBlank()) ? from.name : "Unknown Kingdom";
+                long nowTick = server.getTickCount();
+
+                Letter letter = buildOutgoingLetter(rand, kind, aiK, from.id, fromName, player.getUUID(), nowTick);
+                if (letter == null) continue;
+
+                mailbox.addLetter(player.getUUID(), letter);
+                serverMail.syncInbox(player, mailbox.getInbox(player.getUUID()));
+            }
+        }
+    }
+
+    // ------------------------------------------
+    // Letter building (policy-selected kind)
+    // ------------------------------------------
+    private static Letter buildOutgoingLetter(
+            RandomSource r,
+            Letter.Kind kind,
+            aiKingdomState.AiKingdom aiK,
+            UUID fromKingdomId,
+            String fromName,
+            UUID toPlayer,
+            long nowTick
+    ) {
+        long expires = nowTick + EXPIRE_TICKS;
+
+        // pick "want" by highest NEED, and "give" by highest SURPLUS
+        ResourceType want = pickMostNeeded(aiK);
+        ResourceType give = pickMostSurplus(aiK);
+
+        // avoid same type; fall back to GOLD or WOOD
+        if (want == give) {
+            want = (want != ResourceType.GOLD) ? ResourceType.GOLD : ResourceType.WOOD;
+        }
+
+        double giveStock = getStock(aiK, give);
+        double wantNeed = needFactor(aiK, want);      // 0..1
+        double giveSur  = surplusFactor(aiK, give);   // 0..1
+
+        // amounts: scale with need/surplus + randomness
+        double baseGive = 8 + (giveSur * 60.0);
+        double baseWant = 8 + (wantNeed * 70.0);
+
+        double giveAmt = clamp(baseGive * (0.75 + r.nextDouble() * 0.60), 5, 90);
+        double wantAmt = clamp(baseWant * (0.75 + r.nextDouble() * 0.60), 5, 120);
+
+        // contracts: max amount caps number of trades; keep moderate
+        double maxAmt = clamp(60 + (r.nextDouble() * 240.0), 60, 350);
+
+        // IMPORTANT: If AI is "giving" (REQUEST/CONTRACT), don’t offer more than it has.
+        if (kind == Letter.Kind.REQUEST || kind == Letter.Kind.CONTRACT) {
+            giveAmt = clamp(giveAmt, 1, Math.max(1, giveStock));
+        }
+
+        return switch (kind) {
+            case REQUEST -> {
+                // NOTE: in your current ResponseQueue, REQUEST means AI gives A to player if accepted.
+                yield Letter.request(fromKingdomId, true, fromName, toPlayer, give, giveAmt, nowTick, expires);
+            }
+            case OFFER -> {
+                // In your current ResponseQueue, OFFER means player gives A to AI if accepted.
+                // So "offer" here is actually AI asking for something.
+                yield Letter.offer(fromKingdomId, true, fromName, toPlayer, want, wantAmt, nowTick, expires);
+            }
+            case CONTRACT -> {
+                // AI gives A, wants B (player gives B).
+                yield Letter.contract(fromKingdomId, true, fromName, toPlayer,
+                        give, giveAmt,
+                        want, clamp(wantAmt, 1, 160),
+                        maxAmt,
+                        nowTick, expires
+                );
+            }
+            case COMPLIMENT -> Letter.compliment(
+                    fromKingdomId, true, fromName, toPlayer,
+                    nowTick, expires,
+                    "Your kingdom shows promise."
+            );
+            case INSULT -> Letter.insult(
+                    fromKingdomId, true, fromName, toPlayer,
+                    nowTick, expires,
+                    "Your conduct is an embarrassment."
+            );
+            case WARNING -> Letter.warning(
+                    fromKingdomId, true, fromName, toPlayer,
+                    nowTick, expires,
+                    "Tread carefully."
+            );
+            case ULTIMATUM -> {
+                // Ultimatum = demand. We demand the player pay "want".
+                yield Letter.ultimatum(
+                        fromKingdomId, true, fromName, toPlayer,
+                        want, clamp(wantAmt, 10, 160),
+                        nowTick, expires,
+                        "Pay tribute or face consequences."
+                );
+            }
+            case ALLIANCE_PROPOSAL -> {
+                yield Letter.allianceProposal(
+                        fromKingdomId, true, fromName, toPlayer,
+                        nowTick, expires,
+                        "We propose an alliance."
+                );
+            }
+            default -> null;
+        };
+    }
+
+    // ------------------------------------------
+    // Find nearby kingdoms
+    // ------------------------------------------
+    private static List<kingdomState.Kingdom> findNearbyKingdoms(
+            MinecraftServer server,
+            kingdomState ks,
+            ServerPlayer player,
+            kingdomState.Kingdom playerKingdom
+    ) {
+        List<kingdomState.Kingdom> out = new ArrayList<>();
+
+        double px = player.getX();
+        double pz = player.getZ();
+
+        for (kingdomState.Kingdom k : ks.getAllKingdoms()) {
+            if (k.id.equals(playerKingdom.id)) continue; // not your own kingdom
+
+            double dx = (k.origin.getX() + 0.5) - px;
+            double dz = (k.origin.getZ() + 0.5) - pz;
+
+            if ((dx * dx + dz * dz) <= RANGE_SQ) out.add(k);
+        }
+
+        return out;
+    }
+
+    // ------------------------------------------
+    // UI button: "Make proposal now"
+    // ------------------------------------------
+    public static Letter makeImmediateProposal(ServerLevel level, MinecraftServer server, UUID fromAiId, UUID toPlayer, long nowTick) {
+        aiKingdomState ai = aiKingdomState.get(server);
+        aiKingdomState.AiKingdom aiK = ai.getById(fromAiId);
+        if (aiK == null) return null;
+
+        RandomSource r = level.getRandom();
+        long expires = nowTick + (20L * 60L * 10L);
+
+        // ✅ Use relations + personality policy here too
+        DiplomacyRelationsState relState = DiplomacyRelationsState.get(server);
+        int rel = relState.getRelation(toPlayer, fromAiId);
+
+        var warState = name.kingdoms.war.WarState.get(server);
+        var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
+
+        var ks = name.kingdoms.kingdomState.get(server);
+        var playerK = ks.getPlayerKingdom(toPlayer);
+
+        boolean atWar = (playerK != null) && warState.isAtWar(playerK.id, fromAiId);
+        boolean allied = (playerK != null) && alliance.isAllied(playerK.id, fromAiId);
+
+        // -------------------------------------------------
+        // WAR MODE: proposal button only returns peace letters
+        // -------------------------------------------------
+        if (atWar) {
+            int aiAlive = Math.max(0, aiK.aliveSoldiers);
+            int aiTotal = Math.max(1, aiK.maxSoldiers);
+
+            int garrisons = (playerK == null) ? 0 : playerK.active.getOrDefault("garrison", 0);
+            int enemyTotal = Math.max(1, garrisons * 50);
+            int enemyAlive = enemyTotal;
+
+            // If AI isn't inclined to offer peace right now, return null (no proposal)
+            if (!PeaceEvaluator.shouldOfferPeace(r, aiAlive, aiTotal, enemyAlive, enemyTotal)) {
+                return null;
+            }
+
+            String fromNameWar = (aiK.name != null && !aiK.name.isBlank()) ? aiK.name : "Unknown Kingdom";
+            long expiresWar = nowTick + (20L * 60L * 10L);
+
+            // Same effect for now; pick one
+            if (r.nextDouble() < 0.25) {
+                return Letter.surrender(fromAiId, true, fromNameWar, toPlayer, nowTick, expiresWar, "We offer terms.");
+            }
+            return Letter.whitePeace(fromAiId, true, fromNameWar, toPlayer, nowTick, expiresWar, "Let us end this war.");
+        }
+
+
+        Optional<Letter.Kind> kindOpt = DiplomacyLetterPolicy.chooseOutgoing(
+                r, rel, aiK.personality, atWar, allied
+        );
+
+        if (kindOpt.isEmpty()) return null;
+
+        String fromName = (aiK.name != null && !aiK.name.isBlank()) ? aiK.name : "Unknown Kingdom";
+
+        Letter letter = buildOutgoingLetter(r, kindOpt.get(), aiK, fromAiId, fromName, toPlayer, nowTick);
+        if (letter != null) return letter;
+
+        return Letter.warning(fromAiId, true, fromName, toPlayer, nowTick, expires, "...");
+    }
+}

@@ -1,0 +1,569 @@
+package name.kingdoms.blueprint;
+
+import com.mojang.logging.LogUtils;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.levelgen.Heightmap;
+import org.slf4j.Logger;
+
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.List;
+
+/**
+ * Deterministic, persisted region-based kingdom spawner.
+ *
+ * Goals:
+ *  - "One per region forever" (decision is persisted)
+ *  - Pre-decide regions near players so there are no surprise kingdoms later
+ *  - WIN regions remain WIN_PENDING until successfully placed
+ *  - Optionally force-load target chunks to avoid "must rejoin/TP" behavior
+ */
+public final class worldGenBluePrintAutoSpawner {
+    private static final Logger LOGGER = LogUtils.getLogger();
+    private worldGenBluePrintAutoSpawner() {}
+
+    // =========================================================
+    // CONFIG
+    // =========================================================
+
+    private static final boolean LOG = true;
+
+    private static final int REGION_SIZE_BLOCKS = 500;
+
+    /** 1/RARITY regions are WIN. */
+    private static final int RARITY = 1;
+
+    private static final String MOD_ID = "kingdoms";
+    private static final String[] CASTLE_POOL = { "castlelarge1", "castlemed1","castlesmall2" };
+    private static final boolean INCLUDE_AIR = false;
+
+    // Anti-surprise: decide all regions within viewDist + EXTRA around players
+    private static final int DECIDE_EXTRA_CHUNKS = 8;
+
+    // Placement ring: only place if planned chunk is within this ring of any player
+    private static final int PLACE_MIN_DIST_CHUNKS = 0;
+    private static final int PLACE_MAX_EXTRA_CHUNKS = 256;
+
+    // Throughput knobs
+    private static final int DECIDE_REGIONS_PER_TICK = 10; // how many region decisions we persist per tick
+    private static final int PLACE_PER_TICK = 1;           // how many castles to enqueue per tick
+    private static final int MAX_BP_QUEUE = 2;             // if BlueprintPlacerEngine queue is >= this, pause spawning
+
+    // Avoid "stalls" (recommended ON)
+    private static final boolean FORCE_LOAD_TARGET_CHUNK = true;
+
+    // Biome policy
+    private static final boolean BLOCK_COLD_BIOMES = true;
+
+    // Spacing
+    private static final int MIN_CASTLE_SPACING_BLOCKS = 500;
+    private static final long MIN_CASTLE_SPACING_SQ = (long) MIN_CASTLE_SPACING_BLOCKS * (long) MIN_CASTLE_SPACING_BLOCKS;
+
+    // =========================================================
+    // Runtime state
+    // =========================================================
+
+    private static int tickAge = 0;
+
+    // Regions that need decisions (rx,rz packed into regionKey)
+    private static final Deque<Long> decideQueue = new ArrayDeque<>();
+
+    // Regions that are WIN_PENDING (regionKey)
+    private static final Deque<Long> pendingQueue = new ArrayDeque<>();
+
+    // reservation while in-flight (regionKey -> packed xz) to prevent spacing conflicts
+    private static final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap reservedOriginXZ =
+            new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+
+    // =========================================================
+    // Retry control (prevents retry storms)
+    // =========================================================
+
+    // regionKey -> next tick allowed to attempt placement
+    private static final it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap nextPlaceTick =
+            new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap();
+
+    // regionKey -> consecutive failures
+    private static final it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap failCount =
+            new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap();
+
+    // regionKey -> last tick we force-loaded its target chunk
+    private static final it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap lastForceLoadTick =
+            new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap();
+
+    private static final int FAIL_COOLDOWN_BASE_TICKS = 20 * 5;   // 5s
+    private static final int FAIL_COOLDOWN_MAX_TICKS  = 20 * 60;  // 60s
+    private static final int FORCELOAD_THROTTLE_TICKS = 20 * 3;   // 3s
+    private static final int SWITCH_BP_AFTER_FAILS    = 3;
+
+    // =========================================================
+    // init
+    // =========================================================
+
+    public static void init() {
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
+            tickAge++;
+            if (server.getPlayerList().getPlayerCount() == 0) return;
+
+            ServerLevel overworld = server.overworld();
+            if (overworld == null) return;
+
+            // Only overworld for now (matches your old logic)
+            feedDecideQueue(server, overworld);
+
+            decideSome(overworld);
+
+            rebuildPendingQueueIfNeeded(overworld); // cheap guard
+            placeSome(server, overworld);
+
+            if (LOG && (tickAge % (20 * 10) == 0)) {
+                LOGGER.info("[Kingdoms][SpawnV3] tick={} decideQ={} pendingQ={} bpQ={} reserved={}",
+                        tickAge, decideQueue.size(), pendingQueue.size(), BlueprintPlacerEngine.getQueueSize(), reservedOriginXZ.size());
+            }
+        });
+
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+            tickAge = 0;
+            decideQueue.clear();
+            pendingQueue.clear();
+            reservedOriginXZ.clear();
+            nextPlaceTick.clear();
+            failCount.clear();
+            lastForceLoadTick.clear();
+
+
+            ServerLevel overworld = server.overworld();
+            if (overworld != null) {
+                // rebuild pending from persisted state on startup
+                rebuildPendingFromState(overworld);
+            }
+            if (LOG) LOGGER.info("[Kingdoms][SpawnV3] started");
+        });
+
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+            tickAge = 0;
+            decideQueue.clear();
+            pendingQueue.clear();
+            reservedOriginXZ.clear();
+            nextPlaceTick.clear();
+            failCount.clear();
+            lastForceLoadTick.clear();
+            if (LOG) LOGGER.info("[Kingdoms][SpawnV3] stopping");
+        });
+    }
+
+    // =========================================================
+    // Decide queue feeding (anti-surprise)
+    // =========================================================
+
+    private static void feedDecideQueue(MinecraftServer server, ServerLevel level) {
+        int viewDist = server.getPlayerList().getViewDistance();
+        int radiusChunks = Math.max(6, viewDist + DECIDE_EXTRA_CHUNKS);
+
+        RegionDecisionStateV2 state = RegionDecisionStateV2.get(level);
+
+        for (ServerPlayer p : level.players()) {
+            int pcx = p.chunkPosition().x;
+            int pcz = p.chunkPosition().z;
+
+            int minCX = pcx - radiusChunks;
+            int maxCX = pcx + radiusChunks;
+            int minCZ = pcz - radiusChunks;
+            int maxCZ = pcz + radiusChunks;
+
+            // Convert chunk bounds into region bounds.
+            int minX = (minCX << 4);
+            int maxX = (maxCX << 4);
+            int minZ = (minCZ << 4);
+            int maxZ = (maxCZ << 4);
+
+            int minRX = Math.floorDiv(minX, REGION_SIZE_BLOCKS);
+            int maxRX = Math.floorDiv(maxX, REGION_SIZE_BLOCKS);
+            int minRZ = Math.floorDiv(minZ, REGION_SIZE_BLOCKS);
+            int maxRZ = Math.floorDiv(maxZ, REGION_SIZE_BLOCKS);
+
+            // Enqueue every region in this rectangle (no sampling)
+            for (int rx = minRX; rx <= maxRX; rx++) {
+                for (int rz = minRZ; rz <= maxRZ; rz++) {
+                    long regionKey = packRegion(rx, rz);
+
+                    // If already decided, ignore
+                    if (state.getStatus(regionKey) != RegionDecisionStateV2.Status.UNKNOWN) continue;
+
+                    // Avoid O(n) contains on huge queues by allowing minor duplicates;
+                    // decideSome() will skip if already decided.
+                    decideQueue.addLast(regionKey);
+                }
+            }
+        }
+    }
+
+    // =========================================================
+    // Decisions
+    // =========================================================
+
+    private static void decideSome(ServerLevel level) {
+        RegionDecisionStateV2 state = RegionDecisionStateV2.get(level);
+
+        int did = 0;
+        while (did < DECIDE_REGIONS_PER_TICK && !decideQueue.isEmpty()) {
+            long regionKey = decideQueue.pollFirst();
+            int rx = unpackRX(regionKey);
+            int rz = unpackRZ(regionKey);
+
+            if (state.getStatus(regionKey) != RegionDecisionStateV2.Status.UNKNOWN) {
+                did++;
+                continue;
+            }
+
+            // Deterministic decision
+            boolean win = regionWins(level, regionKey);
+
+            if (!win) {
+                state.put(new RegionDecisionStateV2.Entry(regionKey, rx, rz,
+                        RegionDecisionStateV2.Status.LOSE.id,
+                        0, 0,
+                        "")); // bp irrelevant
+                did++;
+                continue;
+            }
+
+            // Deterministic plan inside region + deterministic bp pick
+            Planned plan = planForRegion(level, rx, rz, regionKey);
+            if (BLOCK_COLD_BIOMES && isColdBiome(level, plan.x, plan.z)) {
+                // If a region "wins" but the planned point is cold, re-roll the plan deterministically
+                // by applying a fixed perturbation. Still stable.
+                plan = planForRegion(level, rx, rz, regionKey ^ 0xA5A5A5A5A5A5A5A5L);
+            }
+
+            state.put(new RegionDecisionStateV2.Entry(regionKey, rx, rz,
+                    RegionDecisionStateV2.Status.WIN_PENDING.id,
+                    plan.x, plan.z,
+                    plan.bpId));
+
+            // Add to pending queue (runtime)
+            pendingQueue.addLast(regionKey);
+
+            // Reserve immediately for spacing
+            reserve(regionKey, plan.x, plan.z);
+
+            if (LOG) {
+                LOGGER.info("[Kingdoms][SpawnV3] DECIDE WIN_PENDING region=({}, {}) key={} plan=({}, {}) bp={}",
+                        rx, rz, regionKey, plan.x, plan.z, plan.bpId);
+            }
+
+            did++;
+        }
+    }
+
+    // =========================================================
+    // Pending rebuild
+    // =========================================================
+
+    private static void rebuildPendingFromState(ServerLevel level) {
+        pendingQueue.clear();
+        reservedOriginXZ.clear();
+
+        RegionDecisionStateV2 state = RegionDecisionStateV2.get(level);
+
+        for (RegionDecisionStateV2.Entry e : state.entries()) {
+            if (e.statusEnum() == RegionDecisionStateV2.Status.WIN_PENDING) {
+                pendingQueue.addLast(e.regionKey());
+                reserve(e.regionKey(), e.plannedX(), e.plannedZ());
+            }
+        }
+    }
+
+    private static void rebuildPendingQueueIfNeeded(ServerLevel level) {
+        // If we ever get into a state where pending is empty but the world has WIN_PENDING entries (e.g. after /reload),
+        // this rebuild recovers it. It's cheap enough to do occasionally; do it rarely.
+        if ((tickAge % (20 * 30)) != 0) return; // every 30s
+        if (!pendingQueue.isEmpty()) return;
+
+        RegionDecisionStateV2 state = RegionDecisionStateV2.get(level);
+        for (RegionDecisionStateV2.Entry e : state.entries()) {
+            if (e.statusEnum() == RegionDecisionStateV2.Status.WIN_PENDING) {
+                rebuildPendingFromState(level);
+                return;
+            }
+        }
+    }
+
+    // =========================================================
+    // Placement
+    // =========================================================
+
+    private static void placeSome(MinecraftServer server, ServerLevel level) {
+        if (BlueprintPlacerEngine.getQueueSize() >= MAX_BP_QUEUE) return;
+        if (pendingQueue.isEmpty()) return;
+
+        int did = 0;
+        int safety = 0;
+
+        while (did < PLACE_PER_TICK && !pendingQueue.isEmpty() && safety++ < 512) {
+            long regionKey = pendingQueue.pollFirst();
+
+            RegionDecisionStateV2 state = RegionDecisionStateV2.get(level);
+            RegionDecisionStateV2.Entry e = state.get(regionKey);
+            if (e == null || e.statusEnum() != RegionDecisionStateV2.Status.WIN_PENDING) {
+                reservedOriginXZ.remove(regionKey);
+                continue;
+            }
+
+            int next = nextPlaceTick.getOrDefault(regionKey, 0);
+            if (tickAge < next) {
+                pendingQueue.addLast(regionKey);
+                continue;
+            }
+
+            // Already spawned?
+            if (KingdomsSpawnState.get(level).hasSpawned(regionKey)) {
+                state.setStatus(regionKey, RegionDecisionStateV2.Status.WIN_SPAWNED);
+                reservedOriginXZ.remove(regionKey);
+                continue;
+            }
+
+            // Already queued/in-flight? keep it pending (try later)
+            if (KingdomsSpawnState.get(level).isQueued(regionKey)) {
+                pendingQueue.addLast(regionKey);
+                continue;
+            }
+
+            int x = e.plannedX();
+            int z = e.plannedZ();
+
+            if (BLOCK_COLD_BIOMES && isColdBiome(level, x, z)) {
+                // Region stays WIN_PENDING, but we change the plan deterministically to avoid perma-block.
+                Planned plan2 = planForRegion(level, e.rx(), e.rz(), regionKey ^ 0xCAFEBABECAFEL);
+                state.put(new RegionDecisionStateV2.Entry(regionKey, e.rx(), e.rz(),
+                        RegionDecisionStateV2.Status.WIN_PENDING.id,
+                        plan2.x, plan2.z,
+                        plan2.bpId));
+                reserve(regionKey, plan2.x, plan2.z);
+
+                pendingQueue.addLast(regionKey);
+                continue;
+            }
+
+            // Only place when within ring around any player (reduces pop-in surprise)
+            if (!plannedIsInPlacementRing(server, level, x, z)) {
+                pendingQueue.addLast(regionKey);
+                continue;
+            }
+
+            // Spacing gate: persisted castles + reservations
+            if (isTooCloseToAnyCastleOrReservation(level, regionKey, x, z)) {
+                // Re-plan deterministically, keep WIN_PENDING
+                Planned plan2 = planForRegion(level, e.rx(), e.rz(), regionKey ^ 0x12345678ABCDEFL);
+                state.put(new RegionDecisionStateV2.Entry(regionKey, e.rx(), e.rz(),
+                        RegionDecisionStateV2.Status.WIN_PENDING.id,
+                        plan2.x, plan2.z,
+                        plan2.bpId));
+                reserve(regionKey, plan2.x, plan2.z);
+
+                pendingQueue.addLast(regionKey);
+                continue;
+            }
+
+            // Force-load target chunk to prevent "must rejoin/TP"
+            int tcx = x >> 4;
+            int tcz = z >> 4;
+            if (FORCE_LOAD_TARGET_CHUNK) {
+                level.getChunk(tcx, tcz); // loads/generates
+            }
+
+            int y = surfaceY(level, x, z);
+            BlockPos origin = new BlockPos(x, y, z);
+
+            try {
+                Blueprint bp = Blueprint.load(server, MOD_ID, e.bpId());
+
+                // mark queued before enqueue
+                KingdomsSpawnState.get(level).markQueued(regionKey);
+
+                if (LOG) {
+                    LOGGER.info("[Kingdoms][SpawnV3] ENQUEUE region=({}, {}) key={} bp={} origin={}",
+                            e.rx(), e.rz(), regionKey, e.bpId(), origin);
+                }
+
+                BlueprintPlacerEngine.enqueueWorldgen(
+                        level, bp, origin, MOD_ID, INCLUDE_AIR,
+                        regionKey, // roadsRegionKey
+                        regionKey, // jobKey (castle job is unique per region)
+                        () -> {
+                            // SUCCESS
+                            KingdomsSpawnState.get(level).markSpawned(regionKey);
+                            KingdomsSpawnState.get(level).clearQueued(regionKey);
+
+                            CastleOriginState.get(level).put(regionKey, origin);
+
+                            RegionDecisionStateV2.get(level).setStatus(regionKey, RegionDecisionStateV2.Status.WIN_SPAWNED);
+                            reservedOriginXZ.remove(regionKey);
+
+                            // anchors + satellites (keep your behavior)
+                            List<BlockPos> anchors = RoadAnchors.consumeBarrierAnchors(level, origin);
+                            if (anchors.isEmpty()) anchors = List.of(RoadAnchors.fallbackFromBlueprintOrigin(level, origin));
+
+                            RoadAnchorState st = RoadAnchorState.get(level);
+                            for (BlockPos a : anchors) st.add(regionKey, a);
+
+                            KingdomSatelliteSpawner.KingdomSize kSize = KingdomSatelliteSpawner.KingdomSize.MEDIUM;
+                            List<String> buildingPool = List.of(
+                                    "house1_1","house2_1","house3_1","house4_1","house5_1","house6_6","house7_1","house8_1","windmill","watermill","bakery","clocktower"
+                            );
+
+                            KingdomSatelliteSpawner.enqueueSatellitesAfterCastle(
+                                    level, origin, bp, MOD_ID, regionKey,
+                                    kSize, buildingPool, level.getRandom()
+                            );
+                        },
+                        () -> {
+                           
+                        }
+                );
+
+                did++;
+
+            } catch (Exception ex) {
+                KingdomsSpawnState.get(level).clearQueued(regionKey);
+                reservedOriginXZ.remove(regionKey);
+                pendingQueue.addLast(regionKey);
+                LOGGER.error("[Kingdoms][SpawnV3] EXCEPTION enqueue key={} origin={} bp={}",
+                        regionKey, origin, e.bpId(), ex);
+            }
+        }
+    }
+
+    // =========================================================
+    // Planning + deterministic selection
+    // =========================================================
+
+    private record Planned(int x, int z, String bpId) {}
+
+    private static Planned planForRegion(ServerLevel level, int rx, int rz, long salt) {
+        // region min corner
+        int minX = rx * REGION_SIZE_BLOCKS;
+        int minZ = rz * REGION_SIZE_BLOCKS;
+
+        // deterministic RNG
+        long seed = level.getSeed();
+        long mix = seed
+                ^ (salt * 0x9E3779B97F4A7C15L)
+                ^ ((long) rx * 341873128712L)
+                ^ ((long) rz * 132897987541L)
+                ^ 0xD1B54A32D192ED03L;
+
+        RandomSource rng = RandomSource.create(mix);
+
+        // choose bp deterministically
+        String bpId = CASTLE_POOL[rng.nextInt(CASTLE_POOL.length)];
+
+        // choose a spot inside region with margins
+        int margin = 96;
+        int span = REGION_SIZE_BLOCKS - margin * 2;
+        int x = minX + margin + rng.nextInt(Math.max(1, span));
+        int z = minZ + margin + rng.nextInt(Math.max(1, span));
+
+        // tiny jitter (stable)
+        x += rng.nextInt(9) - 4;
+        z += rng.nextInt(9) - 4;
+
+        return new Planned(x, z, bpId);
+    }
+
+    private static boolean regionWins(ServerLevel level, long regionKey) {
+        if (RARITY <= 1) return true;
+        long seed = level.getSeed();
+        long mix = seed ^ (regionKey * 0xC2B2AE3D27D4EB4FL) ^ 0xDEADBEEF12345678L;
+        RandomSource rng = RandomSource.create(mix);
+        return rng.nextInt(RARITY) == 0;
+    }
+
+    // =========================================================
+    // Ring + biome + spacing helpers
+    // =========================================================
+
+    private static boolean plannedIsInPlacementRing(MinecraftServer server, ServerLevel level, int x, int z) {
+        int viewDist = server.getPlayerList().getViewDistance();
+        int maxDist = Math.max(6, viewDist + PLACE_MAX_EXTRA_CHUNKS);
+        int minDist = Math.max(0, PLACE_MIN_DIST_CHUNKS);
+
+        int cx = x >> 4;
+        int cz = z >> 4;
+
+        for (ServerPlayer p : level.players()) {
+            int pcx = p.chunkPosition().x;
+            int pcz = p.chunkPosition().z;
+            int dx = Math.abs(cx - pcx);
+            int dz = Math.abs(cz - pcz);
+            int d = Math.max(dx, dz);
+            if (d >= minDist && d <= maxDist) return true;
+        }
+        return false;
+    }
+
+    private static boolean isColdBiome(ServerLevel level, int x, int z) {
+        int sea = level.getSeaLevel();
+        Biome biome = level.getBiome(new BlockPos(x, sea, z)).value();
+        return biome.getBaseTemperature() < 0.15f;
+    }
+
+    private static boolean isTooCloseToAnyCastleOrReservation(ServerLevel level, long ignoreRegionKey, int candX, int candZ) {
+        // persisted
+        CastleOriginState st = CastleOriginState.get(level);
+        for (BlockPos p : st.allOrigins()) {
+            long dx = (long) candX - (long) p.getX();
+            long dz = (long) candZ - (long) p.getZ();
+            if (dx * dx + dz * dz < MIN_CASTLE_SPACING_SQ) return true;
+        }
+
+        // reserved
+        for (var it = reservedOriginXZ.long2LongEntrySet().fastIterator(); it.hasNext();) {
+            var en = it.next();
+            long rk = en.getLongKey();
+            if (rk == ignoreRegionKey) continue;
+
+            long packed = en.getLongValue();
+            int x = (int)(packed >> 32);
+            int z = (int)packed;
+
+            long dx = (long) candX - (long) x;
+            long dz = (long) candZ - (long) z;
+            if (dx * dx + dz * dz < MIN_CASTLE_SPACING_SQ) return true;
+        }
+
+        return false;
+    }
+
+    private static void reserve(long regionKey, int x, int z) {
+        reservedOriginXZ.put(regionKey, packXZ(x, z));
+    }
+
+    private static int surfaceY(ServerLevel level, int x, int z) {
+        int h = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+        int y = h - 1;
+        return Math.max(level.getMinY() + 1, y);
+    }
+
+    // =========================================================
+    // Region key packing (overworld only)
+    // =========================================================
+
+    private static long packRegion(int rx, int rz) {
+        return (((long) rx) << 32) ^ (rz & 0xffffffffL);
+    }
+
+    private static int unpackRX(long k) { return (int)(k >> 32); }
+    private static int unpackRZ(long k) { return (int)k; }
+
+    private static long packXZ(int x, int z) {
+        return ((long)x << 32) | (z & 0xffffffffL);
+    }
+}

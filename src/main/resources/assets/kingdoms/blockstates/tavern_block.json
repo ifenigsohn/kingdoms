@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "kingdoms:block/tavern_block"
+    }
+  }
+}
