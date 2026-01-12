@@ -20,10 +20,31 @@ public final class AiDiplomacyTicker {
     private AiDiplomacyTicker() {}
 
     // How often AIs attempt interactions
-    private static final int INTERVAL_TICKS = 20 * 60 * 5; // every 5 minutes for playtest
+    private static final int INTERVAL_TICKS = 20 * 30 * 1; // every 30 seconds DEBUG FOR DEV
 
     // Limit how many targets each AI considers per cycle
     private static final int MAX_TARGETS_PER_AI = 6;
+
+    // Stagger schedule: each AI gets its own next-due tick.
+    private static final java.util.HashMap<UUID, Long> NEXT_DUE = new java.util.HashMap<>();
+
+    // Prevent news bursts: max number of AI->AI actions per server tick.
+    private static final int BUDGET_PER_TICK = 4;
+
+    // Jitter around the interval; set to 0.0 for exact spacing after initial stagger.
+    private static final double JITTER_FRAC = 0.25;
+
+    private static long initialJitter(net.minecraft.util.RandomSource r) {
+        return r.nextInt(Math.max(1, INTERVAL_TICKS));
+    }
+
+    private static long nextDelay(net.minecraft.util.RandomSource r) {
+        int jitter = (int) (INTERVAL_TICKS * JITTER_FRAC);
+        int delta = INTERVAL_TICKS + (jitter == 0 ? 0 : (r.nextInt(jitter * 2 + 1) - jitter));
+        return Math.max(20, delta); // at least 1s
+    }
+
+
 
     public static void init() {
         ServerTickEvents.END_SERVER_TICK.register(AiDiplomacyTicker::tick);
@@ -45,17 +66,15 @@ public final class AiDiplomacyTicker {
     }
 
     private static void tick(MinecraftServer server) {
-        if (server.getTickCount() % INTERVAL_TICKS != 0) return;
-
         var ks = kingdomState.get(server);
         var aiState = aiKingdomState.get(server);
         var warState = WarState.get(server);
         var alliance = AllianceState.get(server);
         var news = KingdomNewsState.get(server.overworld());
-
         var aiRel = AiRelationsState.get(server);
 
         var rng = server.overworld().getRandom();
+        long now = server.getTickCount();
 
         // Collect AI kingdom ids from kingdom list (no aiState.getAll() needed)
         List<UUID> aiIds = new ArrayList<>();
@@ -65,11 +84,29 @@ public final class AiDiplomacyTicker {
                 aiIds.add(k.id);
             }
         }
-
         if (aiIds.size() < 2) return;
 
-        // For each AI sender
+        // Soft prune: remove schedules for AIs that no longer exist
+        // (cheap cleanup)
+        NEXT_DUE.keySet().removeIf(id -> aiState.getById(id) == null);
+
+        int budget = BUDGET_PER_TICK;
+
+        // For each AI sender (staggered)
         for (UUID fromId : aiIds) {
+
+            long due = NEXT_DUE.getOrDefault(fromId, -1L);
+            if (due < 0) {
+                // first time seeing this AI: stagger across full interval
+                due = now + initialJitter(rng);
+                NEXT_DUE.put(fromId, due);
+            }
+
+            // not time yet
+            if (now < due) continue;
+
+            // schedule next run immediately so we don't double-run
+            NEXT_DUE.put(fromId, now + nextDelay(rng));
 
             // Build target list excluding self
             ArrayList<UUID> targets = new ArrayList<>(aiIds.size() - 1);
@@ -78,20 +115,22 @@ public final class AiDiplomacyTicker {
             }
 
             // Shuffle targets deterministically-ish for variety but stable per tick
-            Collections.shuffle(targets, new Random(server.getTickCount() ^ fromId.hashCode()));
+            Collections.shuffle(targets, new Random(now ^ fromId.hashCode()));
 
             int limit = Math.min(MAX_TARGETS_PER_AI, targets.size());
+
+            boolean didSomething = false;
 
             for (int i = 0; i < limit; i++) {
                 UUID toId = targets.get(i);
 
-                // Pick a kind to attempt (keep it simple at first; tune weights later)
+                // Pick a kind to attempt
                 Letter.Kind kind = pickKind(rng);
 
                 // POLICY ENFORCEMENT (AI→AI)
                 var decision = DiplomacyAiSendRules.canSend(server, fromId, toId, kind);
                 if (!decision.allowed()) {
-                    continue; // skip illegal actions
+                    continue;
                 }
 
                 var fromAi = aiState.getById(fromId);
@@ -193,10 +232,7 @@ public final class AiDiplomacyTicker {
                 String fromName = nameOf(ks, aiState, fromId);
                 String toName   = nameOf(ks, aiState, toId);
 
-                // --------------------
-                // Apply AI↔AI relation delta for normal kinds
-                // Skip special kinds handled below
-                // --------------------
+                // Apply relation delta for normal kinds (skip specials)
                 if (kind != Letter.Kind.ALLIANCE_PROPOSAL
                         && kind != Letter.Kind.WAR_DECLARATION
                         && kind != Letter.Kind.ULTIMATUM
@@ -208,17 +244,14 @@ public final class AiDiplomacyTicker {
                 // Special kinds with fixed effects
                 // --------------------
 
-                // WAR_DECLARATION: always declares war + fixed hostility
                 if (kind == Letter.Kind.WAR_DECLARATION) {
                     warState.declareWar(server, fromId, toId);
                     aiRel.add(fromId, toId, -80);
                     addLocalNews(server, news, fromK,
                             "[WAR] " + fromName + " declared war on " + toName + ".");
-                    continue;
+                    didSomething = true;
                 }
-
-                // ALLIANCE_PROPOSAL: fixed accept/refuse bumps (+30 / -10)
-                if (kind == Letter.Kind.ALLIANCE_PROPOSAL) {
+                else if (kind == Letter.Kind.ALLIANCE_PROPOSAL) {
                     if (accepted) {
                         if (!alliance.canAlly(fromId, toId)) {
                             accepted = false;
@@ -233,34 +266,27 @@ public final class AiDiplomacyTicker {
                                 "[ALLIANCE] " + fromName + " formed an alliance with " + toName + ".");
                     } else {
                         aiRel.add(fromId, toId, -10);
-                        // log refusals sometimes to reduce spam
                         if (rng.nextFloat() < 0.25f) {
                             addLocalNews(server, news, (toK != null ? toK : fromK),
                                     "[DIPLOMACY] " + toName + " refused an alliance with " + fromName + ".");
                         }
                     }
-                    continue;
+                    didSomething = true;
                 }
-
-                // ALLIANCE_BREAK: break immediately; small relation hit
-                if (kind == Letter.Kind.ALLIANCE_BREAK) {
+                else if (kind == Letter.Kind.ALLIANCE_BREAK) {
                     alliance.breakAlliance(fromId, toId);
                     aiRel.add(fromId, toId, -10);
                     addLocalNews(server, news, fromK,
                             "[ALLIANCE] " + fromName + " broke alliance with " + toName + ".");
-                    continue;
+                    didSomething = true;
                 }
-
-                // PEACE: make peace (policy ensures at war)
-                if (kind == Letter.Kind.WHITE_PEACE || kind == Letter.Kind.SURRENDER) {
+                else if (kind == Letter.Kind.WHITE_PEACE || kind == Letter.Kind.SURRENDER) {
                     warState.makePeace(fromId, toId);
                     addLocalNews(server, news, fromK,
                             "[PEACE] " + fromName + " made peace with " + toName + ".");
-                    continue;
+                    didSomething = true;
                 }
-
-                // ULTIMATUM: accept => transfer; refuse => war; both => fixed -80
-                if (kind == Letter.Kind.ULTIMATUM) {
+                else if (kind == Letter.Kind.ULTIMATUM) {
                     if (accepted && canExecuteIfAccepted) {
                         add(toAi, aType, -aAmt);
                         add(fromAi, aType, +aAmt);
@@ -274,67 +300,73 @@ public final class AiDiplomacyTicker {
                                 "[WAR] " + fromName + " went to war with " + toName + " after an ultimatum.");
                     }
                     aiState.setDirty();
-                    continue;
+                    didSomething = true;
+                }
+                else {
+                    // Economic execution when accepted
+                    if (accepted && canExecuteIfAccepted) {
+                        switch (kind) {
+                            case REQUEST -> {
+                                add(toAi, aType, -aAmt);
+                                add(fromAi, aType, +aAmt);
+                                aiRel.add(fromId, toId, +3);
+                                addLocalNews(server, news, (toK != null ? toK : fromK),
+                                        "[TRADE] " + toName + " fulfilled a request from " + fromName + " (" + fmt(aAmt) + " " + aType + ").");
+                                didSomething = true;
+                            }
+                            case OFFER -> {
+                                add(fromAi, aType, -aAmt);
+                                add(toAi, aType, +aAmt);
+                                aiRel.add(fromId, toId, +3);
+                                addLocalNews(server, news, fromK,
+                                        "[TRADE] " + fromName + " sent an offer to " + toName + " (" + fmt(aAmt) + " " + aType + ").");
+                                didSomething = true;
+                            }
+                            case CONTRACT -> {
+                                add(toAi, aType, -aAmt);
+                                add(fromAi, aType, +aAmt);
+                                if (bType != null) {
+                                    add(fromAi, bType, -bAmt);
+                                    add(toAi, bType, +bAmt);
+                                }
+                                aiRel.add(fromId, toId, +3);
+                                addLocalNews(server, news, fromK,
+                                        "[TRADE] " + fromName + " and " + toName + " signed a contract: "
+                                                + fmt(bAmt) + " " + bType + " → " + fmt(aAmt) + " " + aType
+                                                + " (cap " + fmt(maxAmt) + ").");
+                                didSomething = true;
+                            }
+                            default -> {
+                                // for compliment/insult/warning: log rarely
+                                if (kind == Letter.Kind.COMPLIMENT && rng.nextFloat() < 0.15f) {
+                                    addLocalNews(server, news, fromK,
+                                            "[DIPLOMACY] " + fromName + " praised " + toName + ".");
+                                    didSomething = true;
+                                } else if (kind == Letter.Kind.INSULT && rng.nextFloat() < 0.15f) {
+                                    addLocalNews(server, news, fromK,
+                                            "[DIPLOMACY] " + fromName + " insulted " + toName + ".");
+                                    didSomething = true;
+                                } else if (kind == Letter.Kind.WARNING && rng.nextFloat() < 0.10f) {
+                                    addLocalNews(server, news, fromK,
+                                            "[DIPLOMACY] " + fromName + " warned " + toName + ".");
+                                    didSomething = true;
+                                }
+                            }
+                        }
+                        if (didSomething) aiState.setDirty();
+                    }
                 }
 
-                // --------------------
-                // Economic execution when accepted
-                // --------------------
-                if (accepted && canExecuteIfAccepted) {
-                    switch (kind) {
-                        case REQUEST -> {
-                            // recipient gives A to sender
-                            add(toAi, aType, -aAmt);
-                            add(fromAi, aType, +aAmt);
-                            aiRel.add(fromId, toId, +3);
-                            addLocalNews(server, news, (toK != null ? toK : fromK),
-                                    "[TRADE] " + toName + " fulfilled a request from " + fromName + " (" + fmt(aAmt) + " " + aType + ").");
-                        }
-                        case OFFER -> {
-                            // sender gives A to recipient
-                            add(fromAi, aType, -aAmt);
-                            add(toAi, aType, +aAmt);
-                            aiRel.add(fromId, toId, +3);
-                            addLocalNews(server, news, fromK,
-                                    "[TRADE] " + fromName + " sent an offer to " + toName + " (" + fmt(aAmt) + " " + aType + ").");
-                        }
-                        case CONTRACT -> {
-                            // recipient gives A to sender
-                            add(toAi, aType, -aAmt);
-                            add(fromAi, aType, +aAmt);
-
-                            // sender gives B to recipient
-                            if (bType != null) {
-                                add(fromAi, bType, -bAmt);
-                                add(toAi, bType, +bAmt);
-                            }
-
-                            aiRel.add(fromId, toId, +3);
-                            addLocalNews(server, news, fromK,
-                                    "[TRADE] " + fromName + " and " + toName + " signed a contract: "
-                                            + fmt(bAmt) + " " + bType + " → " + fmt(aAmt) + " " + aType
-                                            + " (cap " + fmt(maxAmt) + ").");
-                        }
-                        default -> {
-                            // For non-economic diplomacy kinds (compliment/insult/warning), log rarely to reduce spam.
-                            if (kind == Letter.Kind.COMPLIMENT && rng.nextFloat() < 0.15f) {
-                                addLocalNews(server, news, fromK,
-                                        "[DIPLOMACY] " + fromName + " praised " + toName + ".");
-                            } else if (kind == Letter.Kind.INSULT && rng.nextFloat() < 0.15f) {
-                                addLocalNews(server, news, fromK,
-                                        "[DIPLOMACY] " + fromName + " insulted " + toName + ".");
-                            } else if (kind == Letter.Kind.WARNING && rng.nextFloat() < 0.10f) {
-                                addLocalNews(server, news, fromK,
-                                        "[DIPLOMACY] " + fromName + " warned " + toName + ".");
-                            }
-                        }
-                    }
-
-                    aiState.setDirty();
+                if (didSomething) {
+                    // limit bursts
+                    if (--budget <= 0) return;
+                    // only one successful action per AI per due tick
+                    break;
                 }
             }
         }
     }
+
 
     // Weighted kind picker (keep it simple; policy will reject illegal ones anyway)
     private static Letter.Kind pickKind(net.minecraft.util.RandomSource rng) {

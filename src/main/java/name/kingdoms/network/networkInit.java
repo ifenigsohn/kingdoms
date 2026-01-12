@@ -46,6 +46,7 @@ import name.kingdoms.payload.mailPolicySyncS2CPayload;
 import name.kingdoms.treasuryShop;
 import name.kingdoms.payload.mailRecipientsRequestC2SPayload;
 import name.kingdoms.payload.mailRecipientsSyncS2CPayload;
+import name.kingdoms.diplomacy.AiLetterText;
 import name.kingdoms.diplomacy.DiplomacyMailboxState;
 import name.kingdoms.diplomacy.DiplomacyResponseQueue;
 import name.kingdoms.diplomacy.EconomyMutator;
@@ -60,6 +61,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
 import name.kingdoms.payload.mailSendC2SPayload;
@@ -788,6 +790,8 @@ public final class networkInit {
                 // NEW: ACKNOWLEDGE = always delete letter, no effects.
                 // Works even if status != PENDING.
                 // ----------------------------------------------------
+
+                
                 if (payload.action() == mailActionC2SPayload.Action.ACKNOWLEDGE) {
                     mailbox.removeLetter(player.getUUID(), letter.id());
                     ServerPlayNetworking.send(player, new mailInboxSyncPayload(mailbox.getInbox(player.getUUID())));
@@ -798,6 +802,27 @@ public final class networkInit {
                 if (letter.status() != Letter.Status.PENDING) return;
 
                 boolean expired = letter.isExpired(now);
+
+                // ------------------------------
+                // Outcome-letter context (AI reply)
+                // ------------------------------
+                UUID otherK = letter.fromKingdomId();
+                boolean fromAi = letter.fromIsAi();
+
+                aiKingdomState aiStateForOutcome = aiKingdomState.get(ctx.server());
+                aiKingdomState.AiKingdom aiFrom = fromAi ? aiStateForOutcome.getById(otherK) : null;
+
+                String aiName = (letter.fromName() != null && !letter.fromName().isBlank())
+                        ? letter.fromName()
+                        : "Unknown Kingdom";
+
+                String toName = (playerK.name != null && !playerK.name.isBlank())
+                        ? playerK.name
+                        : "your kingdom";
+
+                var relStateForOutcome = name.kingdoms.diplomacy.DiplomacyRelationsState.get(ctx.server());
+                int relForOutcome = fromAi ? relStateForOutcome.getRelation(player.getUUID(), otherK) : 0;
+
 
                 // ----------------------------------------------------
                 // Non-economic kinds (can be accept/refuse, but we REMOVE after click)
@@ -818,7 +843,6 @@ public final class networkInit {
                     var warState = name.kingdoms.war.WarState.get(ctx.server());
                     var alliance = name.kingdoms.diplomacy.AllianceState.get(ctx.server());
 
-                    UUID otherK = letter.fromKingdomId();
                     boolean accept = (payload.action() == mailActionC2SPayload.Action.ACCEPT);
                     var server = ctx.server();
                     // expired ultimatum behaves like refuse
@@ -961,8 +985,7 @@ public final class networkInit {
 
                         case ULTIMATUM -> {
                             aiKingdomState aiState = aiKingdomState.get(ctx.server());
-                            aiKingdomState.AiKingdom aiFrom = aiState.getById(otherK);
-
+                 
                             if (accept) {
                                 if (aiFrom == null) accept = false;
 
@@ -1055,6 +1078,33 @@ public final class networkInit {
                         default -> { }
                     }
 
+                    // Add AI acknowledgement letter (player acceptance/refusal noted) after resolving a non-economic action
+                    if (fromAi && payload.action() != mailActionC2SPayload.Action.ACKNOWLEDGE) {
+                        boolean acceptedOutcome = (payload.action() == mailActionC2SPayload.Action.ACCEPT);
+
+                        // expired ultimatum/peace/surrender behave like refuse
+                        if ((letter.kind() == Letter.Kind.ULTIMATUM
+                                || letter.kind() == Letter.Kind.WHITE_PEACE
+                                || letter.kind() == Letter.Kind.SURRENDER) && expired) {
+                            acceptedOutcome = false;
+                        }
+
+                        addAiAckLetter(
+                                ctx.server(),
+                                player,
+                                mailbox,
+                                aiFrom,
+                                otherK,
+                                aiName,
+                                toName,
+                                relForOutcome,
+                                letter,
+                                acceptedOutcome,
+                                true
+                        );
+                    }
+
+
                     mailbox.setDirty();
                     ServerPlayNetworking.send(player, new mailInboxSyncPayload(mailbox.getInbox(player.getUUID())));
                     return;
@@ -1076,6 +1126,24 @@ public final class networkInit {
                 if (payload.action() == mailActionC2SPayload.Action.REFUSE) {
                     mailbox.removeLetter(player.getUUID(), letter.id());
                     mailbox.setDirty();
+
+                                    if (fromAi) {
+                    addAiAckLetter(
+                            ctx.server(),
+                            player,
+                            mailbox,
+                            aiFrom,
+                            otherK,
+                            aiName,
+                            toName,
+                            relForOutcome,
+                            letter,
+                            false,
+                            true
+                    );
+                }
+
+
                     ServerPlayNetworking.send(player, new mailInboxSyncPayload(mailbox.getInbox(player.getUUID())));
                     return;
                 }
@@ -1085,7 +1153,6 @@ public final class networkInit {
 
                 if (letter.fromIsAi()) {
                     aiKingdomState aiState = aiKingdomState.get(ctx.server());
-                    aiKingdomState.AiKingdom aiFrom = aiState.getById(letter.fromKingdomId());
                     if (aiFrom == null) ok = false;
                     else {
                         ok = applyAcceptAi(playerK, aiFrom, letter);
@@ -1100,6 +1167,25 @@ public final class networkInit {
                 // Remove the letter no matter what; outcome can be communicated via a new response letter if you want
                 mailbox.removeLetter(player.getUUID(), letter.id());
                 mailbox.setDirty();
+
+
+                if (fromAi) {
+                    addAiAckLetter(
+                        ctx.server(),
+                        player,
+                        mailbox,
+                        aiFrom,
+                        otherK,
+                        aiName,
+                        toName,
+                        relForOutcome,
+                        letter,
+                        true,
+                        ok// player clicked ACCEPT
+                    );
+
+                }
+
 
                 ServerPlayNetworking.send(player, new mailInboxSyncPayload(mailbox.getInbox(player.getUUID())));
                 ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(playerK));
@@ -1128,6 +1214,8 @@ public final class networkInit {
                 ));
             });
         });
+
+        
 
         // --- Keepalive freeze while diplomacy screen open ---
         ServerPlayNetworking.registerGlobalReceiver(diplomacyFreezeC2SPayload.TYPE, (payload, ctx) -> {
@@ -1460,6 +1548,68 @@ public final class networkInit {
     // -------------------------
     // Helpers
     // -------------------------
+
+    private static void addAiAckLetter(
+            MinecraftServer server,
+            ServerPlayer player,
+            DiplomacyMailboxState mailbox,
+            aiKingdomState.AiKingdom aiFrom,
+            UUID aiKingdomId,
+            String aiName,
+            String playerKingdomName,
+            int rel,
+            Letter original,
+            boolean playerAccepted,
+            boolean executedOk
+    ){
+        ServerLevel level = server.overworld();
+        if (level == null) return;
+
+        RandomSource r = level.getRandom();
+        long now = server.getTickCount();
+
+        // Use ACK wording (not “AI accepted/refused”)
+        String note = AiLetterText.generateAck(
+            r,
+            original.kind(),
+            playerAccepted,
+            executedOk,
+            aiName,
+            playerKingdomName,
+            rel,
+            (aiFrom == null ? null : aiFrom.personality),
+            original.aType(), original.aAmount(),
+            original.bType(), original.bAmount(),
+            original.maxAmount(),
+            original.cb()
+    );
+
+
+        // Status should NOT mirror player action.
+        // Make it resolved so it won't show action buttons.
+        Letter reply = new Letter(
+                UUID.randomUUID(),
+                aiKingdomId,
+                player.getUUID(),
+                true,
+                aiName,
+                original.kind(),
+                Letter.Status.ACCEPTED, // ALWAYS resolved/acknowledged
+                now,
+                0L,
+                original.aType(),
+                original.aAmount(),
+                original.bType(),
+                original.bAmount(),
+                original.maxAmount(),
+                original.cb(),
+                note
+        );
+
+        mailbox.addLetter(player.getUUID(), reply);
+        mailbox.setDirty();
+    }
+
 
     private static boolean applyAccept(kingdomState kState, kingdomState.Kingdom playerK, kingdomState.Kingdom fromK, Letter letter) {
         return switch (letter.kind()) {

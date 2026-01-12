@@ -52,7 +52,7 @@ public final class CastleOriginState extends SavedData {
      * This is what gets used when the data doesn't exist yet.
      */
     public CastleOriginState(SavedData.Context ctx) {
-        // empty
+        
     }
 
     /**

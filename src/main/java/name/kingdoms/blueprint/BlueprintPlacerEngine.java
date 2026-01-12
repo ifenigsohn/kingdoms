@@ -537,68 +537,168 @@ public final class BlueprintPlacerEngine {
         private static boolean warned = false;
 
         private static void lookup(ServerLevel level) {
-            if (lookedUp) return;
-            lookedUp = true;
+    if (lookedUp) return;
+    lookedUp = true;
 
-            Object cs = level.getChunkSource();
-            Class<?> cls = cs.getClass();
+    Object cs = level.getChunkSource();
+    Class<?> cls = cs.getClass();
 
-            // Search both public + declared
-            List<Method> methods = new ArrayList<>();
-            methods.addAll(Arrays.asList(cls.getMethods()));
-            methods.addAll(Arrays.asList(cls.getDeclaredMethods()));
+    List<Method> candidates = new ArrayList<>();
+    for (Method m : cls.getMethods()) candidates.add(m);
+    for (Method m : cls.getDeclaredMethods()) candidates.add(m);
 
-            for (Method m : methods) {
+    // 1) Find all signature-matching candidates
+    List<Method> ticketMethods = new ArrayList<>();
+    for (Method m : candidates) {
+        Class<?>[] p = m.getParameterTypes();
+        if (m.getReturnType() != void.class) continue;
+        if (p.length != 3 && p.length != 4) continue;
 
-                Class<?>[] p = m.getParameterTypes();
-
-                // Signature-only matching (works in dev + obfuscated jar)
-                if (m.getReturnType() != void.class) continue;
-                if (p.length != 3 && p.length != 4) continue;
-
-                // Must contain TicketType, ChunkPos, int; optional long id
-                boolean hasTicketType = false;
-                boolean hasChunkPos = false;
-                boolean hasInt = false;
-                boolean hasLong = false;
-
-                for (Class<?> c : p) {
-                    if (c == TicketType.class) hasTicketType = true;
-                    else if (c == ChunkPos.class) hasChunkPos = true;
-                    else if (c == int.class || c == Integer.class) hasInt = true;
-                    else if (c == long.class || c == Long.class) hasLong = true;
-                }
-
-                if (!hasTicketType || !hasChunkPos || !hasInt) continue;
-                if (p.length == 4 && !hasLong) continue;
-
-                m.setAccessible(true);
-
-                // Pick first two distinct candidates as ADD/REMOVE
-                if (ADD == null) ADD = m;
-                else if (REMOVE == null && m != ADD) REMOVE = m;
-
-            }
-
-            if ((ADD == null || REMOVE == null) && !warned) {
-                warned = true;
-                LOGGER.warn("[Kingdoms] Could not find ticket methods on {} (ADD={}, REMOVE={})",
-                        cls.getName(), (ADD != null), (REMOVE != null));
-
-                // TEMP: dump all candidate ticket methods
-                for (Method m : methods) {
-                    String nl = m.getName().toLowerCase(Locale.ROOT);
-                    if (nl.contains("ticket")) {
-                        LOGGER.warn("[Kingdoms]  ticketMethod={} params={}",
-                                m.getName(), Arrays.toString(m.getParameterTypes()));
-                    }
-                }
-            } else if (!warned) {
-                LOGGER.info("[Kingdoms] Ticket methods resolved on {} (ADD={}, REMOVE={})",
-                        cls.getName(), ADD.getName(), REMOVE.getName());
-            }
-
+        boolean hasTicketType = false, hasChunkPos = false, hasInt = false, hasLong = false;
+        for (Class<?> c : p) {
+            if (c == TicketType.class) hasTicketType = true;
+            else if (c == ChunkPos.class) hasChunkPos = true;
+            else if (c == int.class || c == Integer.class) hasInt = true;
+            else if (c == long.class || c == Long.class) hasLong = true;
         }
+        if (!hasTicketType || !hasChunkPos || !hasInt) continue;
+        if (p.length == 4 && !hasLong) continue;
+
+        m.setAccessible(true);
+        ticketMethods.add(m);
+    }
+
+    if (ticketMethods.size() < 2) {
+        if (!warned) {
+            warned = true;
+            LOGGER.warn("[Kingdoms] Could not find ticket methods on {} (found {})",
+                    cls.getName(), ticketMethods.size());
+        }
+        return;
+    }
+
+    // 2) Prefer known names in dev
+    Method byNameAdd = null, byNameRemove = null;
+    for (Method m : ticketMethods) {
+        String n = m.getName().toLowerCase(Locale.ROOT);
+        if (n.contains("addticket") || n.contains("add_ticket") || n.contains("add")) {
+            // don't auto-pick "add" alone unless we also see "ticket"
+            if (n.contains("ticket")) byNameAdd = m;
+        }
+        if (n.contains("removeticket") || n.contains("remove_ticket") || n.contains("remove")) {
+            if (n.contains("ticket")) byNameRemove = m;
+        }
+
+        // exact matches if present
+        if (m.getName().equals("addTicketWithRadius") || m.getName().equals("addRegionTicket")) byNameAdd = m;
+        if (m.getName().equals("removeTicketWithRadius") || m.getName().equals("removeRegionTicket")) byNameRemove = m;
+    }
+
+    if (byNameAdd != null && byNameRemove != null && byNameAdd != byNameRemove) {
+        ADD = byNameAdd;
+        REMOVE = byNameRemove;
+        LOGGER.info("[Kingdoms] Ticket methods resolved on {} (ADD={}, REMOVE={})",
+                cls.getName(), ADD.getName(), REMOVE.getName());
+        return;
+    }
+
+    // 3) Names not reliable => PROBE deterministically
+    // Pick the first two distinct methods (stable sort by descriptor string)
+    ticketMethods.sort(Comparator.comparing(BlueprintPlacerEngine.ChunkForcer::methodSigStable));
+
+    Method m0 = ticketMethods.get(0);
+    Method m1 = ticketMethods.get(1);
+
+    // Probe: try to "force" a faraway chunk that isn't already loaded.
+    // If invoking method causes it to become present soon => that method is ADD.
+    Method add = probeWhichIsAdd(level, cs, m0, m1);
+    if (add == null) {
+        // fallback: keep a stable assignment but warn (won't flip randomly anymore)
+        ADD = m0;
+        REMOVE = m1;
+        if (!warned) {
+            warned = true;
+            LOGGER.warn("[Kingdoms] Ticket methods ambiguous on {}. Using stable order ADD={}, REMOVE={}",
+                    cls.getName(), ADD.getName(), REMOVE.getName());
+        }
+    } else {
+        ADD = add;
+        REMOVE = (add == m0) ? m1 : m0;
+        LOGGER.info("[Kingdoms] Ticket methods resolved (probe) on {} (ADD={}, REMOVE={})",
+                cls.getName(), ADD.getName(), REMOVE.getName());
+    }
+}
+
+private static String methodSigStable(Method m) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(m.getParameterCount()).append(":");
+    for (Class<?> p : m.getParameterTypes()) sb.append(p.getName()).append(",");
+    return sb.toString();
+}
+
+
+private static Method probeWhichIsAdd(ServerLevel level, Object cs, Method m0, Method m1) {
+    try {
+        // choose a chunk far from spawn/player; unlikely loaded
+        int cx = 200;
+        int cz = 200;
+
+        // if by chance it's loaded, nudge
+        if (level.getChunkSource().getChunkNow(cx, cz) != null) {
+            cx += 50; cz += 50;
+        }
+
+        ChunkPos pos = new ChunkPos(cx, cz);
+        TicketType type = TicketType.FORCED;
+        int ticketLevel = 2;
+        long id = 0x4B1D_4B1DL; // constant probe id
+
+        // clear both ways first (in case previous run left something)
+        safeInvoke(level, cs, m0, type, pos, ticketLevel, id);
+        safeInvoke(level, cs, m1, type, pos, ticketLevel, id);
+
+        // test m0
+        safeInvoke(level, cs, m0, type, pos, ticketLevel, id);
+        boolean loadedAfterM0 = waitBrieflyForChunk(level, cx, cz);
+
+        // cleanup
+        safeInvoke(level, cs, m0, type, pos, ticketLevel, id);
+        safeInvoke(level, cs, m1, type, pos, ticketLevel, id);
+
+        // If it loaded, m0 is add
+        if (loadedAfterM0) return m0;
+
+        // test m1
+        safeInvoke(level, cs, m1, type, pos, ticketLevel, id);
+        boolean loadedAfterM1 = waitBrieflyForChunk(level, cx, cz);
+
+        // cleanup
+        safeInvoke(level, cs, m0, type, pos, ticketLevel, id);
+        safeInvoke(level, cs, m1, type, pos, ticketLevel, id);
+
+        if (loadedAfterM1) return m1;
+
+        return null;
+    } catch (Throwable t) {
+        return null;
+    }
+}
+
+private static void safeInvoke(ServerLevel level, Object cs, Method m, TicketType type, ChunkPos pos, int lvl, long id) {
+    try {
+        Object[] args = buildArgs(m, type, pos, lvl, id);
+        m.invoke(cs, args);
+    } catch (Throwable ignored) {}
+}
+
+private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
+    // no sleeping on server thread; just check a few times
+    for (int i = 0; i < 20; i++) {
+        if (level.getChunkSource().getChunkNow(cx, cz) != null) return true;
+    }
+    return false;
+}
+
 
         private static Object[] buildArgs(Method m, TicketType type, ChunkPos pos, int lvl, long id) {
             Class<?>[] p = m.getParameterTypes();

@@ -19,14 +19,33 @@ import java.util.UUID;
 public final class DiplomacyMailGenerator {
 
     // tune
-    private static final int PERIOD_TICKS = 20 * 60 * 2; // every 2 minutes
+    private static final int PERIOD_TICKS = 20 * 30 * 1; // every 30 seconds DEBUG FOR DEV
     private static final double CHANCE_PER_PERIOD = 0.30;
     private static final long EXPIRE_TICKS = 20L * 60L * 10L; // 10 min
 
     private static final double RANGE = 6000.0;
     private static final double RANGE_SQ = RANGE * RANGE;
 
-    private static int tickCounter = 0;
+    // Per (player, AI kingdom) schedule so letters are staggered.
+    // key = playerUUID + "|" + aiKingdomUUID
+    private static final java.util.HashMap<String, Long> NEXT_DUE_TICK = new java.util.HashMap<>();
+
+    private static String pairKey(UUID playerId, UUID aiKingdomId) {
+        return playerId.toString() + "|" + aiKingdomId.toString();
+    }
+
+    private static long initialJitter(RandomSource r) {
+        // Spread initial due times across the whole period
+        return r.nextInt(Math.max(1, PERIOD_TICKS));
+    }
+
+    private static long nextWithJitter(RandomSource r) {
+        // +/- 25% jitter around PERIOD_TICKS
+        int jitter = (int) (PERIOD_TICKS * 0.25);
+        int delta = PERIOD_TICKS + (jitter == 0 ? 0 : (r.nextInt(jitter * 2 + 1) - jitter));
+        return Math.max(20, delta); // never schedule less than 1s
+    }
+
 
     private DiplomacyMailGenerator() {}
 
@@ -62,6 +81,37 @@ public final class DiplomacyMailGenerator {
     private static double clamp01(double v) {
         return Math.max(0.0, Math.min(1.0, v));
     }
+
+    private static Letter.CasusBelli pickCbForAi(RandomSource r, int rel, Object personality) {
+        // Simple: bad relations -> likely "INSULT" or "BORDER", otherwise UNKNOWN.
+        // Personality can bias this a bit.
+        String p = (personality == null) ? "" : personality.toString().toLowerCase();
+
+        double borderBias = 0.20;
+        double insultBias = 0.20;
+        double treatyBias = 0.10;
+        double resourceBias = 0.10;
+        double unknownBias = 0.40;
+
+        if (rel < -50) { insultBias += 0.20; borderBias += 0.20; unknownBias -= 0.20; }
+        else if (rel < -15) { insultBias += 0.10; borderBias += 0.10; unknownBias -= 0.10; }
+
+        if (p.contains("honor") || p.contains("lawful")) treatyBias += 0.10;
+        if (p.contains("trader") || p.contains("merchant")) resourceBias += 0.10;
+        if (p.contains("aggressive") || p.contains("warlike")) { insultBias += 0.10; borderBias += 0.10; unknownBias -= 0.10; }
+
+        // normalize
+        double sum = Math.max(0.001, borderBias + insultBias + treatyBias + resourceBias + unknownBias);
+        borderBias /= sum; insultBias /= sum; treatyBias /= sum; resourceBias /= sum; unknownBias /= sum;
+
+        double x = r.nextDouble();
+        if ((x -= borderBias) < 0) return Letter.CasusBelli.BORDER_VIOLATION;
+        if ((x -= insultBias) < 0) return Letter.CasusBelli.INSULT;
+        if ((x -= treatyBias) < 0) return Letter.CasusBelli.BROKEN_TREATY;
+        if ((x -= resourceBias) < 0) return Letter.CasusBelli.RESOURCE_DISPUTE;
+        return Letter.CasusBelli.UNKNOWN;
+    }
+
 
     // ------------------------------------------
     // Need model (aligns with evaluator)
@@ -121,14 +171,13 @@ public final class DiplomacyMailGenerator {
     private static void onServerTick(MinecraftServer server) {
         aiKingdomState ai = aiKingdomState.get(server);
 
-        tickCounter++;
-        if (tickCounter < PERIOD_TICKS) return;
-        tickCounter = 0;
-
         ServerLevel level = server.getLevel(Level.OVERWORLD);
         if (level == null) return;
 
         RandomSource rand = level.getRandom();
+        long nowTick = server.getTickCount();
+
+        int budget = 6; // max letters generated per server tick across all players
 
         kingdomState ks = kingdomState.get(server);
         DiplomacyMailboxState mailbox = DiplomacyMailboxState.get(level);
@@ -155,8 +204,27 @@ public final class DiplomacyMailGenerator {
                 // only AI kingdoms can send letters
                 if (!ai.isAiKingdom(from.id)) continue;
 
-                // chance gate
+                // -------------------------
+                // STAGGER: per (player, AI) schedule
+                // -------------------------
+                String k = pairKey(player.getUUID(), from.id);
+                long due = NEXT_DUE_TICK.getOrDefault(k, -1L);
+
+                if (due < 0) {
+                    // first time seeing this pair: stagger initial due tick
+                    due = nowTick + initialJitter(rand);
+                    NEXT_DUE_TICK.put(k, due);
+                }
+
+                // not time yet
+                if (nowTick < due) continue;
+
+                // schedule next attempt immediately (so we don't retry same tick)
+                NEXT_DUE_TICK.put(k, nowTick + nextWithJitter(rand));
+
+                // chance gate (only when due)
                 if (rand.nextDouble() > CHANCE_PER_PERIOD) continue;
+
 
                 // need AI entry (for personality + stocks)
                 aiKingdomState.AiKingdom aiK = ai.getById(from.id);
@@ -183,18 +251,47 @@ public final class DiplomacyMailGenerator {
                         continue;
                     }
 
-                    Letter.Kind peaceKind = (rand.nextDouble() < 0.25) ? Letter.Kind.SURRENDER : Letter.Kind.WHITE_PEACE;
+                    double surrenderChance = 0.25;
+
+                    // If AI is losing badly, surrender more often
+                    double aiFrac = (aiK.maxSoldiers <= 0) ? 1.0 : (aiK.aliveSoldiers / (double) aiK.maxSoldiers);
+                    if (aiFrac < 0.35) surrenderChance += 0.25;
+                    else if (aiFrac < 0.55) surrenderChance += 0.10;
+
+                    // Personality bias
+                    String p = (aiK.personality == null) ? "" : aiK.personality.toString().toLowerCase();
+                    if (p.contains("aggressive") || p.contains("warlike")) surrenderChance -= 0.10;
+                    if (p.contains("pragmatic") || p.contains("trader")) surrenderChance += 0.05;
+
+                    surrenderChance = Math.max(0.05, Math.min(0.80, surrenderChance));
+
+                    Letter.Kind peaceKind = (rand.nextDouble() < surrenderChance) ? Letter.Kind.SURRENDER : Letter.Kind.WHITE_PEACE;
+
 
                     String fromName = (from.name != null && !from.name.isBlank()) ? from.name : "Unknown Kingdom";
-                    long nowTick = server.getTickCount();
                     long expires = nowTick + EXPIRE_TICKS;
 
+                    String toName = (playerKingdom.name != null && !playerKingdom.name.isBlank())
+                            ? playerKingdom.name
+                            : "your kingdom";
+
+                    String note = AiLetterText.generate(
+                            rand,
+                            peaceKind,
+                            fromName,
+                            toName,
+                            rel,
+                            aiK.personality,
+                            null
+                    );
+
                     Letter peaceLetter = (peaceKind == Letter.Kind.SURRENDER)
-                            ? Letter.surrender(from.id, true, fromName, player.getUUID(), nowTick, expires, "We offer terms.")
-                            : Letter.whitePeace(from.id, true, fromName, player.getUUID(), nowTick, expires, "Let us end this war.");
+                            ? Letter.surrender(from.id, true, fromName, player.getUUID(), nowTick, expires, note)
+                            : Letter.whitePeace(from.id, true, fromName, player.getUUID(), nowTick, expires, note);
 
                     mailbox.addLetter(player.getUUID(), peaceLetter);
                     serverMail.syncInbox(player, mailbox.getInbox(player.getUUID()));
+                    if (--budget <= 0) return;
                     continue; // do not send normal diplomacy letters while at war
                 }
 
@@ -219,13 +316,17 @@ public final class DiplomacyMailGenerator {
                 
 
                 String fromName = (from.name != null && !from.name.isBlank()) ? from.name : "Unknown Kingdom";
-                long nowTick = server.getTickCount();
+                String toName = (playerKingdom.name != null && !playerKingdom.name.isBlank())
+                ? playerKingdom.name
+                : "your kingdom";
 
-                Letter letter = buildOutgoingLetter(rand, kind, aiK, from.id, fromName, player.getUUID(), nowTick);
+
+                Letter letter = buildOutgoingLetter(rand, kind, aiK, from.id, fromName, player.getUUID(), nowTick, rel, toName);
                 if (letter == null) continue;
 
                 mailbox.addLetter(player.getUUID(), letter);
                 serverMail.syncInbox(player, mailbox.getInbox(player.getUUID()));
+                if (--budget <= 0) return;
             }
         }
     }
@@ -234,14 +335,16 @@ public final class DiplomacyMailGenerator {
     // Letter building (policy-selected kind)
     // ------------------------------------------
     private static Letter buildOutgoingLetter(
-            RandomSource r,
-            Letter.Kind kind,
-            aiKingdomState.AiKingdom aiK,
-            UUID fromKingdomId,
-            String fromName,
-            UUID toPlayer,
-            long nowTick
-    ) {
+        RandomSource r,
+        Letter.Kind kind,
+        aiKingdomState.AiKingdom aiK,
+        UUID fromKingdomId,
+        String fromName,
+        UUID toPlayer,
+        long nowTick,
+        int rel,
+        String toName
+    ){
         long expires = nowTick + EXPIRE_TICKS;
 
         // pick "want" by highest NEED, and "give" by highest SURPLUS
@@ -274,56 +377,106 @@ public final class DiplomacyMailGenerator {
 
         return switch (kind) {
             case REQUEST -> {
-                // NOTE: in your current ResponseQueue, REQUEST means AI gives A to player if accepted.
-                yield Letter.request(fromKingdomId, true, fromName, toPlayer, give, giveAmt, nowTick, expires);
+                // AI gives A to player if accepted (your current semantics)
+               String note = AiLetterText.generateEconomic(
+                r, Letter.Kind.REQUEST, fromName, toName, rel, aiK.personality,
+                give, giveAmt, null, 0.0, 0.0
+        );
+        yield Letter.request(fromKingdomId, true, fromName, toPlayer, give, giveAmt, nowTick, expires, note);
+
             }
             case OFFER -> {
-                // In your current ResponseQueue, OFFER means player gives A to AI if accepted.
-                // So "offer" here is actually AI asking for something.
-                yield Letter.offer(fromKingdomId, true, fromName, toPlayer, want, wantAmt, nowTick, expires);
+                // Player gives A to AI if accepted (your current semantics)
+                String note = AiLetterText.generateEconomic(
+                        r, Letter.Kind.OFFER, fromName, toName, rel, aiK.personality,
+                        want, wantAmt, null, 0.0, 0.0
+                );
+                yield Letter.offer(fromKingdomId, true, fromName, toPlayer, want, wantAmt, nowTick, expires, note);
+
             }
             case CONTRACT -> {
-                // AI gives A, wants B (player gives B).
+                // AI gives A, wants B
+                double outWant = clamp(wantAmt, 1, 160);
+
+                String note = AiLetterText.generateEconomic(
+                        r, Letter.Kind.CONTRACT, fromName, toName, rel, aiK.personality,
+                        give, giveAmt, want, outWant, maxAmt
+                );
+
                 yield Letter.contract(fromKingdomId, true, fromName, toPlayer,
                         give, giveAmt,
-                        want, clamp(wantAmt, 1, 160),
+                        want, outWant,
                         maxAmt,
-                        nowTick, expires
+                        nowTick, expires,
+                        note
                 );
+
             }
-            case COMPLIMENT -> Letter.compliment(
-                    fromKingdomId, true, fromName, toPlayer,
-                    nowTick, expires,
-                    "Your kingdom shows promise."
-            );
-            case INSULT -> Letter.insult(
-                    fromKingdomId, true, fromName, toPlayer,
-                    nowTick, expires,
-                    "Your conduct is an embarrassment."
-            );
-            case WARNING -> Letter.warning(
-                    fromKingdomId, true, fromName, toPlayer,
-                    nowTick, expires,
-                    "Tread carefully."
-            );
+
+            case COMPLIMENT -> {
+                String note = AiLetterText.generate(r, Letter.Kind.COMPLIMENT, fromName, toName, rel, aiK.personality, null);
+                yield Letter.compliment(fromKingdomId, true, fromName, toPlayer, nowTick, expires, note);
+            }
+            case INSULT -> {
+                String note = AiLetterText.generate(r, Letter.Kind.INSULT, fromName, toName, rel, aiK.personality, null);
+                yield Letter.insult(fromKingdomId, true, fromName, toPlayer, nowTick, expires, note);
+            }
+            case WARNING -> {
+                String note = AiLetterText.generate(r, Letter.Kind.WARNING, fromName, toName, rel, aiK.personality, null);
+                yield Letter.warning(fromKingdomId, true, fromName, toPlayer, nowTick, expires, note);
+            }
+
             case ULTIMATUM -> {
-                // Ultimatum = demand. We demand the player pay "want".
+                String note = AiLetterText.generate(r, Letter.Kind.ULTIMATUM, fromName, toName, rel, aiK.personality, null);
                 yield Letter.ultimatum(
                         fromKingdomId, true, fromName, toPlayer,
                         want, clamp(wantAmt, 10, 160),
                         nowTick, expires,
-                        "Pay tribute or face consequences."
+                        note
                 );
             }
+
             case ALLIANCE_PROPOSAL -> {
-                yield Letter.allianceProposal(
-                        fromKingdomId, true, fromName, toPlayer,
-                        nowTick, expires,
-                        "We propose an alliance."
+                String note = AiLetterText.generate(r, Letter.Kind.ALLIANCE_PROPOSAL, fromName, toName, rel, aiK.personality, null);
+                yield Letter.allianceProposal(fromKingdomId, true, fromName, toPlayer, nowTick, expires, note);
+            }
+
+            case ALLIANCE_BREAK -> {
+                // You do NOT have a factory for alliance break; create a direct Letter with note
+                String note = AiLetterText.generate(r, Letter.Kind.ALLIANCE_BREAK, fromName, toName, rel, aiK.personality, null);
+                yield new Letter(
+                        UUID.randomUUID(), fromKingdomId, toPlayer,
+                        true, fromName,
+                        Letter.Kind.ALLIANCE_BREAK, Letter.Status.PENDING, nowTick, expires,
+                        ResourceType.GOLD, 0.0,
+                        null, 0.0,
+                        0.0,
+                        null,
+                        note
                 );
             }
+
+            case WHITE_PEACE -> {
+                String note = AiLetterText.generate(r, Letter.Kind.WHITE_PEACE, fromName, toName, rel, aiK.personality, null);
+                yield Letter.whitePeace(fromKingdomId, true, fromName, toPlayer, nowTick, expires, note);
+            }
+
+            case SURRENDER -> {
+                String note = AiLetterText.generate(r, Letter.Kind.SURRENDER, fromName, toName, rel, aiK.personality, null);
+                yield Letter.surrender(fromKingdomId, true, fromName, toPlayer, nowTick, expires, note);
+            }
+
+            case WAR_DECLARATION -> {
+                // choose a CB (simple relation-based pick; tune later)
+                Letter.CasusBelli cb = pickCbForAi(r, rel, aiK.personality);
+
+                String note = AiLetterText.generate(r, Letter.Kind.WAR_DECLARATION, fromName, toName, rel, aiK.personality, cb);
+                yield Letter.warDeclaration(fromKingdomId, true, fromName, toPlayer, cb, nowTick, expires, note);
+            }
+
             default -> null;
         };
+
     }
 
     // ------------------------------------------
@@ -363,7 +516,7 @@ public final class DiplomacyMailGenerator {
         RandomSource r = level.getRandom();
         long expires = nowTick + (20L * 60L * 10L);
 
-        // ✅ Use relations + personality policy here too
+        // Use relations + personality policy here too
         DiplomacyRelationsState relState = DiplomacyRelationsState.get(server);
         int rel = relState.getRelation(toPlayer, fromAiId);
 
@@ -395,11 +548,25 @@ public final class DiplomacyMailGenerator {
             String fromNameWar = (aiK.name != null && !aiK.name.isBlank()) ? aiK.name : "Unknown Kingdom";
             long expiresWar = nowTick + (20L * 60L * 10L);
 
-            // Same effect for now; pick one
-            if (r.nextDouble() < 0.25) {
-                return Letter.surrender(fromAiId, true, fromNameWar, toPlayer, nowTick, expiresWar, "We offer terms.");
+            String toName = (playerK != null && playerK.name != null && !playerK.name.isBlank())
+                    ? playerK.name
+                    : "your kingdom";
+
+            Letter.Kind peaceKind = (r.nextDouble() < 0.25) ? Letter.Kind.SURRENDER : Letter.Kind.WHITE_PEACE;
+            String note = AiLetterText.generate(
+                    r,
+                    peaceKind,
+                    fromNameWar,
+                    toName,
+                    rel,
+                    aiK.personality,
+                    null
+            );
+
+            if (peaceKind == Letter.Kind.SURRENDER) {
+                return Letter.surrender(fromAiId, true, fromNameWar, toPlayer, nowTick, expiresWar, note);
             }
-            return Letter.whitePeace(fromAiId, true, fromNameWar, toPlayer, nowTick, expiresWar, "Let us end this war.");
+            return Letter.whitePeace(fromAiId, true, fromNameWar, toPlayer, nowTick, expiresWar, note);
         }
 
 
@@ -410,8 +577,11 @@ public final class DiplomacyMailGenerator {
         if (kindOpt.isEmpty()) return null;
 
         String fromName = (aiK.name != null && !aiK.name.isBlank()) ? aiK.name : "Unknown Kingdom";
+        String toName = (playerK != null && playerK.name != null && !playerK.name.isBlank())
+        ? playerK.name
+        : "your kingdom";
 
-        Letter letter = buildOutgoingLetter(r, kindOpt.get(), aiK, fromAiId, fromName, toPlayer, nowTick);
+        Letter letter = buildOutgoingLetter(r, kindOpt.get(), aiK, fromAiId, fromName, toPlayer, nowTick, rel, toName);
         if (letter != null) return letter;
 
         return Letter.warning(fromAiId, true, fromName, toPlayer, nowTick, expires, "...");

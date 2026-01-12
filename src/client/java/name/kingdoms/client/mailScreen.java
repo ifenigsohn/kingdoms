@@ -102,6 +102,37 @@ public final class mailScreen extends Screen {
         ClientPlayNetworking.send(new mailRecipientsRequestC2SPayload());
     }
 
+    private int drawWrapped(GuiGraphics g, String text, int x, int y, int maxW, int color, int maxLines) {
+        if (text == null || text.isBlank()) return 0;
+
+        String[] words = text.split("\\s+");
+        StringBuilder line = new StringBuilder();
+        int lines = 0;
+
+        for (String w : words) {
+            String trial = line.isEmpty() ? w : (line + " " + w);
+            if (this.font.width(trial) <= maxW) {
+                line.setLength(0);
+                line.append(trial);
+            } else {
+                g.drawString(this.font, line.toString(), x, y, color);
+                y += 12;
+                lines++;
+                if (lines >= maxLines) return lines;
+                line.setLength(0);
+                line.append(w);
+            }
+        }
+
+        if (!line.isEmpty() && lines < maxLines) {
+            g.drawString(this.font, line.toString(), x, y, color);
+            lines++;
+        }
+
+        return lines;
+    }
+
+
     // -------------------------
     // Compose kinds
     // -------------------------
@@ -336,8 +367,15 @@ public final class mailScreen extends Screen {
     }
 
     private String labelAType() {
-        return "They give (A): " + composeAType.name();
+        return switch (composeKind) {
+            case OFFER -> "You give (A): " + composeAType.name();
+            case REQUEST -> "You request (A): " + composeAType.name();
+            case ULTIMATUM -> "They demand (A): " + composeAType.name();
+            case CONTRACT -> "They give (A): " + composeAType.name();
+            default -> "A: " + composeAType.name();
+        };
     }
+
 
     private String labelBType() {
         return "You pay (B): " + composeBType.name();
@@ -641,9 +679,12 @@ public final class mailScreen extends Screen {
             for (int i = 0; i < rowButtons.size(); i++) {
                 Button row = rowButtons.get(i);
                 int actual = inboxScroll + i;
-                if (actual < list.size()) row.setMessage(Component.literal(summarize(list.get(actual))));
-                else row.setMessage(Component.literal(""));
-            }
+                if (actual < list.size()) {
+                    Letter l = list.get(actual);
+                    row.setMessage(Component.literal(summarize(l)));
+                } else row.setMessage(Component.literal(""));
+
+                            }
         } else if (tab == Tab.COMPOSE) {
             List<mailRecipientsSyncS2CPayload.Entry> list = recipients();
             recipientScroll = clampScroll(recipientScroll, list.size());
@@ -870,13 +911,47 @@ public final class mailScreen extends Screen {
 
         switch (sel.kind()) {
             case REQUEST -> {
-                g.drawString(this.font, "They want:", dx, dy, 0xFFFFFFFF); dy += 12;
+                boolean fromAi = sel.fromIsAi();
+                boolean resolved = sel.status() != Letter.Status.PENDING;
+
+                String header;
+                if (!resolved) {
+                    header = fromAi ? "They request:" : "You request:";
+                } else if (sel.status() == Letter.Status.ACCEPTED) {
+                    header = fromAi ? "Accepted. You gave:" : "Accepted. They gave:";
+                } else if (sel.status() == Letter.Status.REFUSED) {
+                    header = fromAi ? "Refused. They requested:" : "Refused. You requested:";
+                } else { // EXPIRED
+                    header = fromAi ? "Expired. They requested:" : "Expired. You requested:";
+                }
+
+                g.drawString(this.font, header, dx, dy, 0xFFFFFFFF);
+                dy += 12;
+
                 g.drawString(this.font, fmt(sel.aAmount()) + " " + sel.aType(), dx, dy, 0xFFFFFFFF);
             }
+
             case OFFER -> {
-                g.drawString(this.font, "They offer:", dx, dy, 0xFFFFFFFF); dy += 12;
+                boolean fromAi = sel.fromIsAi();
+                boolean resolved = sel.status() != Letter.Status.PENDING;
+
+                String header;
+                if (!resolved) {
+                    header = fromAi ? "They offer:" : "You offer:";
+                } else if (sel.status() == Letter.Status.ACCEPTED) {
+                    header = fromAi ? "Accepted. They gave:" : "Accepted. You gave:";
+                } else if (sel.status() == Letter.Status.REFUSED) {
+                    header = fromAi ? "Refused. They offered:" : "Refused. You offered:";
+                } else { // EXPIRED
+                    header = fromAi ? "Expired. They offered:" : "Expired. You offered:";
+                }
+
+                g.drawString(this.font, header, dx, dy, 0xFFFFFFFF);
+                dy += 12;
+
                 g.drawString(this.font, fmt(sel.aAmount()) + " " + sel.aType(), dx, dy, 0xFFFFFFFF);
             }
+
             case CONTRACT -> {
                 g.drawString(this.font, "Contract:", dx, dy, 0xFFFFFFFF); dy += 12;
                 g.drawString(this.font, "You pay: " + fmt(sel.bAmount()) + " " + safeRes(sel.bType()), dx, dy, 0xFFFFFFFF); dy += 12;
@@ -886,24 +961,24 @@ public final class mailScreen extends Screen {
             case ULTIMATUM -> {
                 g.drawString(this.font, "They demand:", dx, dy, 0xFFFFFFFF); dy += 12;
                 g.drawString(this.font, fmt(sel.aAmount()) + " " + sel.aType(), dx, dy, 0xFFFFFFFF);
-                if (sel.note() != null && !sel.note().isBlank()) {
-                    dy += 12;
-                    g.drawString(this.font, sel.note(), dx, dy, 0xFFFFFFFF);
-                }
             }
             case WAR_DECLARATION -> {
                 g.drawString(this.font, "Casus Belli: " + (sel.cb() == null ? "UNKNOWN" : sel.cb().name()), dx, dy, 0xFFFFFFFF); dy += 12;
-                if (sel.note() != null && !sel.note().isBlank()) g.drawString(this.font, sel.note(), dx, dy, 0xFFFFFFFF);
             }
             default -> {
-                String n = (sel.note() == null || sel.note().isBlank()) ? "" : sel.note();
-                g.drawString(this.font, sel.kind().name(), dx, dy, 0xFFFFFFFF);
-                if (!n.isBlank()) {
-                    dy += 12;
-                    g.drawString(this.font, n, dx, dy, 0xFFFFFFFF);
-                }
             }
         }
+
+        // Always show body text if present (works for economic + non-economic)
+        String body = sel.note();
+        if (body != null && !body.isBlank()) {
+            int bx = detailsLeft + 10;
+            int by = dy + 10;// adjust if you want it higher/lower
+            int maxW = rightEdge - (detailsLeft + 20);
+            drawWrapped(g, body, bx, by, maxW, 0xFFDDDDDD, 6);
+        }
+
+
     }
 
     private void renderNewsDetails(GuiGraphics g) {
@@ -984,46 +1059,99 @@ public final class mailScreen extends Screen {
         return String.format(Locale.US, "%.2f", v);
     }
 
-    private static String summarize(Letter l) {
+   private static String summarize(Letter l) {
         if (l == null) return "";
 
+        boolean sentByPlayer = !l.fromIsAi();
+        boolean resolved = l.status() != Letter.Status.PENDING;
+
         String kindLabel = switch (l.kind()) {
-            case REQUEST -> "Request";
             case OFFER -> "Offer";
+            case REQUEST -> "Request";
             case CONTRACT -> "Contract";
-            case COMPLIMENT -> "Compliment";
-            case INSULT -> "Insult";
-            case WARNING -> "Warning";
             case ULTIMATUM -> "Ultimatum";
             case WAR_DECLARATION -> "War";
             case ALLIANCE_PROPOSAL -> "Alliance";
             case WHITE_PEACE -> "White Peace";
             case SURRENDER -> "Surrender";
             case ALLIANCE_BREAK -> "Alliance Break";
+            case COMPLIMENT -> "Compliment";
+            case INSULT -> "Insult";
+            case WARNING -> "Warning";
             default -> l.kind().name();
         };
+
+        // OFFER: perspective + tense aware
+        if (l.kind() == Letter.Kind.OFFER) {
+            String prefix;
+            if (!resolved) {
+                prefix = sentByPlayer ? "You offer " : "They offer ";
+            } else if (l.status() == Letter.Status.ACCEPTED) {
+                prefix = sentByPlayer ? "Accepted. You gave " : "Accepted. They gave ";
+            } else if (l.status() == Letter.Status.REFUSED) {
+                prefix = sentByPlayer ? "Refused. You offered " : "Refused. They offered ";
+            } else { // EXPIRED
+                prefix = sentByPlayer ? "Expired. You offered " : "Expired. They offered ";
+            }
+
+            return prefix + fmt(l.aAmount()) + " " + l.aType();
+        }
+
+        if (l.kind() == Letter.Kind.REQUEST) {
+            String prefix;
+            if (!resolved) {
+                prefix = sentByPlayer ? "You request " : "They request ";
+            } else if (l.status() == Letter.Status.ACCEPTED) {
+                prefix = sentByPlayer ? "Accepted. You received " : "Accepted. They received ";
+            } else if (l.status() == Letter.Status.REFUSED) {
+                prefix = sentByPlayer ? "Refused. You requested " : "Refused. They requested ";
+            } else { // EXPIRED
+                prefix = sentByPlayer ? "Expired. You requested " : "Expired. They requested ";
+            }
+
+            return prefix + fmt(l.aAmount()) + " " + l.aType();
+        }
+
+        if (l.kind() == Letter.Kind.CONTRACT) {
+            if (!resolved) {
+                return "Contract: "
+                        + fmt(l.bAmount()) + " " + safeRes(l.bType())
+                        + " → "
+                        + fmt(l.aAmount()) + " " + l.aType();
+            }
+
+            return switch (l.status()) {
+                case ACCEPTED -> "Trade executed";
+                case REFUSED  -> "Contract refused";
+                case EXPIRED  -> "Contract expired";
+                default       -> "Contract";
+            };
+        }
+
+
 
         boolean hasAmt = Math.abs(l.aAmount()) > 0.000001;
 
         return switch (l.kind()) {
-            case REQUEST -> hasAmt ? kindLabel + ": " + fmt(l.aAmount()) + " " + l.aType()
-                    : kindLabel + ": (no amount) " + l.aType();
+            case REQUEST -> (sentByPlayer ? "You request: " : "Request: ")
+                    + (hasAmt ? fmt(l.aAmount()) : "(no amount)") + " " + l.aType();
 
-            case OFFER -> hasAmt ? kindLabel + ": " + fmt(l.aAmount()) + " " + l.aType()
-                    : kindLabel + ": (no amount) " + l.aType();
-
-            case CONTRACT -> kindLabel + ": "
+            case CONTRACT -> "Contract: "
                     + fmt(l.bAmount()) + " " + safeRes(l.bType()) + " → "
                     + fmt(l.aAmount()) + " " + l.aType()
                     + " (cap " + fmt(l.maxAmount()) + " " + l.aType() + ")";
 
-            case ULTIMATUM -> kindLabel + ": " + fmt(l.aAmount()) + " " + l.aType();
+            case ULTIMATUM ->
+                    kindLabel + ": " + fmt(l.aAmount()) + " " + l.aType();
 
-            case WAR_DECLARATION -> kindLabel + ": " + (l.cb() == null ? "UNKNOWN" : l.cb().name());
+            case WAR_DECLARATION ->
+                    kindLabel + ": " + (l.cb() == null ? "UNKNOWN" : l.cb().name());
 
             default -> kindLabel;
         };
     }
+
+
 
     private static String safeRes(ResourceType t) {
         return t == null ? "?" : t.name();

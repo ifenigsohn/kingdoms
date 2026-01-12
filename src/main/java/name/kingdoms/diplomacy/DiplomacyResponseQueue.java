@@ -20,7 +20,7 @@ import java.util.UUID;
 public final class DiplomacyResponseQueue {
 
     /** DEBUG: instant AI responses (DEV ONLY) */
-    public static boolean DEBUG_INSTANT = false;
+    public static boolean DEBUG_INSTANT = true;
 
     private record PendingMail(
             UUID playerId,
@@ -463,89 +463,107 @@ public final class DiplomacyResponseQueue {
             }
 
             // -----------------------------
-            // Build response letter
+            // Build response letters (AiLetterText-driven)
             // -----------------------------
-            String fromName = (aiK.name == null || aiK.name.isBlank()) ? "Unknown Kingdom" : aiK.name;
+            String aiName = (aiK.name == null || aiK.name.isBlank()) ? "Unknown Kingdom" : aiK.name;
+            String toName = (playerK.name == null || playerK.name.isBlank()) ? "your kingdom" : playerK.name;
+
             long defaultExpires = now + (20L * 60L * 10L);
 
-            Letter response;
+            // 1) Always send an OUTCOME letter (ACCEPTED / REFUSED) with AiLetterText outcome body.
+            String outcomeNote = AiLetterText.generateOutcome(
+                    rng,
+                    p.kind,
+                    accepted,
+                    aiName,
+                    toName,
+                    rel,
+                    aiK.personality,
+                    p.aType, p.aAmount,
+                    p.bType, p.bAmount,
+                    p.maxAmount,
+                    p.cb
+            );
 
-            if (counter) {
-                if (p.kind == Letter.Kind.CONTRACT && res.counterWantType() != null) {
-                    response = Letter.contract(
-                            aiK.id, true, fromName, p.playerId,
-                            p.aType, p.aAmount,
-                            res.counterWantType(), res.counterWantAmt(),
-                            p.maxAmount,
-                            now, defaultExpires
-                    ).withStatus(Letter.Status.REFUSED);
-
-                } else if (p.kind == Letter.Kind.REQUEST && res.counterGiveType() != null) {
-                    response = Letter.offer(
-                            aiK.id, true, fromName, p.playerId,
-                            res.counterGiveType(), res.counterGiveAmt(),
-                            now, defaultExpires
-                    ).withStatus(Letter.Status.REFUSED);
-
-                } else {
-                    response = Letter.warning(
-                            aiK.id, true, fromName, p.playerId,
-                            now, defaultExpires,
-                            (extraNote.isBlank() ? "We cannot agree." : extraNote)
-                    ).withStatus(Letter.Status.REFUSED);
-                }
-
-            } else {
-                response = switch (p.kind) {
-                    case REQUEST -> Letter.request(aiK.id, true, fromName, p.playerId, p.aType, p.aAmount, now, defaultExpires);
-                    case OFFER -> Letter.offer(aiK.id, true, fromName, p.playerId, p.aType, p.aAmount, now, defaultExpires);
-                    case CONTRACT -> Letter.contract(aiK.id, true, fromName, p.playerId,
-                            p.aType, p.aAmount,
-                            p.bType, p.bAmount,
-                            p.maxAmount,
-                            now, defaultExpires
-                    );
-                    case COMPLIMENT -> Letter.compliment(aiK.id, true, fromName, p.playerId, now, defaultExpires,
-                            (extraNote.isBlank() ? "We appreciate your efforts." : extraNote)
-                    );
-                    case INSULT -> Letter.insult(aiK.id, true, fromName, p.playerId, now, defaultExpires,
-                            (extraNote.isBlank() ? "Your conduct is unacceptable." : extraNote)
-                    );
-                    case WARNING -> Letter.warning(aiK.id, true, fromName, p.playerId, now, defaultExpires,
-                            (extraNote.isBlank() ? "Consider this your warning." : extraNote)
-                    );
-                    case ALLIANCE_PROPOSAL -> Letter.allianceProposal(
-                            aiK.id, true, fromName, p.playerId,
-                            now, defaultExpires,
-                            (extraNote.isBlank() ? (accepted ? "Alliance accepted." : "We decline.") : extraNote)
-                    );
-                    case ULTIMATUM -> {
-                        String msg = accepted
-                                ? ("Ultimatum accepted. " + (extraNote.isBlank() ? "" : extraNote))
-                                : ("Ultimatum refused. " + (extraNote.isBlank() ? "" : extraNote));
-                        yield Letter.warning(aiK.id, true, fromName, p.playerId, now, defaultExpires, msg);
-                    }
-                    case WAR_DECLARATION -> Letter.warDeclaration(aiK.id, true, fromName, p.playerId, p.cb, now, defaultExpires,
-                            (extraNote.isBlank() ? "We declare war." : extraNote)
-                    );
-                    case WHITE_PEACE -> Letter.whitePeace(
-                            aiK.id, true, fromName, p.playerId,
-                            now, defaultExpires,
-                            (extraNote.isBlank() ? (accepted ? "Peace accepted." : "We refuse.") : extraNote)
-                    );
-                    case SURRENDER -> Letter.surrender(
-                            aiK.id, true, fromName, p.playerId,
-                            now, defaultExpires,
-                            (extraNote.isBlank() ? (accepted ? "Peace accepted." : "We refuse.") : extraNote)
-                    );
-                    default -> throw new IllegalArgumentException("Unexpected value: " + p.kind);
-                };
+            // If you still want to append evaluator-specific explanation sometimes:
+            if (!extraNote.isBlank()) {
+                // Keep it short; append as a second sentence.
+                outcomeNote = outcomeNote.isBlank() ? extraNote : (outcomeNote + " " + extraNote);
             }
 
-            response = response.withStatus(accepted ? Letter.Status.ACCEPTED : Letter.Status.REFUSED);
+            // Outcome letter mirrors the original terms but is resolved (not actionable)
+            Letter outcome = new Letter(
+                    UUID.randomUUID(),
+                    aiK.id,
+                    p.playerId,
+                    true,
+                    aiName,
+                    p.kind,
+                    accepted ? Letter.Status.ACCEPTED : Letter.Status.REFUSED,
+                    now,
+                    0L,
+                    p.aType, p.aAmount,
+                    p.bType, p.bAmount,
+                    p.maxAmount,
+                    p.cb,
+                    outcomeNote
+            );
 
-            mailbox.addLetter(p.playerId, response);
+            mailbox.addLetter(p.playerId, outcome);
 
+            // 2) If COUNTER, send a second PENDING letter with the new terms (actionable)
+            if (counter) {
+                // Decide what the counter letter actually is
+                Letter counterLetter = null;
+
+                if (p.kind == Letter.Kind.CONTRACT && res.counterWantType() != null && res.counterWantAmt() > 0) {
+                    // Counter-contract: same A, different B
+                    ResourceType aType = p.aType;
+                    double aAmt = p.aAmount;
+                    ResourceType bType = res.counterWantType();
+                    double bAmt = res.counterWantAmt();
+                    double cap = p.maxAmount;
+
+                    String counterNote = AiLetterText.generateEconomic(
+                            rng, Letter.Kind.CONTRACT, aiName, toName, rel, aiK.personality,
+                            aType, aAmt, bType, bAmt, cap
+                    );
+
+                    counterLetter = Letter.contract(
+                            aiK.id, true, aiName, p.playerId,
+                            aType, aAmt,
+                            bType, bAmt,
+                            cap,
+                            now, defaultExpires,
+                            counterNote
+                    );
+
+                } else if (p.kind == Letter.Kind.REQUEST && res.counterGiveType() != null && res.counterGiveAmt() > 0) {
+                    // Player REQUESTed AI give A; AI counters by OFFERing a smaller amount
+                    ResourceType giveT = res.counterGiveType();
+                    double giveA = res.counterGiveAmt();
+
+                    String counterNote = AiLetterText.generateEconomic(
+                            rng, Letter.Kind.OFFER, aiName, toName, rel, aiK.personality,
+                            giveT, giveA, null, 0.0, 0.0
+                    );
+
+                    counterLetter = Letter.offer(
+                            aiK.id, true, aiName, p.playerId,
+                            giveT, giveA,
+                            now, defaultExpires,
+                            counterNote
+                    );
+                }
+
+                if (counterLetter != null) {
+                    // keep it actionable
+                    // (Status is already PENDING in the factory)
+                    mailbox.addLetter(p.playerId, counterLetter);
+                }
+            }
+
+            // Sync player inbox + economy view
             ServerPlayer sp = server.getPlayerList().getPlayer(p.playerId);
             if (sp != null) {
                 serverMail.syncInbox(sp, mailbox.getInbox(p.playerId));
@@ -553,6 +571,7 @@ public final class DiplomacyResponseQueue {
             }
 
             it.remove();
+
         }
     }
 

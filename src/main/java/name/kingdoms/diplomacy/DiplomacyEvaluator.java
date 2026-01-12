@@ -108,19 +108,19 @@ public final class DiplomacyEvaluator {
 
         if (kind == Letter.Kind.COMPLIMENT) {
             int dRel = clampRel((int)Math.round(4 + 8*p.generosity() + 3*p.trustBias() - 2*p.aggression()));
-            return Result.accept(dRel, "We appreciate the gesture.");
+            return Result.accept(dRel, "");
         }
         if (kind == Letter.Kind.INSULT) {
             int dRel = clampRel((int)Math.round(-6 - 8*p.honor() - 6*p.aggression()));
-            return Result.accept(dRel, "Noted.");
+            return Result.accept(dRel, "");
         }
         if (kind == Letter.Kind.WARNING) {
             int dRel = clampRel((int)Math.round(-2 - 5*p.honor()));
-            return Result.accept(dRel, "We will keep this in mind.");
+            return Result.accept(dRel, "");
         }
         if (kind == Letter.Kind.WAR_DECLARATION) {
             // war letters are “accepted” as acknowledgment, war happens elsewhere
-            return Result.accept(-100, "Then it is war.");
+            return Result.accept(-100, "");
         }
 
         // Alliance proposal (baseline decision; capacity/war enforcement can still happen in ResponseQueue)
@@ -158,12 +158,12 @@ public final class DiplomacyEvaluator {
             // OFFER (player gives A to AI): accept unless you *hate* them
             if (ctx.relation <= GIFT_REFUSE_RELATION_BELOW && !ctx.allied) {
                 int dRel = clampRel((int)Math.round(-1 - 3*honor - 2*agg));
-                return Result.refuse(dRel, "We do not want your gifts.");
+                return Result.refuse(dRel, "");
             }
 
             // War: accept war-material gifts much more readily
             int dRel = clampRel((int)Math.round(2 + 6*gen + 2*trust + (warPressure * 6.0)));
-            return Result.accept(dRel, "We accept your offer.");
+            return Result.accept(dRel, "");
         }
 
         if (kind == Letter.Kind.REQUEST) {
@@ -182,13 +182,13 @@ public final class DiplomacyEvaluator {
                 if (ctx.relation > -60 && rng.nextFloat() < (0.10f + 0.25f*(float)trust + 0.15f*(float)prag)) {
                     double offerAmt = Math.max(1, aAmt * (0.45 + 0.25*gen - 0.20*greed));
                     offerAmt = Math.min(offerAmt, aAmt);
-                    return Result.counter(0, aType, offerAmt, null, 0, "We cannot spare that much, but we can offer less.");
+                    return Result.counter(0, aType, offerAmt, null, 0, "");
                 }
-                return Result.refuse(dRel, "We cannot spare those resources.");
+                return Result.refuse(dRel, "");
             }
 
             int dRel = clampRel((int)Math.round(1 + 4*gen));
-            return Result.accept(dRel, "We will provide what we can.");
+            return Result.accept(dRel, "");
         }
 
         if (kind == Letter.Kind.ULTIMATUM) {
@@ -202,10 +202,10 @@ public final class DiplomacyEvaluator {
             boolean accept = fairness >= ultThresh;
 
             if (accept) {
-                return Result.accept(0, "Very well. We will comply.");
+                return Result.accept(0, "");
             } else {
                 int dRel = clampRel((int)Math.round(-6 - 6*honor - 3*agg));
-                return Result.refuse(dRel, "We refuse your demands.");
+                return Result.refuse(dRel, "");
             }
         }
 
@@ -224,10 +224,10 @@ public final class DiplomacyEvaluator {
                     if (bType != null && bAmt > 0 && aAmt > 0) {
                         double want = computeCounterWantB(deal, bType, bAmt, greed, UNFAIR_CUTOFF - alliedBonus);
                         int dRel2 = clampRel((int)Math.round(+1 + 2*trust));
-                        return Result.counter(dRel2, aType, aAmt, bType, want, "We can agree, but on different terms.");
+                        return Result.counter(dRel2, aType, aAmt, bType, want, "");
                     }
                 }
-                return Result.refuse(dRel, "Those terms are not acceptable.");
+                return Result.refuse(dRel, "");
             }
 
             // Personality/trust threshold
@@ -239,14 +239,14 @@ public final class DiplomacyEvaluator {
 
             if (fairness >= GREAT_DEAL) {
                 int dRel = clampRel((int)Math.round(2 + 2*trust));
-                return Result.accept(dRel, "A fair bargain.");
+                return Result.accept(dRel, "");
             }
 
             boolean accept = fairness >= thresh;
 
             if (accept) {
                 int dRel = clampRel((int)Math.round(1 + 2*trust));
-                return Result.accept(dRel, "Agreed.");
+                return Result.accept(dRel, "");
             }
 
             // Otherwise: sometimes counter, else refuse
@@ -254,15 +254,15 @@ public final class DiplomacyEvaluator {
                 if (bType != null && bAmt > 0) {
                     double want = Math.min(bAmt * 3.0, bAmt * (1.15 + 0.35*greed));
                     int dRel = clampRel((int)Math.round(+1 + 2*trust));
-                    return Result.counter(dRel, aType, aAmt, bType, want, "We can agree, but on different terms.");
+                    return Result.counter(dRel, aType, aAmt, bType, want, "");
                 }
             }
 
             int dRel = clampRel((int)Math.round(-2 - 1*(1.0-trust) - 1*agg));
-            return Result.refuse(dRel, "Those terms are not acceptable.");
+            return Result.refuse(dRel, "");
         }
 
-        return Result.refuse(0, "Refused.");
+        return Result.refuse(0, "");
     }
 
     // -------------------------
@@ -274,15 +274,15 @@ public final class DiplomacyEvaluator {
 
         // If already allied, accept “formally” (idempotent)
         if (ctx.allied) {
-            return Result.accept(+5, "We stand together already.");
+            return Result.accept(+5, "");
         }
 
         // No alliances if you hate them, or if honor is high and trust is low
         if (ctx.relation < ALLIANCE_MIN_RELATION) {
-            return Result.refuse(-5, "We are not ready for such a pact.");
+            return Result.refuse(-5, "");
         }
         if (trust < ALLIANCE_MIN_TRUST) {
-            return Result.refuse(-5, "Trust must be earned.");
+            return Result.refuse(-5, "");
         }
 
         // War pressure + trustBias makes alliances more attractive
@@ -297,9 +297,9 @@ public final class DiplomacyEvaluator {
         // Slight randomness so it doesn't feel deterministic
         double roll = rng.nextDouble();
         if (roll < clamp01(desire)) {
-            return Result.accept(+10, "Alliance accepted.");
+            return Result.accept(+10, "");
         } else {
-            return Result.refuse(-10, "We decline.");
+            return Result.refuse(-10, "");
         }
     }
 

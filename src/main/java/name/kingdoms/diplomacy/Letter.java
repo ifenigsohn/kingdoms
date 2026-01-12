@@ -168,51 +168,106 @@ public record Letter(
     // factories
     // -----------------
 
-    public static Letter request(UUID fromId, boolean fromIsAi, String fromName, UUID toPlayer,
-                                 ResourceType wantType, double wantAmount,
-                                 long createdTick, long expiresTick) {
+    public static Letter request(
+            UUID fromId,
+            boolean fromIsAi,
+            String fromName,
+            UUID toPlayer,
+            ResourceType wantType,
+            double wantAmount,
+            long createdTick,
+            long expiresTick,
+            String note
+    ) {
         return new Letter(
-                UUID.randomUUID(), fromId, toPlayer, fromIsAi, safeName(fromName),
-                Kind.REQUEST, Status.PENDING, createdTick, expiresTick,
-                wantType, wantAmount,
-                null, 0.0,
+                UUID.randomUUID(),
+                fromId,
+                toPlayer,
+                fromIsAi,
+                safeName(fromName),
+                Kind.REQUEST,
+                Status.PENDING,
+                createdTick,
+                expiresTick,
+                wantType,
+                wantAmount,
+                null,
+                0.0,
                 0.0,
                 null,
-                ""
+                safeNote(note)
         );
     }
 
-    public static Letter offer(UUID fromId, boolean fromIsAi, String fromName, UUID toPlayer,
-                               ResourceType giveType, double giveAmount,
-                               long createdTick, long expiresTick) {
+
+    public static Letter offer(
+            UUID fromId,
+            boolean fromIsAi,
+            String fromName,
+            UUID toPlayer,
+            ResourceType giveType,
+            double giveAmount,
+            long createdTick,
+            long expiresTick,
+            String note
+    ) {
         return new Letter(
-                UUID.randomUUID(), fromId, toPlayer, fromIsAi, safeName(fromName),
-                Kind.OFFER, Status.PENDING, createdTick, expiresTick,
-                giveType, giveAmount,
-                null, 0.0,
+                UUID.randomUUID(),
+                fromId,
+                toPlayer,
+                fromIsAi,
+                safeName(fromName),
+                Kind.OFFER,
+                Status.PENDING,
+                createdTick,
+                expiresTick,
+                giveType,
+                giveAmount,
+                null,
+                0.0,
                 0.0,
                 null,
-                ""
+                safeNote(note)
         );
     }
 
-    public static Letter contract(UUID fromId, boolean fromIsAi, String fromName, UUID toPlayer,
-                                  ResourceType kingdomGivesType, double kingdomGivesAmount,
-                                  ResourceType playerGivesType, double playerGivesAmount,
-                                  double maxKingdomGivesAmount,
-                                  long createdTick, long expiresTick) {
+
+    public static Letter contract(
+            UUID fromId,
+            boolean fromIsAi,
+            String fromName,
+            UUID toPlayer,
+            ResourceType kingdomGivesType,
+            double kingdomGivesAmount,
+            ResourceType playerGivesType,
+            double playerGivesAmount,
+            double maxKingdomGivesAmount,
+            long createdTick,
+            long expiresTick,
+            String note
+    ) {
         return new Letter(
-                UUID.randomUUID(), fromId, toPlayer, fromIsAi, safeName(fromName),
-                Kind.CONTRACT, Status.PENDING, createdTick, expiresTick,
-                kingdomGivesType, kingdomGivesAmount,
-                playerGivesType, playerGivesAmount,
+                UUID.randomUUID(),
+                fromId,
+                toPlayer,
+                fromIsAi,
+                safeName(fromName),
+                Kind.CONTRACT,
+                Status.PENDING,
+                createdTick,
+                expiresTick,
+                kingdomGivesType,
+                kingdomGivesAmount,
+                playerGivesType,
+                playerGivesAmount,
                 maxKingdomGivesAmount,
                 null,
-                ""
+                safeNote(note)
         );
     }
 
-    // NEW: compliments/insults/warnings (purely diplomatic, no resources)
+
+    
     public static Letter compliment(UUID fromId, boolean fromIsAi, String fromName, UUID toPlayer,
                                     long createdTick, long expiresTick, String note) {
         return new Letter(
@@ -324,6 +379,8 @@ public record Letter(
                 safeNote(note)
         );
     }
+
+    
 
     private static String safeName(String s) {
         return (s == null || s.isBlank()) ? "Unknown Kingdom" : s;
