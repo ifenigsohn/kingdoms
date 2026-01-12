@@ -6,6 +6,7 @@ import net.minecraft.world.entity.EntityDimensions;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobCategory;
 import name.kingdoms.blueprint.BlueprintPlacerEngine;
+import name.kingdoms.blueprint.KingdomSatelliteSpawner;
 import name.kingdoms.blueprint.RoadBuilder;
 import name.kingdoms.blueprint.worldGenBluePrintAutoSpawner;
 import name.kingdoms.diplomacy.DiplomacyMailboxState;
@@ -87,7 +88,7 @@ public class Kingdoms implements ModInitializer {
         }
 
         ecoTickCounter++;
-        if (ecoTickCounter < 200) return; // 10 seconds for debug
+        if (ecoTickCounter < 6000) return; // 5 minutes for playtest
         ecoTickCounter = 0;
 
         var ks = kingdomState.get(server);
@@ -181,6 +182,7 @@ public class Kingdoms implements ModInitializer {
         modEntities.register();
         name.kingdoms.war.WarBattleManager.init();
         name.kingdoms.diplomacy.DiplomacyRelationNormalizer.init();
+        KingdomSatelliteSpawner.init();
         
 
         // Blocks/items

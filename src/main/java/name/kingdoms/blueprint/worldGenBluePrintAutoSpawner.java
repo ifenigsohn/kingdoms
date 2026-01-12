@@ -35,7 +35,7 @@ public final class worldGenBluePrintAutoSpawner {
 
     private static final boolean LOG = true;
 
-    private static final int REGION_SIZE_BLOCKS = 500;
+    private static final int REGION_SIZE_BLOCKS = 700;
 
     /** 1/RARITY regions are WIN. */
     private static final int RARITY = 1;
@@ -48,23 +48,38 @@ public final class worldGenBluePrintAutoSpawner {
     private static final int DECIDE_EXTRA_CHUNKS = 8;
 
     // Placement ring: only place if planned chunk is within this ring of any player
-    private static final int PLACE_MIN_DIST_CHUNKS = 0;
-    private static final int PLACE_MAX_EXTRA_CHUNKS = 256;
+    private static final int PLACE_MIN_DIST_CHUNKS = 20;
+    private static final int PLACE_MAX_EXTRA_CHUNKS = 60;
 
     // Throughput knobs
-    private static final int DECIDE_REGIONS_PER_TICK = 10; // how many region decisions we persist per tick
+    private static final int DECIDE_REGIONS_PER_TICK = 2; // how many region decisions we persist per tick
     private static final int PLACE_PER_TICK = 1;           // how many castles to enqueue per tick
-    private static final int MAX_BP_QUEUE = 2;             // if BlueprintPlacerEngine queue is >= this, pause spawning
+    private static final int MAX_BP_QUEUE = 1;             // if BlueprintPlacerEngine queue is >= this, pause spawning
 
     // Avoid "stalls" (recommended ON)
-    private static final boolean FORCE_LOAD_TARGET_CHUNK = true;
+    private static final boolean FORCE_LOAD_TARGET_CHUNK = false;
 
     // Biome policy
     private static final boolean BLOCK_COLD_BIOMES = true;
 
     // Spacing
-    private static final int MIN_CASTLE_SPACING_BLOCKS = 500;
+    private static final int MIN_CASTLE_SPACING_BLOCKS = 650;
     private static final long MIN_CASTLE_SPACING_SQ = (long) MIN_CASTLE_SPACING_BLOCKS * (long) MIN_CASTLE_SPACING_BLOCKS;
+
+    // Never spawn a kingdom within this many blocks of any player
+    private static final int NO_SPAWN_RADIUS_BLOCKS = 150;
+    private static final long NO_SPAWN_RADIUS_SQ = (long) NO_SPAWN_RADIUS_BLOCKS * (long) NO_SPAWN_RADIUS_BLOCKS;
+    private static final int MAX_PENDING_CHECKS_PER_TICK = 10;
+
+    private static String pickDifferentCastle(String current, String fallback) {
+        if (current == null || current.isBlank()) return fallback;
+        if (!current.equals(fallback)) return fallback;
+        for (String s : CASTLE_POOL) {
+            if (!s.equals(current)) return s;
+        }
+        return fallback;
+    }
+
 
     // =========================================================
     // Runtime state
@@ -102,6 +117,50 @@ public final class worldGenBluePrintAutoSpawner {
     private static final int FAIL_COOLDOWN_MAX_TICKS  = 20 * 60;  // 60s
     private static final int FORCELOAD_THROTTLE_TICKS = 20 * 3;   // 3s
     private static final int SWITCH_BP_AFTER_FAILS    = 3;
+
+    private static boolean tooCloseToAnyPlayer(ServerLevel level, int x, int z) {
+        for (ServerPlayer p : level.players()) {
+            double dx = p.getX() - (x + 0.5);
+            double dz = p.getZ() - (z + 0.5);
+            double d2 = dx * dx + dz * dz;
+            if (d2 < NO_SPAWN_RADIUS_SQ) return true;
+        }
+        return false;
+    }
+
+    private static long maxDistSqPointToRect(long px, long pz, int minX, int minZ, int maxX, int maxZ) {
+        long dx1 = px - (long) minX;
+        long dx2 = px - (long) maxX;
+        long dz1 = pz - (long) minZ;
+        long dz2 = pz - (long) maxZ;
+
+        long ax = Math.max(dx1 * dx1, dx2 * dx2);
+        long az = Math.max(dz1 * dz1, dz2 * dz2);
+        return ax + az;
+    }
+
+    /**
+     * True if for ANY player, the entire region rectangle is inside the no-spawn radius.
+     * In that case, re-planning within the region can never succeed (for now).
+     */
+    private static boolean regionIsFullyInsideNoSpawn(ServerLevel level, int rx, int rz) {
+        int minX = rx * REGION_SIZE_BLOCKS;
+        int minZ = rz * REGION_SIZE_BLOCKS;
+        int maxX = minX + REGION_SIZE_BLOCKS - 1;
+        int maxZ = minZ + REGION_SIZE_BLOCKS - 1;
+
+        for (ServerPlayer p : level.players()) {
+            long px = (long) Math.floor(p.getX());
+            long pz = (long) Math.floor(p.getZ());
+
+            long maxD2 = maxDistSqPointToRect(px, pz, minX, minZ, maxX, maxZ);
+
+            // If even the farthest corner is within the radius, the whole region is blocked.
+            if (maxD2 < NO_SPAWN_RADIUS_SQ) return true;
+        }
+        return false;
+    }
+
 
     // =========================================================
     // init
@@ -251,9 +310,6 @@ public final class worldGenBluePrintAutoSpawner {
             // Add to pending queue (runtime)
             pendingQueue.addLast(regionKey);
 
-            // Reserve immediately for spacing
-            reserve(regionKey, plan.x, plan.z);
-
             if (LOG) {
                 LOGGER.info("[Kingdoms][SpawnV3] DECIDE WIN_PENDING region=({}, {}) key={} plan=({}, {}) bp={}",
                         rx, rz, regionKey, plan.x, plan.z, plan.bpId);
@@ -276,7 +332,6 @@ public final class worldGenBluePrintAutoSpawner {
         for (RegionDecisionStateV2.Entry e : state.entries()) {
             if (e.statusEnum() == RegionDecisionStateV2.Status.WIN_PENDING) {
                 pendingQueue.addLast(e.regionKey());
-                reserve(e.regionKey(), e.plannedX(), e.plannedZ());
             }
         }
     }
@@ -301,15 +356,17 @@ public final class worldGenBluePrintAutoSpawner {
     // =========================================================
 
     private static void placeSome(MinecraftServer server, ServerLevel level) {
+
+        
         if (BlueprintPlacerEngine.getQueueSize() >= MAX_BP_QUEUE) return;
+
         if (pendingQueue.isEmpty()) return;
 
         int did = 0;
-        int safety = 0;
-
-        while (did < PLACE_PER_TICK && !pendingQueue.isEmpty() && safety++ < 512) {
+        int checks = 0;
+        
+        while (did < PLACE_PER_TICK && !pendingQueue.isEmpty() && checks++ < MAX_PENDING_CHECKS_PER_TICK) {
             long regionKey = pendingQueue.pollFirst();
-
             RegionDecisionStateV2 state = RegionDecisionStateV2.get(level);
             RegionDecisionStateV2.Entry e = state.get(regionKey);
             if (e == null || e.statusEnum() != RegionDecisionStateV2.Status.WIN_PENDING) {
@@ -339,6 +396,48 @@ public final class worldGenBluePrintAutoSpawner {
             int x = e.plannedX();
             int z = e.plannedZ();
 
+            /*  DEBUG: show why candidates are/aren't eligible (prints every 10s)
+            if (LOG && (tickAge % 200 == 0)) {
+                boolean inRing = plannedIsInPlacementRing(server, level, x, z);
+                boolean tooClosePlayer = tooCloseToAnyPlayer(level, x, z);
+                boolean tooCloseCastle = isTooCloseToAnyCastleOrReservation(level, regionKey, x, z);
+
+                LOGGER.info("[Kingdoms][SpawnV3] CHECK key={} rx={} rz={} plan=({}, {}) bp={} inRing={} tooClosePlayer={} tooCloseCastle={}",
+                        regionKey, e.rx(), e.rz(), x, z, e.bpId(),
+                        inRing, tooClosePlayer, tooCloseCastle);
+            } */
+
+            if (tooCloseToAnyPlayer(level, x, z)) {
+
+                // If region is fully blocked by the no-spawn radius, just wait longer.
+                if (regionIsFullyInsideNoSpawn(level, e.rx(), e.rz())) {
+                    if (LOG) {
+                        LOGGER.info("[Kingdoms][SpawnV3] SKIP too-close (region fully inside no-spawn) key={} rx={} rz={} plan=({}, {})",
+                                regionKey, e.rx(), e.rz(), x, z);
+                    }
+                    nextPlaceTick.put(regionKey, tickAge + 20 * 20); // 20s
+                    pendingQueue.addLast(regionKey);
+                    continue;
+                }
+
+                // Otherwise: wait with increasing backoff so we "move on" to other regions.
+                int fc = failCount.getOrDefault(regionKey, 0) + 1;
+                failCount.put(regionKey, fc);
+
+                // 5s, 10s, 15s... capped at 60s
+                int backoff = Math.min(FAIL_COOLDOWN_MAX_TICKS, FAIL_COOLDOWN_BASE_TICKS * fc);
+                nextPlaceTick.put(regionKey, tickAge + backoff);
+
+                if (LOG) {
+                    LOGGER.info("[Kingdoms][SpawnV3] SKIP too-close (temporary) key={} plan=({}, {}) tries={} backoff={}t",
+                            regionKey, x, z, fc, backoff);
+                }
+
+                pendingQueue.addLast(regionKey);
+                continue;
+            }
+
+
             if (BLOCK_COLD_BIOMES && isColdBiome(level, x, z)) {
                 // Region stays WIN_PENDING, but we change the plan deterministically to avoid perma-block.
                 Planned plan2 = planForRegion(level, e.rx(), e.rz(), regionKey ^ 0xCAFEBABECAFEL);
@@ -346,7 +445,7 @@ public final class worldGenBluePrintAutoSpawner {
                         RegionDecisionStateV2.Status.WIN_PENDING.id,
                         plan2.x, plan2.z,
                         plan2.bpId));
-                reserve(regionKey, plan2.x, plan2.z);
+                
 
                 pendingQueue.addLast(regionKey);
                 continue;
@@ -366,7 +465,7 @@ public final class worldGenBluePrintAutoSpawner {
                         RegionDecisionStateV2.Status.WIN_PENDING.id,
                         plan2.x, plan2.z,
                         plan2.bpId));
-                reserve(regionKey, plan2.x, plan2.z);
+            
 
                 pendingQueue.addLast(regionKey);
                 continue;
@@ -384,7 +483,8 @@ public final class worldGenBluePrintAutoSpawner {
 
             try {
                 Blueprint bp = Blueprint.load(server, MOD_ID, e.bpId());
-
+                
+                reserve(regionKey, x, z);
                 // mark queued before enqueue
                 KingdomsSpawnState.get(level).markQueued(regionKey);
 
@@ -401,6 +501,9 @@ public final class worldGenBluePrintAutoSpawner {
                             // SUCCESS
                             KingdomsSpawnState.get(level).markSpawned(regionKey);
                             KingdomsSpawnState.get(level).clearQueued(regionKey);
+
+                            failCount.remove(regionKey);
+                            nextPlaceTick.remove(regionKey);
 
                             CastleOriginState.get(level).put(regionKey, origin);
 
@@ -419,14 +522,47 @@ public final class worldGenBluePrintAutoSpawner {
                                     "house1_1","house2_1","house3_1","house4_1","house5_1","house6_6","house7_1","house8_1","windmill","watermill","bakery","clocktower"
                             );
 
-                            KingdomSatelliteSpawner.enqueueSatellitesAfterCastle(
+                            KingdomSatelliteSpawner.enqueuePlanAfterDelay(
                                     level, origin, bp, MOD_ID, regionKey,
-                                    kSize, buildingPool, level.getRandom()
+                                    kSize, buildingPool, level.getRandom(),
+                                    20 * 10
                             );
                         },
                         () -> {
-                           
+                            // FAIL: release queued flag so this region can be tried again
+                            KingdomsSpawnState.get(level).clearQueued(regionKey);
+
+                            reservedOriginXZ.remove(regionKey);
+
+                            // increase failure count + apply backoff
+                            int fc = failCount.getOrDefault(regionKey, 0) + 1;
+                            failCount.put(regionKey, fc);
+
+                            int backoff = Math.min(FAIL_COOLDOWN_MAX_TICKS, FAIL_COOLDOWN_BASE_TICKS * fc);
+                            nextPlaceTick.put(regionKey, tickAge + backoff);
+
+                            // optionally switch blueprint after a few failures
+                            Planned plan2 = planForRegion(level, e.rx(), e.rz(),
+                                    regionKey ^ 0xF00DF00DF00DF00DL ^ ((long)fc * 0x9E3779B97F4A7C15L));
+
+                            // update plan + reservation (keeps region WIN_PENDING)
+                            RegionDecisionStateV2.get(level).put(new RegionDecisionStateV2.Entry(
+                                    regionKey, e.rx(), e.rz(),
+                                    RegionDecisionStateV2.Status.WIN_PENDING.id,
+                                    plan2.x, plan2.z,
+                                    (fc >= SWITCH_BP_AFTER_FAILS ? pickDifferentCastle(e.bpId(), plan2.bpId) : plan2.bpId)
+                            ));
+
+                            // requeue
+                            pendingQueue.addLast(regionKey);
+
+                            if (LOG) {
+                                LOGGER.info("[Kingdoms][SpawnV3] FAIL key={} reason=BP_FAIL tries={} backoff={}t newPlan=({}, {}) bp={}",
+                                        regionKey, fc, backoff, plan2.x, plan2.z,
+                                        (fc >= SWITCH_BP_AFTER_FAILS ? pickDifferentCastle(e.bpId(), plan2.bpId) : plan2.bpId));
+                            }
                         }
+
                 );
 
                 did++;

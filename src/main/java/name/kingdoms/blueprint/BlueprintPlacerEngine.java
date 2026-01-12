@@ -4,6 +4,7 @@ import com.mojang.logging.LogUtils;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 
+import it.unimi.dsi.fastutil.ints.IntArrayList;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 
@@ -11,11 +12,12 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.Heightmap;
 
 import net.minecraft.world.level.saveddata.SavedData;
@@ -29,6 +31,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.util.*;
+
+import net.minecraft.server.level.TicketType;
+import net.minecraft.world.level.ChunkPos;
+
 
 /**
  * Places blueprints over multiple ticks WITH:
@@ -46,7 +52,7 @@ import java.util.*;
  */
 public final class BlueprintPlacerEngine {
     private static final Logger LOGGER = LogUtils.getLogger();
-    
+
     // === 3 lane queues ===
     private static final Deque<Task> PREFLIGHT = new ArrayDeque<>();
     private static final Deque<Task> HEAVY = new ArrayDeque<>();
@@ -64,7 +70,6 @@ public final class BlueprintPlacerEngine {
     public static boolean isInFlight(long jobKey) {
         return IN_FLIGHT.contains(jobKey);
     }
-
 
     private static void rebuildRegionActivityFromPersisted(MinecraftServer server) {
         ServerLevel overworld = server.overworld();
@@ -85,21 +90,17 @@ public final class BlueprintPlacerEngine {
             counts.addTo(roadsRegionKey, 1);
         }
 
-        // Apply to each level that appears (safe to just apply to overworld too if you only care there)
         for (var it = counts.long2IntEntrySet().fastIterator(); it.hasNext();) {
             var en = it.next();
             long roadsRegionKey = en.getLongKey();
             int count = en.getIntValue();
 
-            // You need RegionActivityState.setCount(...) method OR loop begin() count times.
-            // If you don't have setCount, just do begin() count times:
             RegionActivityState act = RegionActivityState.get(overworld);
             for (int i = 0; i < count; i++) act.begin(roadsRegionKey);
         }
 
         LOGGER.info("[Kingdoms] Rebuilt RegionActivity from persisted queue: {} regions", counts.size());
     }
-
 
     private static void primeInFlightFromPersisted(MinecraftServer server) {
         ServerLevel overworld = server.overworld();
@@ -130,24 +131,19 @@ public final class BlueprintPlacerEngine {
 
     // === PERFORMANCE ===
     // Heavy lane budgets (grading + placement)
-    public static int BLOCKS_PER_TICK = 10000;
-    public static long MAX_NANOS_PER_TICK = 15_000_000; //in 1m per ms
+    public static int BLOCKS_PER_TICK = 300;
+    public static long MAX_NANOS_PER_TICK = 2_000_000; // ~15ms
 
-    // Preflight lane budgets (acquire + site check) – cheap, parallel
-    public static int PREFLIGHT_PARALLEL = 3;              // how many tasks we advance per tick
-    public static int PREFLIGHT_BUDGET_PER_TASK = 800;     // ops per task per tick in preflight
-    public static long PREFLIGHT_MAX_NANOS_PER_TICK = 8_000_000; // ~3ms for all preflight work
+    // Preflight lane budgets (acquire + site check)
+    public static int PREFLIGHT_PARALLEL = 1;
+    public static int PREFLIGHT_BUDGET_PER_TASK = 120;
+    public static long PREFLIGHT_MAX_NANOS_PER_TICK = 3_000_000; // ~3ms
     private static int aliveTicks = 0;
 
     private BlueprintPlacerEngine() {}
 
     // ======================================================================
     // JobKey -> RoadsRegionKey mapping (persisted)
-    //
-    // This lets us:
-    // - store queue entries by unique jobKey (so satellites don't overwrite each other)
-    // - still group anchors/roads by stable roadsRegionKey (kingdom region)
-    // - on resume, recover the roadsRegionKey for each persisted jobKey
     // ======================================================================
     private static final class JobToRoadRegionState extends SavedData {
 
@@ -209,15 +205,12 @@ public final class BlueprintPlacerEngine {
         LOGGER.info("[Kingdoms] BlueprintPlacerEngine.init() CALLED");
         ServerTickEvents.END_SERVER_TICK.register(BlueprintPlacerEngine::tick);
 
-        // prevent leaking between worlds
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
             clearAll(true);
-            IN_FLIGHT.clear(); 
+            IN_FLIGHT.clear();
             LOGGER.info("[Kingdoms] Cleared blueprint task queues on server stop");
         });
 
-
-        // Resume persisted jobs
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             primeInFlightFromPersisted(server);
             rebuildRegionActivityFromPersisted(server);
@@ -233,7 +226,6 @@ public final class BlueprintPlacerEngine {
                 try {
                     Blueprint bp = Blueprint.load(server, e.modId, e.blueprintId);
 
-                    // recompute Y on resume
                     int y = surfaceY(lvl, e.x, e.z);
                     BlockPos origin = new BlockPos(e.x, y, e.z);
 
@@ -258,11 +250,11 @@ public final class BlueprintPlacerEngine {
         if (tryReleaseForces) {
             for (Task t : PREFLIGHT) {
                 try { t.releaseChunkForces(); } catch (Exception ignored) {}
-                if (t.claimedJobKey != Long.MIN_VALUE) releaseJob(t.claimedJobKey); // NEW
+                if (t.claimedJobKey != Long.MIN_VALUE) releaseJob(t.claimedJobKey);
             }
             for (Task t : HEAVY) {
                 try { t.releaseChunkForces(); } catch (Exception ignored) {}
-                if (t.claimedJobKey != Long.MIN_VALUE) releaseJob(t.claimedJobKey); // NEW
+                if (t.claimedJobKey != Long.MIN_VALUE) releaseJob(t.claimedJobKey);
             }
         }
         PREFLIGHT.clear();
@@ -273,25 +265,21 @@ public final class BlueprintPlacerEngine {
         return !PREFLIGHT.isEmpty() || !HEAVY.isEmpty();
     }
 
-    // Back-compat overload
     public static void enqueue(ServerLevel level, Blueprint bp, BlockPos origin, String modId, boolean includeAir) {
         enqueue(level, bp, origin, modId, includeAir, null, null);
     }
 
-    //7-8arg backwards compat
     public static void enqueue(ServerLevel level, Blueprint bp, BlockPos origin,
-                           String modId, boolean includeAir,
-                           Runnable onSuccess, Runnable onFail) {
-    enqueue(level, bp, origin, modId, includeAir, onSuccess, onFail, Long.MIN_VALUE);
+                               String modId, boolean includeAir,
+                               Runnable onSuccess, Runnable onFail) {
+        enqueue(level, bp, origin, modId, includeAir, onSuccess, onFail, Long.MIN_VALUE);
     }
 
-
     public static void enqueue(ServerLevel level, Blueprint bp, BlockPos origin,
-                            String modId, boolean includeAir,
-                            Runnable onSuccess, Runnable onFail,
-                            long jobKey) {
+                               String modId, boolean includeAir,
+                               Runnable onSuccess, Runnable onFail,
+                               long jobKey) {
 
-        //do not allow duplicate in-flight jobs (only for real job keys)
         if (jobKey != Long.MIN_VALUE) {
             if (!IN_FLIGHT.add(jobKey)) {
                 LOGGER.info("[Kingdoms] Skipping enqueue (already in-flight) jobKey={}", jobKey);
@@ -299,27 +287,17 @@ public final class BlueprintPlacerEngine {
             }
         }
 
-
         Task t = new Task(level, bp, origin, modId, includeAir, onSuccess, onFail);
-
-        // attach claim to task so it can release later
         t.claimedJobKey = jobKey;
 
         PREFLIGHT.add(t);
 
         LOGGER.info("[Kingdoms] Queued blueprint '{}' at {} jobKey={} (preflight={}, heavy={}, total={})",
                 bp.id, origin, jobKey, PREFLIGHT.size(), HEAVY.size(), getQueueSize());
-
-        dbg("ENQUEUE bp=" + bp.id + " origin=" + origin
-                + " includeAir=" + includeAir
-                + " sectionSize=" + bp.sectionSize
-                + " sections=(" + bp.sectionsX + "," + bp.sectionsY + "," + bp.sectionsZ + ")");
     }
 
     // ======================================================================
     // WORLDGEN ENQUEUE (PERSISTED)
-    //
-    // OLD API (single key): treated as BOTH roadsRegionKey and jobKey
     // ======================================================================
     public static void enqueueWorldgen(ServerLevel level, Blueprint bp, BlockPos origin, String modId, boolean includeAir, long regionKey) {
         enqueueWorldgenInternal(level, bp, origin, modId, includeAir, regionKey, regionKey, true, null, null);
@@ -330,11 +308,6 @@ public final class BlueprintPlacerEngine {
         enqueueWorldgenInternal(level, bp, origin, modId, includeAir, regionKey, regionKey, true, afterSuccess, afterFail);
     }
 
-    // ======================================================================
-    // NEW API (split keys)
-    //   roadsRegionKey = stable per-kingdom grouping (anchors + roads)
-    //   jobKey         = unique per-building job identity (queue/spawn dedupe)
-    // ======================================================================
     public static void enqueueWorldgen(ServerLevel level, Blueprint bp, BlockPos origin, String modId, boolean includeAir,
                                        long roadsRegionKey, long jobKey) {
         enqueueWorldgenInternal(level, bp, origin, modId, includeAir, roadsRegionKey, jobKey, true, null, null);
@@ -350,7 +323,7 @@ public final class BlueprintPlacerEngine {
                                                 long roadsRegionKey, long jobKey,
                                                 boolean recordState,
                                                 Runnable afterSuccess, Runnable afterFail) {
-       if (recordState) {
+        if (recordState) {
             WorldgenBlueprintQueueState.get(level).upsert(
                     level, jobKey, modId, bp.id,
                     origin.getX(), origin.getY(), origin.getZ(),
@@ -359,62 +332,45 @@ public final class BlueprintPlacerEngine {
 
             JobToRoadRegionState.get(level).put(jobKey, roadsRegionKey);
 
-            KingdomsSpawnState.get(level).markQueued(jobKey); 
-        
+            KingdomsSpawnState.get(level).markQueued(jobKey);
+
             RegionActivityState.get(level).begin(roadsRegionKey);
         }
 
-
-        // Reserve this building footprint for road avoidance ASAP
-        // (so roads never route through the space even while the blueprint is in-flight)
-        {
-            BlueprintFootprintState fps = BlueprintFootprintState.get(level);
-
-            // TODO: compute these from your blueprint/meta
-            // If origin is the minimum corner:
-            int minX = origin.getX();
-            int minZ = origin.getZ();
-
-            int sizeX = bp.sizeX; // <-- replace with your real width
-            int sizeZ = bp.sizeZ; // <-- replace with your real depth
-
-            // If you rotate buildings 90/270, swap sizeX/sizeZ here
-            // if (rot90or270) { int t = sizeX; sizeX = sizeZ; sizeZ = t; }
-
-            int maxX = minX + sizeX - 1;
-            int maxZ = minZ + sizeZ - 1;
-
-            fps.addFootprint(roadsRegionKey, minX, minZ, maxX, maxZ);
-        }
-
-
-        // --- Reserve footprint so roads never path through this building ---
+        // Reserve footprint
         final int sizeX = bp.sizeX;
         final int sizeZ = bp.sizeZ;
 
-        // If your origin is the MIN corner of the blueprint footprint:
         final int minX = origin.getX();
         final int minZ = origin.getZ();
         final int maxX = minX + sizeX - 1;
         final int maxZ = minZ + sizeZ - 1;
 
-        // Register footprint under the ROADS grouping key
         BlueprintFootprintState.get(level).addFootprint(roadsRegionKey, minX, minZ, maxX, maxZ);
 
         enqueue(level, bp, origin, modId, includeAir,
                 () -> {
-                    // job identity
                     KingdomsSpawnState.get(level).markSpawned(jobKey);
                     KingdomsSpawnState.get(level).clearQueued(jobKey);
 
                     WorldgenBlueprintQueueState.get(level).remove(level, jobKey);
                     JobToRoadRegionState.get(level).remove(jobKey);
 
-                    // roads grouping (stable region)
                     List<BlockPos> anchors = RoadAnchors.consumeBarrierAnchors(level, origin);
                     if (anchors.isEmpty()) {
-                        anchors = List.of(RoadAnchors.fallbackFromBlueprintOrigin(level, origin));
+                        BlockPos a1 = RoadAnchors.fallbackFromBlueprintOrigin(level, origin);
+
+                        // second anchor: offset, same Y (NO world reads)
+                        BlockPos a2 = new BlockPos(a1.getX() + 16, a1.getY(), a1.getZ());
+                        if (a2.equals(a1)) {
+                            a2 = new BlockPos(a1.getX(), a1.getY(), a1.getZ() + 16);
+                        }
+
+                        anchors = new java.util.ArrayList<>(2);
+                        anchors.add(a1);
+                        anchors.add(a2);
                     }
+
 
                     RoadAnchorState st = RoadAnchorState.get(level);
                     for (BlockPos anchorPos : anchors) {
@@ -424,13 +380,12 @@ public final class BlueprintPlacerEngine {
                     if (afterSuccess != null) {
                         try { afterSuccess.run(); } catch (Exception ignored) {}
                     }
-                   
+
                     RegionActivityState.get(level).end(roadsRegionKey);
 
                     maybeStartRoads(level, roadsRegionKey);
                 },
                 () -> {
-                    // FAIL: remove the reserved footprint so we don't block roads forever
                     BlueprintFootprintState.get(level).removeFootprint(roadsRegionKey, minX, minZ, maxX, maxZ);
 
                     KingdomsSpawnState.get(level).clearQueued(jobKey);
@@ -440,40 +395,31 @@ public final class BlueprintPlacerEngine {
 
                     RegionActivityState.get(level).end(roadsRegionKey);
 
-
                     if (afterFail != null) {
                         try { afterFail.run(); } catch (Exception ignored) {}
                     }
                 },
                 jobKey
         );
-
     }
 
-
-    
-
-
     private static void tick(MinecraftServer server) {
-
         if ((aliveTicks++ % 200) == 0) {
             LOGGER.info("[BPQ] ALIVE preflight={} heavy={} total={}", PREFLIGHT.size(), HEAVY.size(), getQueueSize());
         }
 
         if (PREFLIGHT.isEmpty() && HEAVY.isEmpty()) return;
 
-        // ----- Preflight lane (parallel-ish) -----
+        // ----- Preflight lane -----
         final long preflightDeadline = System.nanoTime() + PREFLIGHT_MAX_NANOS_PER_TICK;
 
         int advanced = 0;
         int passes = Math.min(PREFLIGHT_PARALLEL, PREFLIGHT.size());
 
-        // Round-robin: take from head, do a slice, then either requeue, move to heavy, or finish.
         while (advanced < passes && !PREFLIGHT.isEmpty()) {
             if (System.nanoTime() >= preflightDeadline) break;
 
             Task t = PREFLIGHT.poll();
-    
             if (t == null) break;
 
             try {
@@ -484,7 +430,6 @@ public final class BlueprintPlacerEngine {
                 } else if (r == Task.PreflightResult.READY_FOR_HEAVY) {
                     HEAVY.add(t);
                 } else {
-                    // Finished in preflight (reject/fail)
                     finishAndCleanupTask(t);
                 }
             } catch (Exception e) {
@@ -497,7 +442,7 @@ public final class BlueprintPlacerEngine {
             advanced++;
         }
 
-        // ----- Heavy lane (serialized) -----
+        // ----- Heavy lane -----
         if (HEAVY.isEmpty()) return;
 
         Task task = HEAVY.peek();
@@ -523,11 +468,9 @@ public final class BlueprintPlacerEngine {
         }
     }
 
-   private static void finishAndCleanupTask(Task task) {
-        // Always release forced chunks
+    private static void finishAndCleanupTask(Task task) {
         try { task.releaseChunkForces(); } catch (Exception ignored) {}
 
-        // RELEASE CLAIM
         if (task.claimedJobKey != Long.MIN_VALUE) {
             IN_FLIGHT.remove(task.claimedJobKey);
         }
@@ -547,45 +490,32 @@ public final class BlueprintPlacerEngine {
         return Math.max(level.getMinY() + 1, y);
     }
 
-    /**
-     * Start roads for a STABLE roadsRegionKey once no more persisted jobs remain
-     * that belong to that roads region.
-     */
-   private static void maybeStartRoads(ServerLevel level, long regionKey) {
-
+    private static void maybeStartRoads(ServerLevel level, long regionKey) {
         if (RegionActivityState.get(level).getActive(regionKey) > 0) {
             return;
         }
 
-        // Only start when the persisted worldgen queue has no more entries for this region.
         WorldgenBlueprintQueueState q = WorldgenBlueprintQueueState.get(level);
 
         for (WorldgenBlueprintQueueState.Entry e : q.snapshot()) {
             long jobKey = e.regionKey;
             long rrk = JobToRoadRegionState.get(level).getRoadRegionOrSelf(jobKey);
             if (rrk == regionKey) {
-                return; // still pending jobs that belong to this roads region
+                return;
             }
         }
 
-
-        // Do NOT markStarted yet — anchors might not be ready.
-
         List<BlockPos> anchors = RoadAnchorState.get(level).getAnchors(regionKey);
         if (anchors.size() < 2) {
-            // Optional debug:
-            // LOGGER.info("[Kingdoms] Roads not started: region {} anchors={}", regionKey, anchors.size());
+            LOGGER.info("[Kingdoms] Roads not started: region {} anchors={}", regionKey, anchors.size());
             return;
         }
+
+        if (anchors.size() < 2) return;
 
         List<RoadEdge> edges = RoadNetworkPlanner.plan(regionKey, anchors);
-        if (edges.isEmpty()) {
-            // Optional debug:
-            // LOGGER.info("[Kingdoms] Roads not started: region {} edges empty (anchors={})", regionKey, anchors.size());
-            return;
-        }
+        if (edges.isEmpty()) return;
 
-        // NOW prevent double-start (only once we know we will enqueue)
         if (!RoadBuildState.get(level).markStarted(regionKey)) return;
 
         RoadBuilder.enqueue(level, regionKey, edges);
@@ -595,30 +525,125 @@ public final class BlueprintPlacerEngine {
     }
 
     /**
-     * Reflection-based chunk forcing to avoid TicketType mapping/version pain.
-     * Tries: ServerLevel#setChunkForced(int chunkX, int chunkZ, boolean forced)
+     * Ticket-based chunk holding that works across mappings/versions by reflecting
+     * ServerChunkCache#addRegionTicket/removeRegionTicket.
+     *
+     * Uses built-in TicketType.FORCED (loads + simulates + persists) on 1.21.x.
      */
     private static final class ChunkForcer {
-        private static Method SET_CHUNK_FORCED = null;
-        private static boolean LOOKED_UP = false;
+        private static boolean lookedUp = false;
+        private static Method ADD = null;
+        private static Method REMOVE = null;
+        private static boolean warned = false;
 
-        static boolean setForced(ServerLevel level, int chunkX, int chunkZ, boolean forced) {
-            try {
-                if (!LOOKED_UP) {
-                    LOOKED_UP = true;
-                    try {
-                        SET_CHUNK_FORCED = level.getClass().getMethod("setChunkForced", int.class, int.class, boolean.class);
-                    } catch (Throwable ignored) {
-                        SET_CHUNK_FORCED = null;
+        private static void lookup(ServerLevel level) {
+            if (lookedUp) return;
+            lookedUp = true;
+
+            Object cs = level.getChunkSource();
+            Class<?> cls = cs.getClass();
+
+            // Search both public + declared
+            List<Method> methods = new ArrayList<>();
+            methods.addAll(Arrays.asList(cls.getMethods()));
+            methods.addAll(Arrays.asList(cls.getDeclaredMethods()));
+
+            for (Method m : methods) {
+
+                Class<?>[] p = m.getParameterTypes();
+
+                // Signature-only matching (works in dev + obfuscated jar)
+                if (m.getReturnType() != void.class) continue;
+                if (p.length != 3 && p.length != 4) continue;
+
+                // Must contain TicketType, ChunkPos, int; optional long id
+                boolean hasTicketType = false;
+                boolean hasChunkPos = false;
+                boolean hasInt = false;
+                boolean hasLong = false;
+
+                for (Class<?> c : p) {
+                    if (c == TicketType.class) hasTicketType = true;
+                    else if (c == ChunkPos.class) hasChunkPos = true;
+                    else if (c == int.class || c == Integer.class) hasInt = true;
+                    else if (c == long.class || c == Long.class) hasLong = true;
+                }
+
+                if (!hasTicketType || !hasChunkPos || !hasInt) continue;
+                if (p.length == 4 && !hasLong) continue;
+
+                m.setAccessible(true);
+
+                // Pick first two distinct candidates as ADD/REMOVE
+                if (ADD == null) ADD = m;
+                else if (REMOVE == null && m != ADD) REMOVE = m;
+
+            }
+
+            if ((ADD == null || REMOVE == null) && !warned) {
+                warned = true;
+                LOGGER.warn("[Kingdoms] Could not find ticket methods on {} (ADD={}, REMOVE={})",
+                        cls.getName(), (ADD != null), (REMOVE != null));
+
+                // TEMP: dump all candidate ticket methods
+                for (Method m : methods) {
+                    String nl = m.getName().toLowerCase(Locale.ROOT);
+                    if (nl.contains("ticket")) {
+                        LOGGER.warn("[Kingdoms]  ticketMethod={} params={}",
+                                m.getName(), Arrays.toString(m.getParameterTypes()));
                     }
                 }
-                if (SET_CHUNK_FORCED == null) return false;
-                SET_CHUNK_FORCED.invoke(level, chunkX, chunkZ, forced);
+            } else if (!warned) {
+                LOGGER.info("[Kingdoms] Ticket methods resolved on {} (ADD={}, REMOVE={})",
+                        cls.getName(), ADD.getName(), REMOVE.getName());
+            }
+
+        }
+
+        private static Object[] buildArgs(Method m, TicketType type, ChunkPos pos, int lvl, long id) {
+            Class<?>[] p = m.getParameterTypes();
+            Object[] a = new Object[p.length];
+
+            // Fill by unique types
+            for (int i = 0; i < p.length; i++) {
+                Class<?> c = p[i];
+                if (c == TicketType.class) a[i] = type;
+                else if (c == ChunkPos.class) a[i] = pos;
+                else if (c == int.class || c == Integer.class) a[i] = lvl;
+            }
+
+            // If there's a long param, treat it as id (only used in 4-arg versions)
+            for (int i = 0; i < p.length; i++) {
+                Class<?> c = p[i];
+                if ((c == long.class || c == Long.class) && a[i] == null) {
+                    a[i] = id;
+                }
+            }
+
+            return a;
+        }
+
+        static boolean setForced(ServerLevel level, int chunkX, int chunkZ, boolean forced, long id) {
+            try {
+                lookup(level);
+                if (ADD == null || REMOVE == null) return false;
+
+                Object cs = level.getChunkSource();
+                Method m = forced ? ADD : REMOVE;
+
+                TicketType type = TicketType.FORCED;
+                int ticketLevel = 2;
+                ChunkPos pos = new ChunkPos(chunkX, chunkZ);
+
+                Object[] args = buildArgs(m, type, pos, ticketLevel, id);
+                m.invoke(cs, args);
+
                 return true;
             } catch (Throwable t) {
                 return false;
             }
         }
+
     }
 
     // ======================================================================
@@ -627,7 +652,6 @@ public final class BlueprintPlacerEngine {
     private static final class Task {
         private enum Phase { ACQUIRE_CHUNKS, CHECK_SITE, GRADE_TERRAIN, PLACE_BLUEPRINT }
         private enum FailReason { NONE, SITE_REJECT, STALLED, EXCEPTION }
-
         private enum PreflightResult { NEEDS_MORE, READY_FOR_HEAVY, FINISHED }
 
         private Phase phase = Phase.ACQUIRE_CHUNKS;
@@ -642,51 +666,38 @@ public final class BlueprintPlacerEngine {
         private final BlockPos origin;
         private final String modId;
         private final boolean includeAir;
+        private boolean baseYInitialized = false;
+
         private double colEdgeFade = 1.0;
         private final Map<Integer, BlockState> paletteCache = new HashMap<>();
         private final BlockPos.MutableBlockPos scratch = new BlockPos.MutableBlockPos();
-        
 
-        // section coords
         private int secX = 0, secY = 0, secZ = 0;
-
-        // current section stream + dims
         private DataInputStream secIn = null;
         private int dx, dy, dz;
-
-        // cell cursor within section (x-fastest, then z, then y)
         private int cx = 0, cy = 0, cz = 0;
 
-        // === Terrain tuning (knobs) ===
-        private static final int PREP_MARGIN = 15;
+        private static final int PREP_MARGIN = 10;
         private static final int CLEAR_ABOVE = 40;
-
         private static final int MAX_FILL_DEPTH = 64;
         private static final int MAX_CUT_HEIGHT = 120;
-
         private static final int FOOTPRINT_SAMPLE_STEP = 8;
         private static final int FOUNDATION_BURY = 1;
-
         private static final int CHECK_STEP = 10;
         private static final double ALLOWED_BAD_FRAC = 0.3;
 
-        // === Option B: TREE CLEAR ===
         private static final int TREE_CLEAR_EXTRA_HEIGHT = 48;
         private static final int TREE_LEAF_CLEAR_RADIUS = 1;
 
-        // Block protection heuristic
         private static final int PROTECT_SCAN_ABOVE = 20;
         private static final int PROTECT_SCAN_BELOW = 6;
 
-        // Stall protection
-        private static final int STALL_TICKS_LIMIT = 20 * 20; // 20s
+        private static final int STALL_TICKS_LIMIT = 20 * 60; // 60s
         private int stalledTicks = 0;
 
-        // task status
         private boolean failed = false;
         private FailReason failReason = FailReason.NONE;
 
-        // shared bounds
         private boolean prepInitialized = false;
         private boolean prepRejected = false;
 
@@ -696,22 +707,18 @@ public final class BlueprintPlacerEngine {
         private int prepMinX, prepMaxX, prepMinZ, prepMaxZ;
         private int footMinX, footMaxX, footMinZ, footMaxZ;
 
-        // CHECK_SITE scan state
         private boolean checkInitialized = false;
         private int checkX, checkZ;
         private int checkSamples = 0;
         private int checkBad = 0;
         private int checkBadLimit = 0;
 
-        // rejection reason counters
         private int rejWater = 0;
         private int rejTooMuchCut = 0;
         private int rejTooMuchFill = 0;
 
-        // GRADE_TERRAIN scan state
         private int scanX, scanZ;
 
-        // per-column staged work
         private boolean colActive = false;
         private int colX, colZ;
         private int colSurfaceY;
@@ -720,14 +727,13 @@ public final class BlueprintPlacerEngine {
         private int colStage = 0;
         private int colY = 0;
         private boolean colSawLeaves = false;
-        private boolean colDoTerrain = true; 
+        private boolean colDoTerrain = true;
         private boolean haloActive = false;
         private int haloDx = 0;
         private int haloDz = 0;
-        private static final int HALO_CHECKS_PER_TICK = 12; // tune 4..24
+        private static final int HALO_CHECKS_PER_TICK = 12;
         private boolean colYInit = false;
 
-        // per-column terrain materials
         private BlockState colTopState;
         private BlockState colUnderState;
         private BlockState colDeepState;
@@ -736,14 +742,25 @@ public final class BlueprintPlacerEngine {
         private boolean placeBeginLogged = false;
 
         // === keep chunks loaded while we work ===
-        private static final int FORCE_RADIUS_CHUNKS = 1;
-        private static final int MAX_FORCE_PER_TICK = 6;
+        private static final int FORCE_RADIUS_CHUNKS = 2;
+        private static final int MAX_FORCE_PER_TICK = 2;
+        private static final int SYNC_LOADS_PER_TICK = 0; // start at 1; safe for servers
         private boolean forceInit = false;
         private int forceMinCX, forceMaxCX, forceMinCZ, forceMaxCZ;
         private int forceCX, forceCZ;
         private final LongArray heldForcedChunks = new LongArray();
+        private boolean baseInit = false;
+        private int baseX, baseZ;
+        private final IntArrayList baseSamples = new IntArrayList();
 
-        // small long-list helper
+
+        // --- Preflight diagnostics (low spam) ---
+        private int preflightTicks = 0;
+        private Phase lastLoggedPhase = null;
+        private int lastLoggedServerTick = -1;
+        
+
+
         private static final class LongArray {
             private long[] a = new long[64];
             private int n = 0;
@@ -761,6 +778,66 @@ public final class BlueprintPlacerEngine {
             void clear() { n = 0; }
         }
 
+        private static final int PLACE_SYNC_LOADS_PER_TICK = 1;
+        private int placeSyncLoadsThisTick = 0;
+        private int lastPlaceTick = -1;
+
+        private boolean ensureChunkLoadedDuringPlace(int cX, int cZ, MinecraftServer server) {
+            int tick = server.getTickCount();
+            if (tick != lastPlaceTick) {
+                lastPlaceTick = tick;
+                placeSyncLoadsThisTick = 0;
+            }
+
+            if (level.getChunkSource().getChunkNow(cX, cZ) != null) return true;
+
+            if (placeSyncLoadsThisTick < PLACE_SYNC_LOADS_PER_TICK) {
+                level.getChunk(cX, cZ);
+                placeSyncLoadsThisTick++;
+                return true;
+            }
+
+            return false;
+        }
+
+
+        private static final int GRADE_SYNC_LOADS_PER_TICK = 1;
+        private int gradeSyncLoadsThisTick = 0;
+        private int lastGradeTick = -1;
+
+        private boolean ensureChunkLoadedDuringGrade(int cX, int cZ, MinecraftServer server) {
+            int tick = server.getTickCount();
+            if (tick != lastGradeTick) {
+                lastGradeTick = tick;
+                gradeSyncLoadsThisTick = 0;
+            }
+
+            if (level.getChunkSource().getChunkNow(cX, cZ) != null) return true;
+
+            if (gradeSyncLoadsThisTick < GRADE_SYNC_LOADS_PER_TICK) {
+                level.getChunk(cX, cZ);
+                gradeSyncLoadsThisTick++;
+                return true;
+            }
+
+            return false;
+        }
+
+
+        private static final int PREFLIGHT_SYNC_LOADS_PER_TICK = 0;
+        private int preflightSyncLoadsThisTick = 0;
+        private int lastPreflightTick = -1;
+
+        private boolean ensureChunkLoadedDuringPreflight(int cX, int cZ, MinecraftServer server) {
+            // Tickets handle loading; we just wait until it is present.
+            return level.getChunkSource().getChunk(cX, cZ, ChunkStatus.SURFACE, false) != null;
+
+        }
+
+
+
+
+
         private Task(ServerLevel level, Blueprint bp, BlockPos origin, String modId, boolean includeAir,
                      Runnable onSuccess, Runnable onFail) {
             this.level = level;
@@ -772,91 +849,95 @@ public final class BlueprintPlacerEngine {
             this.onFail = onFail;
         }
 
-        // ---------------- Preflight + Heavy stepping ----------------
-
         PreflightResult stepPreflight(MinecraftServer server, int budget, long deadlineNanos) throws IOException {
             if (failed) return PreflightResult.FINISHED;
 
+                // --- diagnostics ---
+                preflightTicks++;
+
+                int st = server.getTickCount();
+                boolean phaseChanged = (phase != lastLoggedPhase);
+
+                // log every 40 ticks (~2s) or when phase changes
+                if (phaseChanged || (st != lastLoggedServerTick && (preflightTicks % 40 == 0))) {
+                    lastLoggedServerTick = st;
+                    lastLoggedPhase = phase;
+
+                    int forcedCount = heldForcedChunks.size();
+                    int forcedRect = forceInit ? ((forceMaxCX - forceMinCX + 1) * (forceMaxCZ - forceMinCZ + 1)) : -1;
+
+                    LOGGER.info(
+                        "[BPQ][PREFLIGHT] bp={} phase={} ticks={} forced={}/{} baseYInit={} checkInit={} cursor=({}, {})",
+                        bp.id, phase, preflightTicks,
+                        forcedCount, forcedRect,
+                        baseYInitialized, checkInitialized,
+                        forceCX, forceCZ
+                    );
+                }
+
+
+
+            // bounds-only (no world reads)
             if (!prepInitialized) {
-                initBoundsAndBaseY();
-                if (!prepInitialized) return PreflightResult.NEEDS_MORE;
+                initBoundsOnly();
             }
 
-            // Phase 1: acquire chunks
+            // 1) Acquire / load chunks needed for preflight sampling
             if (phase == Phase.ACQUIRE_CHUNKS) {
                 boolean done = acquireForces(deadlineNanos);
                 if (!done) return PreflightResult.NEEDS_MORE;
+
+                
+
                 phase = Phase.CHECK_SITE;
             }
 
-            // Phase 2: site check
+            // 2) Now safe to sample baseY
+            if (!baseYInitialized) {
+                if (!initBaseYAndCursors(server)) return PreflightResult.NEEDS_MORE;
+                baseYInitialized = true;
+            }
+
+            // 3) Site check
             if (phase == Phase.CHECK_SITE) {
-                boolean checkDone = checkSite(budget, deadlineNanos);
+                boolean checkDone = checkSite(server, budget, deadlineNanos);
                 if (!checkDone) return PreflightResult.NEEDS_MORE;
 
                 if (prepRejected) {
                     failed = true;
                     failReason = FailReason.SITE_REJECT;
-
-                    dbg("SITE_REJECT bp=" + bp.id
-                            + " origin=" + origin
-                            + " baseY=" + baseY
-                            + " yShift=" + originYShift
-                            + " samples=" + checkSamples
-                            + " bad=" + checkBad
-                            + " badLimit=" + checkBadLimit
-                            + " water=" + rejWater
-                            + " cut=" + rejTooMuchCut
-                            + " fill=" + rejTooMuchFill);
-
                     LOGGER.info("[Kingdoms] Terrain rejected for '{}' at {} (no grading performed)", bp.id, origin);
                     return PreflightResult.FINISHED;
                 }
 
-                dbg("SITE_ACCEPT bp=" + bp.id
-                        + " origin=" + origin
-                        + " baseY=" + baseY
-                        + " yShift=" + originYShift
-                        + " samples=" + checkSamples
-                        + " bad=" + checkBad
-                        + " badLimit=" + checkBadLimit);
-
                 phase = Phase.GRADE_TERRAIN;
                 LOGGER.info("[Kingdoms] Site accepted for '{}' at {} (baseY={}, yShift={})", bp.id, origin, baseY, originYShift);
-
                 return PreflightResult.READY_FOR_HEAVY;
             }
 
-            // If we somehow got here already ready:
-            if (phase == Phase.GRADE_TERRAIN || phase == Phase.PLACE_BLUEPRINT) {
-                return PreflightResult.READY_FOR_HEAVY;
-            }
-
-            return PreflightResult.NEEDS_MORE;
+            return PreflightResult.READY_FOR_HEAVY;
         }
+
 
         boolean stepHeavy(MinecraftServer server, int budget, long deadlineNanos) throws IOException {
             if (failed) return true;
 
             try {
                 if (phase == Phase.ACQUIRE_CHUNKS || phase == Phase.CHECK_SITE) {
-                    // should not happen (preflight should handle), but be safe
                     PreflightResult r = stepPreflight(server, Math.min(budget, 800), deadlineNanos);
                     if (r == PreflightResult.NEEDS_MORE) return false;
                     if (r == PreflightResult.FINISHED) return true;
                 }
 
                 if (phase == Phase.GRADE_TERRAIN) {
-                    boolean gradeDone = gradeTerrain(budget, deadlineNanos);
+                    boolean gradeDone = gradeTerrain(server, budget, deadlineNanos);
                     if (!gradeDone) return false;
 
                     phase = Phase.PLACE_BLUEPRINT;
                     LOGGER.info("[Kingdoms] Terrain graded for '{}' at {}", bp.id, origin);
                 }
 
-                // PLACE_BLUEPRINT
-                boolean placeDone = placeBlueprint(server, budget, deadlineNanos);
-                return placeDone;
+                return placeBlueprint(server, budget, deadlineNanos);
 
             } catch (Exception ex) {
                 failed = true;
@@ -865,8 +946,6 @@ public final class BlueprintPlacerEngine {
             }
         }
 
-        // ---------------- Chunk forcing ----------------
-
         private static long packChunk(int cx, int cz) {
             return (((long) cx) << 32) ^ (cz & 0xffffffffL);
         }
@@ -874,7 +953,6 @@ public final class BlueprintPlacerEngine {
         private static int unpackChunkZ(long k) { return (int)k; }
 
         private void initForceBounds() {
-            // cover the grading bounds + margin, expanded by FORCE_RADIUS_CHUNKS
             forceMinCX = (prepMinX >> 4) - FORCE_RADIUS_CHUNKS;
             forceMaxCX = (prepMaxX >> 4) + FORCE_RADIUS_CHUNKS;
             forceMinCZ = (prepMinZ >> 4) - FORCE_RADIUS_CHUNKS;
@@ -888,23 +966,59 @@ public final class BlueprintPlacerEngine {
                     + " chunkBounds=(" + forceMinCX + "," + forceMinCZ + ")->(" + forceMaxCX + "," + forceMaxCZ + ")");
         }
 
+        // NEW: non-loading “is loaded?” check
+        private boolean isChunkLoadedNow(int cx, int cz) {
+            try {
+                return level.getChunkSource().getChunkNow(cx, cz) != null;
+            } catch (Throwable ignored) {
+                return false;
+            }
+        }
+
+
+        // NEW: wait until forced chunks are actually present before we continue
+        private boolean allForcedChunksLoaded() {
+            // Check corners + center of the forced rectangle
+            int midCX = (forceMinCX + forceMaxCX) >> 1;
+            int midCZ = (forceMinCZ + forceMaxCZ) >> 1;
+
+            int[] xs = { forceMinCX, midCX, forceMaxCX };
+            int[] zs = { forceMinCZ, midCZ, forceMaxCZ };
+
+            for (int cx : xs) {
+                for (int cz : zs) {
+                    if (!isChunkLoadedNow(cx, cz)) return false;
+                }
+            }
+            return true;
+        }
+
+
+
         private boolean acquireForces(long deadlineNanos) {
             if (!forceInit) initForceBounds();
 
+            if (DEBUG && (System.nanoTime() >= deadlineNanos)) {
+                dbg("ACQUIRE_SLICE bp=" + bp.id + " cursor=(" + forceCX + "," + forceCZ + ") loaded=" + allForcedChunksLoaded());
+            }
+
             int did = 0;
+
             while (did < MAX_FORCE_PER_TICK) {
-                if (System.nanoTime() >= deadlineNanos) return false;
+               if (System.nanoTime() >= deadlineNanos) {
+                    if (DEBUG) dbg("ACQUIRE_YIELD_TIME bp=" + bp.id + " cursor=(" + forceCX + "," + forceCZ + ")");
+                    return false;
+                }
+
 
                 if (forceCZ > forceMaxCZ) {
+                    
                     dbg("FORCE_DONE bp=" + bp.id + " forcedChunks=" + heldForcedChunks.size());
                     return true;
                 }
 
                 int cx = forceCX;
                 int cz = forceCZ;
-
-                // NOTE: this may load/generate chunks (same as your current engine)
-                level.getChunk(cx, cz);
 
                 forceCX++;
                 if (forceCX > forceMaxCX) {
@@ -915,11 +1029,13 @@ public final class BlueprintPlacerEngine {
                 long key = packChunk(cx, cz);
                 if (heldForcedChunks.contains(key)) continue;
 
-                boolean ok = ChunkForcer.setForced(level, cx, cz, true);
-                if (ok) heldForcedChunks.add(key);
-                
-                //possible lag machine
-                level.getChunk(cx, cz);
+                long ticketId = (claimedJobKey != Long.MIN_VALUE) ? claimedJobKey : origin.asLong();
+
+                // Ticket it (this requests load/hold without sync generation)
+                boolean ok = ChunkForcer.setForced(level, cx, cz, true, ticketId);
+                if (ok) {
+                    heldForcedChunks.add(key);
+                }
 
                 did++;
             }
@@ -927,42 +1043,46 @@ public final class BlueprintPlacerEngine {
             return false;
         }
 
+
+
         private void releaseChunkForces() {
             if (heldForcedChunks.size() == 0) return;
+
+            long ticketId = (claimedJobKey != Long.MIN_VALUE) ? claimedJobKey : origin.asLong();
 
             for (int i = 0; i < heldForcedChunks.size(); i++) {
                 long key = heldForcedChunks.get(i);
                 int cx = unpackChunkX(key);
                 int cz = unpackChunkZ(key);
-                ChunkForcer.setForced(level, cx, cz, false);
+                ChunkForcer.setForced(level, cx, cz, false, ticketId);
             }
 
             dbg("FORCE_RELEASE bp=" + bp.id + " released=" + heldForcedChunks.size());
             heldForcedChunks.clear();
         }
 
-        private boolean stallIfUnloaded(int cX, int cZ) {
-            try {
-                // This will synchronously ensure the chunk is available
-                level.getChunk(cX, cZ);
 
+        // CHANGED: this is now truly a “stall if unloaded” (NO LOADING)
+        private boolean stallIfUnloaded(int cX, int cZ) {
+            if (isChunkLoadedNow(cX, cZ)) {
                 stalledTicks = 0;
                 return false;
-            } catch (Throwable t) {
-                stalledTicks++;
-                if (stalledTicks >= STALL_TICKS_LIMIT) {
-                    failed = true;
-                    failReason = FailReason.STALLED;
-                    dbg("STALL_ABORT bp=" + bp.id + " origin=" + origin + " atChunk=(" + cX + "," + cZ + ")");
-                    return true;
-                }
+            }
+
+            stalledTicks++;
+            if (stalledTicks >= STALL_TICKS_LIMIT) {
+                failed = true;
+                failReason = FailReason.STALLED;
+                dbg("STALL_ABORT bp=" + bp.id + " origin=" + origin + " atChunk=(" + cX + "," + cZ + ")");
                 return true;
             }
+            return true;
         }
 
         // ---------------- Bounds + Site check ----------------
 
-        private void initBoundsAndBaseY() {
+        // Step A: compute rectangle bounds only (NO world reads)
+        private void initBoundsOnly() {
             int fx = bp.sizeX > 0 ? bp.sizeX : (bp.sectionsX * bp.sectionSize);
             int fz = bp.sizeZ > 0 ? bp.sizeZ : (bp.sectionsZ * bp.sectionSize);
 
@@ -976,8 +1096,17 @@ public final class BlueprintPlacerEngine {
             prepMinZ = footMinZ - PREP_MARGIN;
             prepMaxZ = footMaxZ + PREP_MARGIN;
 
-            Integer chosen = chooseBaseYClamped();
-            if (chosen == null) return;
+            // IMPORTANT: the force bounds depend on prepMin/Max
+            // (safe to call here; it does not touch world)
+            if (!forceInit) initForceBounds();
+
+            prepInitialized = true;
+        }
+
+        // Step B: now that chunks are loaded, sample terrain and init cursors
+        private boolean initBaseYAndCursors(MinecraftServer server) {
+            Integer chosen = chooseBaseYClamped(server, 32);
+            if (chosen == null) return false;
 
             baseY = chosen - FOUNDATION_BURY;
             originYShift = baseY - origin.getY();
@@ -991,20 +1120,12 @@ public final class BlueprintPlacerEngine {
             scanX = prepMinX;
             scanZ = prepMinZ;
 
-            prepInitialized = true;
             checkInitialized = true;
-
-            dbg("SITE_BEGIN bp=" + bp.id
-                    + " origin=" + origin
-                    + " footprint=(" + (footMaxX - footMinX + 1) + "x" + (footMaxZ - footMinZ + 1) + ")"
-                    + " prepBounds=(" + (prepMaxX - prepMinX + 1) + "x" + (prepMaxZ - prepMinZ + 1) + ")"
-                    + " baseY=" + baseY
-                    + " yShift=" + originYShift
-                    + " checkStep=" + CHECK_STEP
-                    + " allowedBadFrac=" + ALLOWED_BAD_FRAC);
+            return true;
         }
 
-        private boolean checkSite(int budget, long deadlineNanos) {
+
+       private boolean checkSite(MinecraftServer server, int budget, long deadlineNanos) {
             if (!checkInitialized) return true;
 
             int ops = 0;
@@ -1016,15 +1137,6 @@ public final class BlueprintPlacerEngine {
                         checkBadLimit = Math.max(2, (int) Math.ceil(checkSamples * ALLOWED_BAD_FRAC));
                     }
                     if (checkBad > checkBadLimit) prepRejected = true;
-
-                    dbg("SITE_CHECK_DONE bp=" + bp.id
-                            + " samples=" + checkSamples
-                            + " bad=" + checkBad
-                            + " badLimit=" + checkBadLimit
-                            + " water=" + rejWater
-                            + " cut=" + rejTooMuchCut
-                            + " fill=" + rejTooMuchFill);
-
                     return true;
                 }
 
@@ -1039,7 +1151,7 @@ public final class BlueprintPlacerEngine {
 
                 int cX = x >> 4;
                 int cZ = z >> 4;
-                if (stallIfUnloaded(cX, cZ)) return failed ? true : false;
+                if (level.getChunkSource().getChunkNow(cX, cZ) == null) return false;
 
                 int surfaceY = BlueprintPlacerEngine.surfaceY(level, x, z);
                 int dist = distToFootprint(x, z);
@@ -1057,29 +1169,6 @@ public final class BlueprintPlacerEngine {
 
                 checkSamples++;
                 checkBadLimit = Math.max(2, (int) Math.ceil(checkSamples * ALLOWED_BAD_FRAC));
-
-                if (DEBUG && (checkSamples % DEBUG_EVERY_N_CHECK_SAMPLES == 0)) {
-                    dbg("SITE_CHECK_PROGRESS bp=" + bp.id
-                            + " samples=" + checkSamples
-                            + " bad=" + checkBad
-                            + " badLimit=" + checkBadLimit
-                            + " water=" + rejWater
-                            + " cut=" + rejTooMuchCut
-                            + " fill=" + rejTooMuchFill
-                            + " baseY=" + baseY);
-                }
-
-                if (checkSamples > 128 && checkBadLimit > 0 && checkBad > checkBadLimit + 12) {
-                    prepRejected = true;
-                    dbg("SITE_EARLY_REJECT bp=" + bp.id
-                            + " samples=" + checkSamples
-                            + " bad=" + checkBad
-                            + " badLimit=" + checkBadLimit
-                            + " water=" + rejWater
-                            + " cut=" + rejTooMuchCut
-                            + " fill=" + rejTooMuchFill);
-                    return true;
-                }
 
                 ops++;
             }
@@ -1347,7 +1436,7 @@ public final class BlueprintPlacerEngine {
         // ---------------- MAIN grading loop ----------------
         private long lastGradeLogNanos = 0;
 
-        private boolean gradeTerrain(int budget, long deadlineNanos) {
+        private boolean gradeTerrain(MinecraftServer server, int budget, long deadlineNanos) {
             if (gradeColsDone == 0) {
                 dbg("GRADE_BEGIN bp=" + bp.id
                         + " origin=" + origin
@@ -1392,7 +1481,7 @@ public final class BlueprintPlacerEngine {
 
                     int cX = x >> 4;
                     int cZ = z >> 4;
-                    if (stallIfUnloaded(cX, cZ)) return failed ? true : false;
+                    if (level.getChunkSource().getChunkNow(cX, cZ) == null) return false;
 
                     colActive = true;
                     colEdgeFade = 1.0;
@@ -1810,7 +1899,9 @@ public final class BlueprintPlacerEngine {
 
                 int cX = worldX >> 4;
                 int cZ = worldZ >> 4;
-                if (stallIfUnloaded(cX, cZ)) return failed ? true : false;
+                if (!ensureChunkLoadedDuringPlace(cX, cZ, server)) {
+                    return false; // wait this tick, try again next tick
+                }
 
                 scratch.set(worldX, worldY, worldZ);
 
@@ -1830,29 +1921,53 @@ public final class BlueprintPlacerEngine {
 
         }
 
-        private Integer chooseBaseYClamped() {
-            ArrayList<Integer> samples = new ArrayList<>();
-
-            for (int x = footMinX; x <= footMaxX; x += FOOTPRINT_SAMPLE_STEP) {
-                for (int z = footMinZ; z <= footMaxZ; z += FOOTPRINT_SAMPLE_STEP) {
-                    int cX = x >> 4;
-                    int cZ = z >> 4;
-                    if (stallIfUnloaded(cX, cZ)) return failed ? origin.getY() : null;
-
-                    samples.add(BlueprintPlacerEngine.surfaceY(level, x, z));
-                }
+        private Integer chooseBaseYClamped(MinecraftServer server, int budget) {
+            if (!baseInit) {
+                baseInit = true;
+                baseX = footMinX;
+                baseZ = footMinZ;
+                baseSamples.clear();
             }
 
-            if (samples.isEmpty()) return origin.getY();
+            int ops = 0;
+            while (ops < budget) {
+                int cX = baseX >> 4;
+                int cZ = baseZ >> 4;
 
-            samples.sort(Integer::compareTo);
-            int median = samples.get(samples.size() / 2);
-            int min = samples.get(0);
-            int max = samples.get(samples.size() - 1);
+                if (!ensureChunkLoadedDuringPreflight(cX, cZ, server)) {
+                    if ((server.getTickCount() % 40) == 0) {
+                        LOGGER.info("[BPQ][BASEY] waiting chunk=({}, {}) at sample=({}, {})", cX, cZ, baseX, baseZ);
+                    }
+                    return null; // yield, BUT keep baseX/baseZ where they are
+                }
+
+                baseSamples.add(BlueprintPlacerEngine.surfaceY(level, baseX, baseZ));
+
+                // advance cursor
+                baseZ += FOOTPRINT_SAMPLE_STEP;
+                if (baseZ > footMaxZ) {
+                    baseZ = footMinZ;
+                    baseX += FOOTPRINT_SAMPLE_STEP;
+                }
+
+                // done?
+                if (baseX > footMaxX) {
+                    break;
+                }
+
+                ops++;
+            }
+
+            if (baseX <= footMaxX) return null; // not finished yet
+
+            // compute median/clamp from baseSamples (same math as before)
+            baseSamples.sort(Integer::compare);
+            int median = baseSamples.getInt(baseSamples.size() / 2);
+            int min = baseSamples.getInt(0);
+            int max = baseSamples.getInt(baseSamples.size() - 1);
 
             int lo = max - MAX_CUT_HEIGHT;
             int hi = min + MAX_FILL_DEPTH;
-
             if (lo > hi) return median;
             return clamp(median, lo, hi);
         }

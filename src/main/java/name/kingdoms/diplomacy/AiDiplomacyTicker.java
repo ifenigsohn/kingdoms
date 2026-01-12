@@ -20,7 +20,7 @@ public final class AiDiplomacyTicker {
     private AiDiplomacyTicker() {}
 
     // How often AIs attempt interactions
-    private static final int INTERVAL_TICKS = 20 * 30 * 1; // every 30 seconds
+    private static final int INTERVAL_TICKS = 20 * 60 * 5; // every 5 minutes for playtest
 
     // Limit how many targets each AI considers per cycle
     private static final int MAX_TARGETS_PER_AI = 6;

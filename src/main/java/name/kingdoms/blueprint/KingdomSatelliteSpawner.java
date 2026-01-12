@@ -1,6 +1,7 @@
 package name.kingdoms.blueprint;
 
 import com.mojang.logging.LogUtils;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.RandomSource;
@@ -12,8 +13,10 @@ import java.util.*;
 /**
  * Plans + enqueues 5-25 "satellite" blueprints around a castle anchor.
  *
- * Uses BlueprintPlacerEngine to do per-building site check + grading + placement.
- * That means we only need to plan good candidate locations here.
+ * IMPORTANT CHANGE (server-safe):
+ * - Satellite placement is now DRIP-FED over time instead of enqueued all at once.
+ * - enqueueSatellitesAfterCastle() only plans/queues SatJobs.
+ * - init() processes up to SATS_PER_TICK jobs per tick, and pauses if BP queue is busy.
  */
 public final class KingdomSatelliteSpawner {
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -22,18 +25,200 @@ public final class KingdomSatelliteSpawner {
 
     public enum KingdomSize { SMALL, MEDIUM, LARGE }
 
-
     // NOTE: enforced relative to the CASTLE FOOTPRINT RECTANGLE, not just origin
     public static final int MIN_DIST_FROM_CASTLE = 20;
     public static final int MIN_CENTER_SPACING  = 50;
 
-    private static final int CANDIDATES_PER_PASS = 600;
+    // Reduced from 600 to reduce one-tick CPU spikes
+    private static final int CANDIDATES_PER_PASS = 180;
 
     private static final int MOUNTAIN_Y_ABOVE_SEA = 40;
-    private static final int WATER_CHECK_RADIUS = 8;
+    private static final int WATER_CHECK_RADIUS = 4;
 
     private enum Pass { STRICT, RELAXED, LAST_RESORT }
 
+    // --------------------
+    // Satellite drip queue
+    // --------------------
+    private static final Deque<SatJob> SAT_QUEUE = new ArrayDeque<>();
+
+    // --------------------
+    // Satellite plan queue (NEW)
+    // --------------------
+    private static final Deque<PlanJob> PLAN_QUEUE = new ArrayDeque<>();
+
+    private record PlanJob(
+            ServerLevel level,
+            BlockPos castleOrigin,
+            Blueprint castleBp,
+            String modId,
+            long regionKey,
+            KingdomSize size,
+            List<String> blueprintIds,
+            RandomSource rng,
+            int delayTicks
+    ) {}
+
+
+    /** How many satellites to enqueue per server tick */
+    private static final int SATS_PER_TICK = 1;
+
+    /** Pause satellite enqueue if blueprint placer is already busy */
+    private static final int SAT_MAX_BP_QUEUE = 1;
+
+    private record SatJob(
+            ServerLevel level,
+            String modId,
+            long regionKey,
+            BlockPos origin,
+            String bpId,
+            long buildingKey
+    ) {}
+
+    public static void enqueuePlanAfterDelay(
+            ServerLevel level,
+            BlockPos castleOrigin,
+            Blueprint castleBp,
+            String modId,
+            long regionKey,
+            KingdomSize size,
+            List<String> blueprintIds,
+            RandomSource rng,
+            int delayTicks
+    ) {
+        PLAN_QUEUE.addLast(new PlanJob(level, castleOrigin, castleBp, modId, regionKey, size, blueprintIds, rng, delayTicks));
+    }
+
+    /**
+     * MUST be called once during mod init (similar to RoadBuilder.init()).
+     * This processes queued satellite jobs gradually, smoothing TPS.
+     */
+    public static void init() {
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
+            int did = 0;
+            
+            // --------------------
+            // delayed planning (run at most 1 plan job per tick)
+            // --------------------
+            if (!PLAN_QUEUE.isEmpty()) {
+                PlanJob pj = PLAN_QUEUE.peekFirst();
+                if (pj != null) {
+                    if (pj.delayTicks() > 0) {
+                        // decrement delay (keep it at front)
+                        PLAN_QUEUE.pollFirst();
+                        PLAN_QUEUE.addFirst(new PlanJob(
+                                pj.level(),
+                                pj.castleOrigin(),
+                                pj.castleBp(),
+                                pj.modId(),
+                                pj.regionKey(),
+                                pj.size(),
+                                pj.blueprintIds(),
+                                pj.rng(),
+                                pj.delayTicks() - 1
+                        ));
+                    } else {
+                        // delay complete: run planning now
+                        PLAN_QUEUE.pollFirst();
+                        try {
+                            enqueueSatellitesAfterCastle(
+                                    pj.level(),
+                                    pj.castleOrigin(),
+                                    pj.castleBp(),
+                                    pj.modId(),
+                                    pj.regionKey(),
+                                    pj.size(),
+                                    pj.blueprintIds(),
+                                    pj.rng()
+                            );
+                        } catch (Exception ex) {
+                            LOGGER.warn("[Kingdoms] Satellite planning failed for region={} origin={}",
+                                    pj.regionKey(), pj.castleOrigin(), ex);
+                        }
+                    }
+                }
+            }
+
+            while (did < SATS_PER_TICK && !SAT_QUEUE.isEmpty()) {
+                if (BlueprintPlacerEngine.getQueueSize() >= SAT_MAX_BP_QUEUE) break;
+
+               SatJob job = SAT_QUEUE.pollFirst();
+                if (job == null) break;
+
+                try {
+                    // Capture everything the lambdas need (must be effectively final)
+                    final ServerLevel lvl = job.level();
+                    final String modId = job.modId();
+                    final long rrk = job.regionKey();
+                    final BlockPos satOrigin = job.origin();
+                    final String satBpId = job.bpId();
+                    final long buildingKey = job.buildingKey();
+
+                    Blueprint bp = Blueprint.load(lvl.getServer(), modId, satBpId);
+
+                    // Start "in-flight" gate only after we successfully loaded bp
+                    KingdomGenGate.beginOne();
+
+                    Runnable onSatSuccess = () -> {
+                        try {
+                            RoadAnchorState st = RoadAnchorState.get(lvl);
+
+                            List<BlockPos> anchors = RoadAnchors.consumeBarrierAnchors(lvl, satOrigin);
+                            if (anchors.isEmpty()) {
+                                anchors = List.of(RoadAnchors.fallbackFromBlueprintOrigin(lvl, satOrigin));
+                            }
+
+                            for (BlockPos anchorPos : anchors) {
+                                st.add(rrk, anchorPos);
+                            }
+
+                            LOGGER.info("[Kingdoms] Satellite anchors added region={} origin={} anchors={} bp={}",
+                                    rrk, satOrigin, anchors, satBpId);
+
+                        } catch (Exception e) {
+                            LOGGER.warn("[Kingdoms] Failed to add satellite anchors region={} origin={} bp={}",
+                                    rrk, satOrigin, satBpId, e);
+                        } finally {
+                            // IMPORTANT: activity ends when the blueprint is finished/failed
+                            RegionActivityState.get(lvl).end(rrk);
+                            KingdomGenGate.oneSatelliteFinished();
+                        }
+                    };
+
+                    Runnable onSatFail = () -> {
+                        try {
+                            // nothing
+                        } finally {
+                            RegionActivityState.get(lvl).end(rrk);
+                            KingdomGenGate.oneSatelliteFinished();
+                        }
+                    };
+
+                    // IMPORTANT: begin activity only when we actually enqueue
+                    RegionActivityState.get(lvl).begin(rrk);
+
+                    BlueprintPlacerEngine.enqueueWorldgen(
+                            lvl, bp, satOrigin, modId, false,
+                            rrk, buildingKey,
+                            onSatSuccess,
+                            onSatFail
+                    );
+
+                } catch (Exception ex) {
+                    // If we fail before enqueue, we never began activity and never started the gate.
+                    LOGGER.warn("[Kingdoms] Failed to enqueue satellite blueprint '{}' at {}",
+                            job.bpId(), job.origin(), ex);
+                }
+                               
+                did++;
+            }
+        });
+    }
+
+    /**
+     * Plan satellites and queue them for drip-fed enqueue.
+     * No longer directly enqueues all satellites in a single tick.
+     */
     public static void enqueueSatellitesAfterCastle(
             ServerLevel level,
             BlockPos castleOrigin,
@@ -44,6 +229,7 @@ public final class KingdomSatelliteSpawner {
             List<String> blueprintIds,
             RandomSource rng
     ) {
+
         int target = pickBuildingCount(size, rng);
         if (target <= 0 || blueprintIds.isEmpty()) return;
 
@@ -54,11 +240,7 @@ public final class KingdomSatelliteSpawner {
         for (String id : blueprintIds) {
             if (id == null || id.isBlank()) continue;
 
-            // never pick the same blueprint as the castle itself
             if (castleId != null && id.equals(castleId)) continue;
-
-            // never pick anything that looks like a castle (optional but recommended)
-            // If you name castles differently, adjust this rule.
             if (id.startsWith("castle")) continue;
 
             pool.add(id);
@@ -80,16 +262,16 @@ public final class KingdomSatelliteSpawner {
         int castleMaxZ = castleOrigin.getZ() + fz - 1;
 
         ArrayList<BlockPos> chosenCenters = new ArrayList<>(target);
-        int placed = 0;
+        int planned = 0;
 
         for (Pass pass : Pass.values()) {
-            if (placed >= target) break;
+            if (planned >= target) break;
 
             ArrayList<Candidate> candidates = generateCandidates(level, castleOrigin, size, rng, pass, CANDIDATES_PER_PASS);
             candidates.sort(Comparator.comparingInt(c -> c.score));
 
             for (Candidate c : candidates) {
-                if (placed >= target) break;
+                if (planned >= target) break;
 
                 int dToCastleRect = distToRectXZ(
                         c.pos.getX(), c.pos.getZ(),
@@ -103,6 +285,9 @@ public final class KingdomSatelliteSpawner {
                 String bpId = pool.get(rng.nextInt(pool.size()));
 
                 try {
+                    // We still load the blueprint here only to compute footprint (size).
+                    // This is far cheaper than enqueuing/placing everything in one tick,
+                    // and candidate count has been reduced.
                     Blueprint bp = Blueprint.load(level.getServer(), modId, bpId);
 
                     int sx = footprintX(bp);
@@ -115,65 +300,25 @@ public final class KingdomSatelliteSpawner {
                     int y = surfaceY(level, ox, oz);
                     BlockPos origin = new BlockPos(ox, y, oz);
 
-                    // IMPORTANT: unique key per building job
-                    long buildingKey = mixKey(regionKey, placed, origin);
+                    // Unique key per building job
+                    long buildingKey = mixKey(regionKey, planned, origin);
 
-                    // Gate for async-ish placement pipeline
-                    KingdomGenGate.beginOne();
-
-                    // capture per-satellite for callbacks
-                    final BlockPos satOrigin = origin;
-                    final String satBpId = bpId;
-
-                    Runnable onSatSuccess = () -> {
-                        try {
-                            RoadAnchorState st = RoadAnchorState.get(level);
-
-                            // If satellites also use your SOLID -> BARRIER -> BARRIER markers:
-                            List<BlockPos> anchors = RoadAnchors.consumeBarrierAnchors(level, satOrigin);
-
-                            // Fallback: if no barriers found, use the old "origin+1,+1" heightmap anchor
-                            if (anchors.isEmpty()) {
-                                anchors = List.of(RoadAnchors.fallbackFromBlueprintOrigin(level, satOrigin));
-                            }
-
-                            for (BlockPos anchorPos : anchors) {
-                                st.add(regionKey, anchorPos);
-                            }
-
-                            LOGGER.info("[Kingdoms] Satellite anchors added region={} origin={} anchors={} bp={}",
-                                    regionKey, satOrigin, anchors, satBpId);
-
-                        } catch (Exception e) {
-                            LOGGER.warn("[Kingdoms] Failed to add satellite anchors region={} origin={} bp={}",
-                                    regionKey, satOrigin, satBpId, e);
-                        } finally {
-                            KingdomGenGate.oneSatelliteFinished();
-                        }
-                    };
-
-                    Runnable onSatFail = () -> KingdomGenGate.oneSatelliteFinished();
-
-                    BlueprintPlacerEngine.enqueueWorldgen(
-                            level, bp, origin, modId, false,
-                            regionKey, buildingKey,
-                            onSatSuccess,
-                            onSatFail
-                    );
-
+                    // Queue for drip-feed tick
+                    SAT_QUEUE.addLast(new SatJob(level, modId, regionKey, origin, bpId, buildingKey));
+                   
                     chosenCenters.add(origin);
-                    placed++;
+                    planned++;
 
                 } catch (Exception ex) {
-                    KingdomGenGate.oneSatelliteFinished();
-                    LOGGER.warn("[Kingdoms] Failed to enqueue satellite blueprint '{}' near {}",
+                    LOGGER.warn("[Kingdoms] Failed to plan satellite blueprint '{}' near {}",
                             bpId, c.pos, ex);
                 }
             }
         }
 
-        LOGGER.info("[Kingdoms] Enqueued {} / {} satellites around castle at {} (size={})",
-                placed, target, castleOrigin, size);
+        LOGGER.info("[Kingdoms] Planned {} / {} satellites around castle at {} (size={}) (satQueueTotal={})",
+        planned, target, castleOrigin, size, SAT_QUEUE.size());
+
     }
 
     private static int pickBuildingCount(KingdomSize size, RandomSource rng) {
@@ -238,13 +383,12 @@ public final class KingdomSatelliteSpawner {
     private record Candidate(BlockPos pos, int score) {}
 
     private static ArrayList<Candidate> generateCandidates(
-        ServerLevel level,
-        BlockPos castle,
-        KingdomSize size,
-        RandomSource rng,
-        Pass pass,
-        int count
-
+            ServerLevel level,
+            BlockPos castle,
+            KingdomSize size,
+            RandomSource rng,
+            Pass pass,
+            int count
     ) {
         ArrayList<Candidate> out = new ArrayList<>(count);
         int sea = level.getSeaLevel();
