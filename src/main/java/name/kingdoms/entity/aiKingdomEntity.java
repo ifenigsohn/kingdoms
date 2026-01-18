@@ -62,6 +62,10 @@ public class aiKingdomEntity extends PathfinderMob {
     private static final EntityDataAccessor<BlockPos> SPAWNER_POS =
             SynchedEntityData.defineId(aiKingdomEntity.class, EntityDataSerializers.BLOCK_POS);
 
+    private static final EntityDataAccessor<String> KINGDOM_UUID =
+        SynchedEntityData.defineId(aiKingdomEntity.class, EntityDataSerializers.STRING);
+
+
     // --- Positions ---
     @Nullable private BlockPos homePos;
     @Nullable private BlockPos assignedBedPos;
@@ -254,7 +258,7 @@ public class aiKingdomEntity extends PathfinderMob {
         builder.define(AI_TYPE_ID, "king");
         builder.define(KING_NAME, "");
         builder.define(SKIN_ID, 0);
-
+        builder.define(KINGDOM_UUID, "");
         builder.define(HAS_SPAWNER, false);
         builder.define(SPAWNER_POS, BlockPos.ZERO);
     }
@@ -571,5 +575,16 @@ public class aiKingdomEntity extends PathfinderMob {
             try { relationByPlayer.put(UUID.fromString(u), Mth.clamp(v, -10, 10)); }
             catch (IllegalArgumentException ignored) {}
         }
+    }
+
+    @Nullable
+    public UUID getKingdomUUID() {
+        String s = this.entityData.get(KINGDOM_UUID);
+        if (s == null || s.isBlank()) return null;
+        try { return UUID.fromString(s); } catch (IllegalArgumentException e) { return null; }
+    }
+
+    public void setKingdomUUID(@Nullable UUID id) {
+        this.entityData.set(KINGDOM_UUID, id == null ? "" : id.toString());
     }
 }

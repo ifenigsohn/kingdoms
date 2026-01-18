@@ -19,7 +19,7 @@ import java.util.UUID;
 public final class DiplomacyMailGenerator {
 
     // tune
-    private static final int PERIOD_TICKS = 20 * 30 * 1; // every 30 seconds DEBUG FOR DEV
+    private static final int PERIOD_TICKS = 20 * 60 * 5; // every 5 minutes DEBUG FOR DEV
     private static final double CHANCE_PER_PERIOD = 0.30;
     private static final long EXPIRE_TICKS = 20L * 60L * 10L; // 10 min
 
@@ -82,35 +82,81 @@ public final class DiplomacyMailGenerator {
         return Math.max(0.0, Math.min(1.0, v));
     }
 
-    private static Letter.CasusBelli pickCbForAi(RandomSource r, int rel, Object personality) {
-        // Simple: bad relations -> likely "INSULT" or "BORDER", otherwise UNKNOWN.
-        // Personality can bias this a bit.
-        String p = (personality == null) ? "" : personality.toString().toLowerCase();
+    private static Letter.CasusBelli pickCbForAi(RandomSource r, int rel, aiKingdomState.KingdomPersonality personality) {
+        // Numeric personality (no string parsing)
+        double hon = personality == null ? 0.50 : personality.honor();
+        double agg = personality == null ? 0.35 : personality.aggression();
+        double grd = personality == null ? 0.50 : personality.greed();
+        double pra = personality == null ? 0.60 : personality.pragmatism();
+        double tru = personality == null ? 0.50 : personality.trustBias();
 
-        double borderBias = 0.20;
-        double insultBias = 0.20;
-        double treatyBias = 0.10;
+        // Base weights
+        double borderBias   = 0.20;
+        double insultBias   = 0.20;
+        double treatyBias   = 0.10;
         double resourceBias = 0.10;
-        double unknownBias = 0.40;
+        double unknownBias  = 0.40;
 
-        if (rel < -50) { insultBias += 0.20; borderBias += 0.20; unknownBias -= 0.20; }
-        else if (rel < -15) { insultBias += 0.10; borderBias += 0.10; unknownBias -= 0.10; }
+        // Relations push toward "real" reasons when hostile
+        if (rel < -50) {
+            insultBias += 0.22;
+            borderBias += 0.18;
+            unknownBias -= 0.20;
+        } else if (rel < -15) {
+            insultBias += 0.12;
+            borderBias += 0.10;
+            unknownBias -= 0.10;
+        } else if (rel > 25) {
+            // Friendly relations make "unknown" more likely (less justification needed)
+            unknownBias += 0.08;
+            insultBias -= 0.04;
+            borderBias -= 0.04;
+        }
 
-        if (p.contains("honor") || p.contains("lawful")) treatyBias += 0.10;
-        if (p.contains("trader") || p.contains("merchant")) resourceBias += 0.10;
-        if (p.contains("aggressive") || p.contains("warlike")) { insultBias += 0.10; borderBias += 0.10; unknownBias -= 0.10; }
+        // Personality biases
+        // Aggressive kingdoms justify with border/insult
+        insultBias += (agg - 0.35) * 0.35;
+        borderBias += (agg - 0.35) * 0.25;
 
-        // normalize
-        double sum = Math.max(0.001, borderBias + insultBias + treatyBias + resourceBias + unknownBias);
-        borderBias /= sum; insultBias /= sum; treatyBias /= sum; resourceBias /= sum; unknownBias /= sum;
+        // Honorable kingdoms prefer treaty justifications
+        treatyBias += (hon - 0.50) * 0.35;
 
-        double x = r.nextDouble();
-        if ((x -= borderBias) < 0) return Letter.CasusBelli.BORDER_VIOLATION;
-        if ((x -= insultBias) < 0) return Letter.CasusBelli.INSULT;
-        if ((x -= treatyBias) < 0) return Letter.CasusBelli.BROKEN_TREATY;
-        if ((x -= resourceBias) < 0) return Letter.CasusBelli.RESOURCE_DISPUTE;
+        // Greedy + pragmatic kingdoms focus on resources
+        resourceBias += (grd - 0.50) * 0.25;
+        resourceBias += (pra - 0.60) * 0.20;
+
+        // Trust reduces "treaty grievance" and "insult grievance" slightly
+        treatyBias -= (tru - 0.50) * 0.10;
+        insultBias -= (tru - 0.50) * 0.08;
+
+        // Clamp to non-negative
+        borderBias = Math.max(0.0, borderBias);
+        insultBias = Math.max(0.0, insultBias);
+        treatyBias = Math.max(0.0, treatyBias);
+        resourceBias = Math.max(0.0, resourceBias);
+        unknownBias = Math.max(0.0, unknownBias);
+
+        // Normalize
+        double sum = borderBias + insultBias + treatyBias + resourceBias + unknownBias;
+        if (sum <= 0.000001) return Letter.CasusBelli.UNKNOWN;
+
+        double x = r.nextDouble() * sum;
+
+        x -= borderBias;
+        if (x < 0) return Letter.CasusBelli.BORDER_VIOLATION;
+
+        x -= insultBias;
+        if (x < 0) return Letter.CasusBelli.INSULT;
+
+        x -= treatyBias;
+        if (x < 0) return Letter.CasusBelli.BROKEN_TREATY;
+
+        x -= resourceBias;
+        if (x < 0) return Letter.CasusBelli.RESOURCE_DISPUTE;
+
         return Letter.CasusBelli.UNKNOWN;
     }
+
 
 
     // ------------------------------------------
@@ -370,29 +416,32 @@ public final class DiplomacyMailGenerator {
         // contracts: max amount caps number of trades; keep moderate
         double maxAmt = clamp(60 + (r.nextDouble() * 240.0), 60, 350);
 
-        // IMPORTANT: If AI is "giving" (REQUEST/CONTRACT), don’t offer more than it has.
-        if (kind == Letter.Kind.REQUEST || kind == Letter.Kind.CONTRACT) {
+        // IMPORTANT: If AI is giving A (OFFER/CONTRACT), don’t offer more than it has.
+        if (kind == Letter.Kind.OFFER || kind == Letter.Kind.CONTRACT) {
             giveAmt = clamp(giveAmt, 1, Math.max(1, giveStock));
         }
 
+
         return switch (kind) {
             case REQUEST -> {
-                // AI gives A to player if accepted (your current semantics)
-               String note = AiLetterText.generateEconomic(
-                r, Letter.Kind.REQUEST, fromName, toName, rel, aiK.personality,
-                give, giveAmt, null, 0.0, 0.0
-        );
-        yield Letter.request(fromKingdomId, true, fromName, toPlayer, give, giveAmt, nowTick, expires, note);
-
-            }
-            case OFFER -> {
-                // Player gives A to AI if accepted (your current semantics)
+                // AI demands A from player (player pays AI)
                 String note = AiLetterText.generateEconomic(
-                        r, Letter.Kind.OFFER, fromName, toName, rel, aiK.personality,
+                        r, Letter.Kind.REQUEST, fromName, toName, rel, aiK.personality,
                         want, wantAmt, null, 0.0, 0.0
                 );
-                yield Letter.offer(fromKingdomId, true, fromName, toPlayer, want, wantAmt, nowTick, expires, note);
+                yield Letter.request(fromKingdomId, true, fromName, toPlayer, want, wantAmt, nowTick, expires, note);
+            }
 
+           case OFFER -> {
+                // AI offers A to player (AI pays player)
+                // Clamp offer by what AI actually has (optional but recommended)
+                double offerAmt = clamp(giveAmt, 1, Math.max(1, giveStock));
+
+                String note = AiLetterText.generateEconomic(
+                        r, Letter.Kind.OFFER, fromName, toName, rel, aiK.personality,
+                        give, offerAmt, null, 0.0, 0.0
+                );
+                yield Letter.offer(fromKingdomId, true, fromName, toPlayer, give, offerAmt, nowTick, expires, note);
             }
             case CONTRACT -> {
                 // AI gives A, wants B
@@ -452,6 +501,7 @@ public final class DiplomacyMailGenerator {
                         null, 0.0,
                         0.0,
                         null,
+                        "",
                         note
                 );
             }

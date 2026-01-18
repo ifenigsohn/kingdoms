@@ -22,6 +22,10 @@ public record kingdomHoverSyncS2CPayload(
         int ticketsAlive,
         int ticketsMax,
 
+        boolean atWar,
+        String allies,
+        String enemies,
+
         double gold,
         double meat, double grain, double fish,
         double wood, double metal,
@@ -37,70 +41,83 @@ public record kingdomHoverSyncS2CPayload(
             new Type<>(ResourceLocation.fromNamespaceAndPath("kingdoms", "kingdom_hover_sync"));
 
     public static final StreamCodec<RegistryFriendlyByteBuf, kingdomHoverSyncS2CPayload> CODEC =
-            StreamCodec.of(
-                    (buf, p) -> {
-                        buf.writeUUID(p.kingdomId());
-                        buf.writeUtf(p.kingdomName());
+        StreamCodec.of(
+                (buf, p) -> {
+                    buf.writeUUID(p.kingdomId());
+                    buf.writeUtf(p.kingdomName());
 
-                        buf.writeUUID(p.rulerId());
-                        buf.writeUtf(p.rulerName());
+                    buf.writeUUID(p.rulerId());
+                    buf.writeUtf(p.rulerName());
 
-                        buf.writeVarInt(p.relation());
+                    buf.writeVarInt(p.relation());
 
-                        buf.writeVarInt(p.soldiersAlive());
-                        buf.writeVarInt(p.soldiersMax());
+                    buf.writeVarInt(p.soldiersAlive());
+                    buf.writeVarInt(p.soldiersMax());
 
-                        buf.writeVarInt(p.ticketsAlive());
-                        buf.writeVarInt(p.ticketsMax());
+                    buf.writeVarInt(p.ticketsAlive());
+                    buf.writeVarInt(p.ticketsMax());
 
-                        buf.writeDouble(p.gold());
-                        buf.writeDouble(p.meat());
-                        buf.writeDouble(p.grain());
-                        buf.writeDouble(p.fish());
-                        buf.writeDouble(p.wood());
-                        buf.writeDouble(p.metal());
-                        buf.writeDouble(p.armor());
-                        buf.writeDouble(p.weapons());
-                        buf.writeDouble(p.gems());
-                        buf.writeDouble(p.horses());
-                        buf.writeDouble(p.potions());
+                    // war info (MUST come here to match record order)
+                    buf.writeBoolean(p.atWar());
+                    buf.writeUtf(p.allies());
+                    buf.writeUtf(p.enemies());
 
-                        // ✅ AI info
-                        buf.writeBoolean(p.isAi());
-                        buf.writeVarInt(p.aiSkinId());
-                    },
-                    (buf) -> new kingdomHoverSyncS2CPayload(
-                            buf.readUUID(),
-                            buf.readUtf(),
+                    // economy
+                    buf.writeDouble(p.gold());
+                    buf.writeDouble(p.meat());
+                    buf.writeDouble(p.grain());
+                    buf.writeDouble(p.fish());
+                    buf.writeDouble(p.wood());
+                    buf.writeDouble(p.metal());
+                    buf.writeDouble(p.armor());
+                    buf.writeDouble(p.weapons());
+                    buf.writeDouble(p.gems());
+                    buf.writeDouble(p.horses());
+                    buf.writeDouble(p.potions());
 
-                            buf.readUUID(),
-                            buf.readUtf(),
+                    // AI info (also in record order)
+                    buf.writeBoolean(p.isAi());
+                    buf.writeVarInt(p.aiSkinId());
+                },
+                (buf) -> new kingdomHoverSyncS2CPayload(
+                        buf.readUUID(),
+                        buf.readUtf(),
 
-                            buf.readVarInt(),
+                        buf.readUUID(),
+                        buf.readUtf(),
 
-                            buf.readVarInt(),
-                            buf.readVarInt(),
+                        buf.readVarInt(),
 
-                            buf.readVarInt(),
-                            buf.readVarInt(),
+                        buf.readVarInt(),
+                        buf.readVarInt(),
 
-                            buf.readDouble(),
-                            buf.readDouble(),
-                            buf.readDouble(),
-                            buf.readDouble(),
-                            buf.readDouble(),
-                            buf.readDouble(),
-                            buf.readDouble(),
-                            buf.readDouble(),
-                            buf.readDouble(),
-                            buf.readDouble(),
-                            buf.readDouble(),
+                        buf.readVarInt(),
+                        buf.readVarInt(),
 
-                            // ✅ AI info
-                            buf.readBoolean(),
-                            buf.readVarInt()
-                    )
-            );
+                        // war info
+                        buf.readBoolean(),
+                        buf.readUtf(),
+                        buf.readUtf(),
+
+                        // economy
+                        buf.readDouble(),
+                        buf.readDouble(),
+                        buf.readDouble(),
+                        buf.readDouble(),
+                        buf.readDouble(),
+                        buf.readDouble(),
+                        buf.readDouble(),
+                        buf.readDouble(),
+                        buf.readDouble(),
+                        buf.readDouble(),
+                        buf.readDouble(),
+
+                        // AI info
+                        buf.readBoolean(),
+                        buf.readVarInt()
+                )
+        );
+
 
     @Override
     public Type<? extends CustomPacketPayload> type() { return TYPE; }

@@ -9,8 +9,21 @@ import java.util.UUID;
 public final class clientHoverCardCache {
     private clientHoverCardCache() {}
 
-    private static final Map<UUID, kingdomHoverSyncS2CPayload> CACHE = new HashMap<>();
+    public record Entry(kingdomHoverSyncS2CPayload payload, long receivedAtMs) {}
 
-    public static void put(kingdomHoverSyncS2CPayload p) { CACHE.put(p.kingdomId(), p); }
-    public static kingdomHoverSyncS2CPayload get(UUID id) { return CACHE.get(id); }
+    private static final Map<UUID, Entry> CACHE = new HashMap<>();
+
+    public static void put(kingdomHoverSyncS2CPayload p) {
+        CACHE.put(p.kingdomId(), new Entry(p, System.currentTimeMillis()));
+    }
+
+    public static kingdomHoverSyncS2CPayload get(UUID id) {
+        Entry e = CACHE.get(id);
+        return e == null ? null : e.payload();
+    }
+
+    public static long ageMs(UUID id) {
+        Entry e = CACHE.get(id);
+        return e == null ? Long.MAX_VALUE : (System.currentTimeMillis() - e.receivedAtMs());
+    }
 }

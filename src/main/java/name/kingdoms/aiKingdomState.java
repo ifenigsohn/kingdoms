@@ -132,7 +132,7 @@ public class aiKingdomState extends SavedData {
         kk.borderMaxZ = k.borderMaxZ;
         ks.claimRect(level, k.id, k.borderMinX, k.borderMaxX, k.borderMinZ, k.borderMaxZ);
 
-        // economy (add food buckets!)
+        // economy (
         k.gold    = range(r, 200, 2000);
         k.meat    = range(r, 50, 800);
         k.grain   = range(r, 80, 1200);
@@ -217,6 +217,123 @@ public class aiKingdomState extends SavedData {
                         )
                 ));
     }
+
+        public record AiKingdomSnap(
+                UUID id,
+
+                // identity / flavor
+                UUID kingUuid,
+                String name,
+                BlockPos origin,
+                int skinId,
+                KingdomSize size,
+                KingdomPersonality personality,
+
+                // army
+                int maxSoldiers,
+                int aliveSoldiers,
+
+                // economy
+                double gold, double meat, double grain, double fish,
+                double wood, double metal, double gems,
+                double potions, double armor, double horses, double weapons,
+
+                // stability
+                int happiness,
+                int security,
+
+                // border
+                boolean hasBorder,
+                int borderMinX, int borderMaxX, int borderMinZ, int borderMaxZ
+        ) {}
+
+        public java.util.Map<UUID, AiKingdomSnap> exportSnapshot() {
+        java.util.Map<UUID, AiKingdomSnap> out = new java.util.HashMap<>();
+
+                for (var e : kingdoms.entrySet()) {
+                        UUID id = e.getKey();
+                        AiKingdom k = e.getValue();
+                        if (k == null) continue;
+
+                        out.put(id, new AiKingdomSnap(
+                                k.id,
+
+                                k.kingUuid,
+                                k.name,
+                                k.origin,
+                                k.skinId,
+                                k.size,
+                                k.personality,
+
+                                k.maxSoldiers,
+                                k.aliveSoldiers,
+
+                                k.gold, k.meat, k.grain, k.fish,
+                                k.wood, k.metal, k.gems,
+                                k.potions, k.armor, k.horses, k.weapons,
+
+                                k.happiness,
+                                k.security,
+
+                                k.hasBorder,
+                                k.borderMinX, k.borderMaxX, k.borderMinZ, k.borderMaxZ
+                        ));
+                }
+
+        return out;
+        }
+
+        public void importSnapshot(java.util.Map<UUID, AiKingdomSnap> snap) {
+        if (snap == null) return;
+
+                for (var e : snap.entrySet()) {
+                        UUID id = e.getKey();
+                        AiKingdomSnap s = e.getValue();
+                        if (id == null || s == null) continue;
+
+                        AiKingdom k = kingdoms.get(id);
+                        if (k == null) continue; // if A/B uses same world, this should exist
+
+                        // identity/flavor
+                        k.name = s.name();
+                        k.skinId = s.skinId();
+                        k.size = s.size();
+                        k.personality = s.personality();
+
+                        // army
+                        k.maxSoldiers = s.maxSoldiers();
+                        k.aliveSoldiers = s.aliveSoldiers();
+
+                        // economy
+                        k.gold = s.gold();
+                        k.meat = s.meat();
+                        k.grain = s.grain();
+                        k.fish = s.fish();
+                        k.wood = s.wood();
+                        k.metal = s.metal();
+                        k.gems = s.gems();
+                        k.potions = s.potions();
+                        k.armor = s.armor();
+                        k.horses = s.horses();
+                        k.weapons = s.weapons();
+
+                        // stability
+                        k.happiness = s.happiness();
+                        k.security = s.security();
+
+                        // border
+                        k.hasBorder = s.hasBorder();
+                        k.borderMinX = s.borderMinX();
+                        k.borderMaxX = s.borderMaxX();
+                        k.borderMinZ = s.borderMinZ();
+                        k.borderMaxZ = s.borderMaxZ();
+                }
+
+                setDirty();
+        }
+
+
+
 
     public record EconomyData(
             double gold,
@@ -421,52 +538,130 @@ public class aiKingdomState extends SavedData {
         var ws = name.kingdoms.war.WarState.get(level.getServer());
 
         for (AiKingdom k : kingdoms.values()) {
-            double happy = k.happiness / 100.0;
-            double sec = k.security / .3;
 
             boolean inWar = ws.isAtWarWithAny(k.id);
             tickSoldiers(k, level.random, inWar);
 
 
-            // income-ish
-            k.gold += 2 + 8 * happy + 4 * sec + range(r, -3, 6);
+                // normalized (FIXED)
+                double happy = k.happiness / 100.0;
+                double sec   = k.security  / 100.0;
 
-            // food drift (simple model; later you can base it on jobs/biomes)
-            k.grain += 2 + 6 * happy + range(r, -3, 8);
-            k.meat  += 1 + 4 * sec   + range(r, -3, 6);
-            k.fish  += range(r, -2, 5);
+                var p = k.personality;
+                double greed = (p == null ? 0.50 : p.greed());
+                double gen   = (p == null ? 0.50 : p.generosity());
+                double prag  = (p == null ? 0.60 : p.pragmatism());
+                double honor = (p == null ? 0.50 : p.honor());
 
-            // mats drift
-            k.wood  += range(r, -5, 12);
-            k.metal += range(r, -3, 8);
+                // size proxy (later replace with population/settlements)
+                int size = Math.max(1, k.maxSoldiers);
+                double sizeScale = Math.sqrt(size); // avoids insane scaling with big kingdoms
 
-            // military
-            k.weapons += (sec > 0.60 ? range(r, 0, 2) : range(r, -2, 1));
-            k.armor   += (sec > 0.70 ? range(r, 0, 1) : range(r, -1, 1));
+                // "hoarding appetite" (greedy kingdoms aim for bigger stockpiles)
+                double hoard = 0.85 + 0.75 * greed - 0.20 * (gen - 0.5);    // ~0.75..1.55
+                double invest = 0.95 + 0.35 * (prag - 0.60) + 0.15 * sec;   // small boost from prag/security
+                invest = Mth.clamp(invest, 0.80, 1.30);
 
-            // misc
-            k.horses  += range(r, -1, 2);
-            k.potions += range(r, -1, 2);
-            k.gems    += range(r, -1, 1);
+                // ---- TARGETS (tune these numbers later) ----
+                // security/happiness affect productive capacity a bit
+                double cap = (0.75 + 0.35 * happy + 0.25 * sec); // ~0.75..1.35
 
-            // clamp >= 0
-            k.gold = Math.max(0, k.gold);
+                double tGold   = (220 + 18 * sizeScale) * hoard * invest * cap;
+                double tFood   = (320 + 24 * sizeScale) * (0.90 + 0.25 * prag) * cap;
+                double tWood   = (240 + 16 * sizeScale) * (0.90 + 0.20 * greed) * cap;
+                double tMetal  = (120 + 10 * sizeScale) * (0.95 + 0.30 * prag) * cap;
 
-            k.meat = Math.max(0, k.meat);
-            k.grain = Math.max(0, k.grain);
-            k.fish = Math.max(0, k.fish);
+                double tWeaps  = ( 85 +  7 * sizeScale) * (0.85 + 0.55 * honor) * (0.80 + 0.40 * sec);
+                double tArmor  = ( 75 +  6 * sizeScale) * (0.85 + 0.55 * honor) * (0.80 + 0.40 * sec);
 
-            k.wood = Math.max(0, k.wood);
-            k.metal = Math.max(0, k.metal);
-            k.gems = Math.max(0, k.gems);
-            k.potions = Math.max(0, k.potions);
-            k.armor = Math.max(0, k.armor);
-            k.horses = Math.max(0, k.horses);
-            k.weapons = Math.max(0, k.weapons);
+                double tGems   = ( 35 +  3 * sizeScale) * (0.70 + 0.90 * greed) * cap;
+                double tHorses = ( 25 +  2 * sizeScale) * (0.80 + 0.40 * honor) * cap;
+                double tPot    = ( 18 +  2 * sizeScale) * (0.80 + 0.40 * prag) * cap;
 
-            // slight drift
-            k.happiness = Mth.clamp(k.happiness + rangeInt(r, -1, 1), 0, 100);
-            k.security  = Mth.clamp(k.security + rangeInt(r, -1, 1), 0, 100);
+                // ---- MEAN REVERSION ----
+                // 1%–3% per economy tick; start at 2%
+                double kappa = 0.02;
+
+                // pull toward targets (this allows growth OR shrink)
+                k.gold   += kappa * (tGold - k.gold);
+
+                k.grain  += kappa * (tFood - k.grain);
+                k.meat   += kappa * ((tFood * 0.55) - k.meat);
+                k.fish   += kappa * ((tFood * 0.45) - k.fish);
+
+                k.wood   += kappa * (tWood - k.wood);
+                k.metal  += kappa * (tMetal - k.metal);
+
+                k.weapons += kappa * (tWeaps - k.weapons);
+                k.armor   += kappa * (tArmor - k.armor);
+
+                k.gems    += kappa * (tGems - k.gems);
+                k.horses  += kappa * (tHorses - k.horses);
+                k.potions += kappa * (tPot - k.potions);
+
+                // ---- NOISE (keeps it alive) ----
+                // noise scales gently with size; security smooths volatility a bit
+                double n = (1.0 + 0.12 * sizeScale) * (1.15 - 0.30 * sec);
+
+                k.gold  += (r.nextDouble() - 0.5) * 6.0 * n;
+                k.grain += (r.nextDouble() - 0.5) * 7.0 * n;
+                k.meat  += (r.nextDouble() - 0.5) * 5.0 * n;
+                k.fish  += (r.nextDouble() - 0.5) * 5.0 * n;
+
+                k.wood  += (r.nextDouble() - 0.5) * 8.0 * n;
+                k.metal += (r.nextDouble() - 0.5) * 6.0 * n;
+
+                k.weapons += (r.nextDouble() - 0.5) * 2.0 * n;
+                k.armor   += (r.nextDouble() - 0.5) * 1.5 * n;
+
+                k.horses  += (r.nextDouble() - 0.5) * 2.0 * n;
+                k.potions += (r.nextDouble() - 0.5) * 2.0 * n;
+                k.gems    += (r.nextDouble() - 0.5) * 1.0 * n;
+
+                // -------------------------
+                // SINKS (wins/losses become real)
+                // -------------------------
+
+                // Food spoilage (prevents hoarding forever)
+                k.grain *= 0.9992;
+                k.meat  *= 0.9988;
+                k.fish  *= 0.9988;
+
+                // Maintenance / corruption (rich bleed; greed makes it worse)
+                double wealth =
+                        k.gold
+                        + 0.10 * (k.meat + k.grain + k.fish)
+                        + 0.15 * k.wood
+                        + 0.55 * k.metal
+                        + 1.20 * k.weapons
+                        + 1.40 * k.armor
+                        + 2.50 * k.gems
+                        + 2.00 * k.potions
+                        + 1.60 * k.horses;
+
+                // tune: start small; greedy kingdoms pay more to maintain big stockpiles
+                double decayRate = 0.0008 + 0.0010 * greed; // ~0.08%..0.18% per econ tick
+                k.gold -= wealth * decayRate;
+
+                // clamp >= 0 (do this AFTER sinks)
+                k.gold = Math.max(0, k.gold);
+
+                k.meat = Math.max(0, k.meat);
+                k.grain = Math.max(0, k.grain);
+                k.fish = Math.max(0, k.fish);
+
+                k.wood = Math.max(0, k.wood);
+                k.metal = Math.max(0, k.metal);
+                k.gems = Math.max(0, k.gems);
+                k.potions = Math.max(0, k.potions);
+                k.armor = Math.max(0, k.armor);
+                k.horses = Math.max(0, k.horses);
+                k.weapons = Math.max(0, k.weapons);
+
+                // slight drift (keep yours)
+                k.happiness = Mth.clamp(k.happiness + rangeInt(r, -1, 1), 0, 100);
+                k.security  = Mth.clamp(k.security + rangeInt(r, -1, 1), 0, 100);
+
         }
 
         setDirty();

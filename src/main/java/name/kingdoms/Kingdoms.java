@@ -9,6 +9,7 @@ import name.kingdoms.blueprint.BlueprintPlacerEngine;
 import name.kingdoms.blueprint.KingdomSatelliteSpawner;
 import name.kingdoms.blueprint.RoadBuilder;
 import name.kingdoms.blueprint.worldGenBluePrintAutoSpawner;
+import name.kingdoms.diplomacy.AiRelationNormalizer;
 import name.kingdoms.diplomacy.DiplomacyMailboxState;
 import name.kingdoms.diplomacy.DiplomacyResponseQueue;
 import name.kingdoms.entity.aiKingdomEntity;
@@ -183,6 +184,7 @@ public class Kingdoms implements ModInitializer {
         name.kingdoms.war.WarBattleManager.init();
         name.kingdoms.diplomacy.DiplomacyRelationNormalizer.init();
         KingdomSatelliteSpawner.init();
+        AiRelationNormalizer.init();
         
 
         // Blocks/items
@@ -223,8 +225,17 @@ public class Kingdoms implements ModInitializer {
             });
         });
 
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+            ServerPlayer player = handler.player;
 
+            var ks = name.kingdoms.kingdomState.get(server);
+            var k  = ks.getPlayerKingdom(player.getUUID());
+            if (k == null) return;
 
+            if (k.royalGuardsEnabled) {
+                name.kingdoms.entity.RoyalGuardManager.setEnabled(player, true);
+            }
+        });
 
         // ---- Entity registration ----
         ResourceLocation workerId = ResourceLocation.fromNamespaceAndPath(MOD_ID, "kingdom_worker");

@@ -1,6 +1,7 @@
 package name.kingdoms.diplomacy;
 
 import net.minecraft.util.RandomSource;
+import name.kingdoms.aiKingdomState;
 
 public final class AiLetterText {
     private AiLetterText() {}
@@ -18,7 +19,7 @@ public final class AiLetterText {
                 String fromName,
                 String toName,
                 int rel,
-                Object personality,
+                aiKingdomState.KingdomPersonality personality,
                 ResourceType aType, double aAmt,
                 ResourceType bType, double bAmt,
                 double maxAmt
@@ -47,7 +48,7 @@ public final class AiLetterText {
                 String fromName,
                 String toName,
                 int rel,
-                Object personality,
+                aiKingdomState.KingdomPersonality personality,
                 ResourceType aType, double aAmt,
                 ResourceType bType, double bAmt,
                 double maxAmt,
@@ -88,7 +89,7 @@ public final class AiLetterText {
             String fromName,
             String toName,
             int rel,
-            Object personality,
+            aiKingdomState.KingdomPersonality personality,
             ResourceType aType, double aAmt,
             ResourceType bType, double bAmt,
             double maxAmt,
@@ -155,7 +156,7 @@ public final class AiLetterText {
             String fromName,
             String toName,
             int rel,
-            Object personality,
+            aiKingdomState.KingdomPersonality personality,
             Letter.CasusBelli cb
     ) {
         Tone tone = chooseTone(r, rel, personality, kind);
@@ -188,12 +189,22 @@ public final class AiLetterText {
     // Tone + helpers
     // -------------------------
 
-    private static boolean isHarsh(int rel, Object personality) {
+    private static boolean isHarsh(int rel, aiKingdomState.KingdomPersonality personality) {
+        // Relationship is primary; personality nudges edge cases.
+        double agg = personality == null ? 0.35 : personality.aggression();
+        double hon = personality == null ? 0.50 : personality.honor();
+
+        // baseline from relationship
         boolean harsh = rel < -25;
-        String p = (personality == null) ? "" : personality.toString().toLowerCase();
-        if (p.contains("aggressive") || p.contains("warlike") || p.contains("conquer")) harsh = true;
+
+        // aggressive + low honor makes harshness more likely even at middling relations
+        if (!harsh) {
+                if (rel < -10 && agg > 0.60) harsh = true;
+                if (agg > 0.75 && hon < 0.40) harsh = true;
+        }
         return harsh;
-    }
+        }
+
 
     private static String fmt(double v) {
         if (Math.abs(v - Math.round(v)) < 0.000001) return Long.toString(Math.round(v));
@@ -860,7 +871,7 @@ public final class AiLetterText {
     // tokens: {A} {B} {CAP} {ARES} + {FROM}/{TO}
     // -------------------------
 
-    private static final String[] ECON_REQUEST = {
+    private static final String[] ECON_OFFER = {
             "[P]{TO}, we are willing to provide {A}. Accept, and our envoys will deliver it.",
             "[P]From {FROM}: our stores can spare {A}. Agree, and it is yours.",
             "[P]{TO}, we offer aid: {A}. Take it, and remember who helped.",
@@ -884,7 +895,7 @@ public final class AiLetterText {
             "[H]{TO}, take {A}."
     };
 
-    private static final String[] ECON_OFFER = {
+    private static final String[] ECON_REQUEST = {
             "[P]{TO}, we require {A}. Meet this, and we will look favorably upon you.",
             "[P]From {FROM}: send {A} and we will consider the matter settled.",
             "[P]{TO}, a simple exchange: you provide {A}.",
@@ -938,35 +949,50 @@ public final class AiLetterText {
 
     private enum Tone { POLITE, NEUTRAL, HARSH }
 
-    private static Tone chooseTone(RandomSource r, int rel, Object personality, Letter.Kind kind) {
-        double harsh = (rel < -40) ? 0.70 : (rel < -10) ? 0.45 : 0.15;
-        double polite = (rel > 40) ? 0.70 : (rel > 10) ? 0.45 : 0.15;
-        double neutral = 1.0 - harsh - polite;
+        private static Tone chooseTone(RandomSource r, int rel, aiKingdomState.KingdomPersonality personality, Letter.Kind kind) {
+                // Relationship sets the baseline, personality shifts tone.
+                double harsh = (rel < -40) ? 0.70 : (rel < -10) ? 0.45 : 0.15;
+                double polite = (rel > 40) ? 0.70 : (rel > 10) ? 0.45 : 0.15;
+                double neutral = 1.0 - harsh - polite;
 
-        switch (kind) {
-            case INSULT, WAR_DECLARATION, ULTIMATUM, ALLIANCE_BREAK -> harsh += 0.20;
-            case COMPLIMENT, ALLIANCE_PROPOSAL, WHITE_PEACE, SURRENDER -> polite += 0.20;
-            default -> {}
+                switch (kind) {
+                        case INSULT, WAR_DECLARATION, ULTIMATUM, ALLIANCE_BREAK -> harsh += 0.20;
+                        case COMPLIMENT, ALLIANCE_PROPOSAL, WHITE_PEACE, SURRENDER -> polite += 0.20;
+                        default -> {}
+                }
+
+                double gen = personality == null ? 0.50 : personality.generosity();
+                double grd = personality == null ? 0.50 : personality.greed();
+                double tru = personality == null ? 0.50 : personality.trustBias();
+                double hon = personality == null ? 0.50 : personality.honor();
+                double agg = personality == null ? 0.35 : personality.aggression();
+                double pra = personality == null ? 0.60 : personality.pragmatism();
+
+                // Aggression pushes harsh, honor + trust pushes polite.
+                harsh  += (agg - 0.35) * 0.55;
+                polite += (hon - 0.50) * 0.35;
+                polite += (tru - 0.50) * 0.25;
+
+                // Pragmatism pushes neutral (businesslike). Greed reduces polite slightly.
+                neutral += (pra - 0.60) * 0.40;
+                polite  -= (grd - 0.50) * 0.15;
+
+                // Generosity adds a bit of polite.
+                polite += (gen - 0.50) * 0.15;
+
+                harsh = clamp01(harsh);
+                polite = clamp01(polite);
+                neutral = clamp01(neutral);
+
+                double sum = harsh + polite + neutral;
+                harsh /= sum; polite /= sum; neutral /= sum;
+
+                double x = r.nextDouble();
+                if (x < harsh) return Tone.HARSH;
+                if (x < harsh + neutral) return Tone.NEUTRAL;
+                return Tone.POLITE;
         }
 
-        String p = (personality == null) ? "" : personality.toString().toLowerCase();
-        if (p.contains("aggressive") || p.contains("warlike") || p.contains("conquer")) harsh += 0.25;
-        if (p.contains("honor") || p.contains("noble") || p.contains("lawful")) polite += 0.15;
-        if (p.contains("trader") || p.contains("merchant") || p.contains("pragmatic")) neutral += 0.25;
-        if (p.contains("schemer") || p.contains("cunning") || p.contains("deceit")) neutral += 0.10;
-
-        harsh = clamp01(harsh);
-        polite = clamp01(polite);
-        neutral = clamp01(neutral);
-
-        double sum = harsh + polite + neutral;
-        harsh /= sum; polite /= sum; neutral /= sum;
-
-        double x = r.nextDouble();
-        if (x < harsh) return Tone.HARSH;
-        if (x < harsh + neutral) return Tone.NEUTRAL;
-        return Tone.POLITE;
-    }
 
     private static double clamp01(double v) {
         return Math.max(0.0, Math.min(1.0, v));

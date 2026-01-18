@@ -1,5 +1,7 @@
 package name.kingdoms.network;
 
+import org.jetbrains.annotations.Nullable;
+
 import name.kingdoms.clientWarZoneCache;
 import name.kingdoms.jobRequirementsScreen;
 import name.kingdoms.kingdomMenuScreen;
@@ -28,15 +30,43 @@ import name.kingdoms.payload.mailSendResultS2CPayload;
 import name.kingdoms.payload.openKingdomMenuPayload;
 import name.kingdoms.payload.opendiplomacyS2CPayload;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import name.kingdoms.payload.treasuryShopSyncPayload;
 import name.kingdoms.payload.warCommandGroupSyncS2CPayload;
 import name.kingdoms.payload.warZonesSyncPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.core.BlockPos;
+import name.kingdoms.client.ScribeLines;
 
 public final class clientNetworkInit {
     private clientNetworkInit() {}
+
+        private static int LAST_INBOX_COUNT = -1;
+
+        @Nullable
+        private static name.kingdoms.entity.kingdomWorkerEntity findNearestScribe(Minecraft mc) {
+            if (mc.level == null || mc.player == null) return null;
+
+            double radius = 96.0; // generous so it works even if they’re trailing behind
+            var aabb = mc.player.getBoundingBox().inflate(radius);
+
+            name.kingdoms.entity.kingdomWorkerEntity best = null;
+            double bestD2 = Double.MAX_VALUE;
+
+            for (var w : mc.level.getEntitiesOfClass(name.kingdoms.entity.kingdomWorkerEntity.class, aabb)) {
+                if (!w.isRetinue()) continue;
+                if (!"scribe".equals(w.getJobId())) continue; 
+                var owner = w.getOwnerUUID();
+                if (owner == null || !owner.equals(mc.player.getUUID())) continue;
+
+                double d2 = w.distanceToSqr(mc.player);
+                if (d2 < bestD2) { bestD2 = d2; best = w; }
+            }
+            return best;
+        }
     
     public static void registerClientReceivers() {
 
@@ -183,9 +213,57 @@ public final class clientNetworkInit {
             });
         });
 
+    
+
         ClientPlayNetworking.registerGlobalReceiver(mailInboxSyncPayload.TYPE, (payload, ctx) -> {
             ctx.client().execute(() -> {
+                // 1) Detect change BEFORE overwriting cache
+                int prev = LAST_INBOX_COUNT;
+                int now  = (payload.inbox() == null) ? 0 : payload.inbox().size();
+
+                // 2) Update client cache (existing behavior)
                 ClientMailCache.setInbox(payload.inbox());
+
+                // Seed on first sync so we don’t announce on join / reconnect
+                if (prev < 0) {
+                    LAST_INBOX_COUNT = now;
+                    return;
+                }
+
+                // 3) New mail arrived
+                if (now > prev) {
+                    var mc = Minecraft.getInstance();
+                    if (mc.player == null) {
+                        LAST_INBOX_COUNT = now;
+                        return;
+                    }
+
+                    int delta = now - prev;
+
+                    // Find the scribe entity if present (optional but recommended)
+                    var scribe = findNearestScribe(mc);
+
+                    Component sender = (scribe != null)
+                            ? scribe.getDisplayName()          // "Edwin (Scribe)"
+                            : Component.literal("Scribe");     // fallback
+
+                    String text = ScribeLines.pickLine(delta);
+
+                    Component chatLine = Component.translatable(
+                            "chat.type.text",
+                            sender,
+                            Component.literal(text)
+                                    .withStyle(ChatFormatting.GRAY, ChatFormatting.ITALIC)
+                    );
+
+                    // Add it as a real chat line
+                    mc.gui.getChat().addMessage(chatLine);
+
+                    mc.player.playSound(SoundEvents.BOOK_PAGE_TURN, 0.6f, 1.0f);
+                }
+
+                LAST_INBOX_COUNT = now;
+
             });
         });
 

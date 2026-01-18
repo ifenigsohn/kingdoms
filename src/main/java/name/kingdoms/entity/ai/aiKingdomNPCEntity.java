@@ -1,7 +1,10 @@
 package name.kingdoms.entity.ai;
 
 import name.kingdoms.IKingdomSpawnerBlock;
+import name.kingdoms.kingdomState;
 import name.kingdoms.namePool;
+import name.kingdoms.entity.SoldierEntity;
+import name.kingdoms.war.WarState;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
@@ -15,15 +18,26 @@ import net.minecraft.world.entity.*;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.goal.*;
+import net.minecraft.world.entity.ai.goal.target.HurtByTargetGoal;
+import net.minecraft.world.entity.ai.goal.target.NearestAttackableTargetGoal;
 import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
+import net.minecraft.world.entity.ai.targeting.TargetingConditions;
+import net.minecraft.world.entity.monster.Creeper;
+import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ServerLevelAccessor;
 import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.level.storage.ValueOutput;
+
+
+import java.util.UUID;
+
 import org.jetbrains.annotations.Nullable;
 
 public class aiKingdomNPCEntity extends PathfinderMob {
@@ -35,16 +49,18 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     private static final EntityDataAccessor<Integer> SKIN_ID =
             SynchedEntityData.defineId(aiKingdomNPCEntity.class, EntityDataSerializers.INT);
 
-    // ✅ NEW: name persisted + synced
     private static final EntityDataAccessor<String> NPC_NAME =
             SynchedEntityData.defineId(aiKingdomNPCEntity.class, EntityDataSerializers.STRING);
 
-    // Spawner binding
     private static final EntityDataAccessor<Boolean> HAS_SPAWNER =
             SynchedEntityData.defineId(aiKingdomNPCEntity.class, EntityDataSerializers.BOOLEAN);
 
     private static final EntityDataAccessor<BlockPos> SPAWNER_POS =
             SynchedEntityData.defineId(aiKingdomNPCEntity.class, EntityDataSerializers.BLOCK_POS);
+
+    private static final EntityDataAccessor<String> KINGDOM_UUID =
+            SynchedEntityData.defineId(aiKingdomNPCEntity.class, EntityDataSerializers.STRING);
+
 
     // --- Positions ---
     @Nullable private BlockPos homePos;
@@ -72,7 +88,8 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         return Mob.createMobAttributes()
                 .add(Attributes.MAX_HEALTH, 20.0D)
                 .add(Attributes.MOVEMENT_SPEED, 0.22D)
-                .add(Attributes.FOLLOW_RANGE, 24.0D);
+                .add(Attributes.FOLLOW_RANGE, 24.0D)
+                .add(Attributes.ATTACK_DAMAGE, 4.0D);   
     }
 
     @Override
@@ -85,30 +102,87 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     @Override
     protected void registerGoals() {
         this.goalSelector.addGoal(0, new FloatGoal(this));
-        this.goalSelector.addGoal(1, new PanicGoal(this, 1.35D));
+
+        // Panic only for non-combatants
+        this.goalSelector.addGoal(1, new PanicGoal(this, 1.35D) {
+            @Override public boolean canUse() { return !aiKingdomNPCEntity.this.isCombatant() && super.canUse(); }
+            @Override public boolean canContinueToUse() { return !aiKingdomNPCEntity.this.isCombatant() && super.canContinueToUse(); }
+        });
+
+        // Combatants: melee
+        this.goalSelector.addGoal(2, new MeleeAttackGoal(this, 1.15D, true) {
+            @Override public boolean canUse() { return aiKingdomNPCEntity.this.isCombatant() && !aiKingdomNPCEntity.this.isSleeping() && super.canUse(); }
+            @Override public boolean canContinueToUse() { return aiKingdomNPCEntity.this.isCombatant() && !aiKingdomNPCEntity.this.isSleeping() && super.canContinueToUse(); }
+        });
+
         this.goalSelector.addGoal(4, new OpenDoorGoal(this, true));
 
-        // ✅ WORKING NPC goals (do not depend on king-only goal constructors)
-        this.goalSelector.addGoal(2, new FindBedAtNightGoalNPC(this, 1.05D, 30));
-        this.goalSelector.addGoal(3, new ReturnHomeDayGoalNPC(this, 1.05D));
+        // Existing NPC goals
+        this.goalSelector.addGoal(5, new FindBedAtNightGoalNPC(this, 1.05D, 30));
+        this.goalSelector.addGoal(6, new ReturnHomeDayGoalNPC(this, 1.05D));
 
-        this.goalSelector.addGoal(6, new WaterAvoidingRandomStrollGoal(this, 0.9D) {
+        this.goalSelector.addGoal(7, new WaterAvoidingRandomStrollGoal(this, 0.9D) {
             @Override public boolean canUse() { return !aiKingdomNPCEntity.this.isSleeping() && super.canUse(); }
             @Override public boolean canContinueToUse() { return !aiKingdomNPCEntity.this.isSleeping() && super.canContinueToUse(); }
         });
 
-        this.goalSelector.addGoal(7, new LookAtPlayerGoal(this, Player.class, 6.0F));
-        this.goalSelector.addGoal(8, new RandomLookAroundGoal(this));
+        this.goalSelector.addGoal(8, new LookAtPlayerGoal(this, Player.class, 6.0F));
+        this.goalSelector.addGoal(9, new RandomLookAroundGoal(this));
+
+        // -----------------
+        // Targets (combatants only)
+        // -----------------
+
+        // Retaliate if hit
+        this.targetSelector.addGoal(1, new HurtByTargetGoal(this) {
+            @Override public boolean canUse() { return aiKingdomNPCEntity.this.isCombatant() && super.canUse(); }
+        });
+
+        // Attack hostile mobs
+        this.targetSelector.addGoal(2, new NearestAttackableTargetGoal<>(
+                this,
+                Monster.class,
+                true,
+                (TargetingConditions.Selector) (LivingEntity e, ServerLevel lvl) -> !(e instanceof Creeper)
+        ) {
+            @Override public boolean canUse() { return aiKingdomNPCEntity.this.isCombatant() && super.canUse(); }
+        });
+
+
+        // Attack enemy players (ONLY when at war)
+        this.targetSelector.addGoal(3, new NearestAttackableTargetGoal<>(
+        this,
+        Player.class,
+        true,
+                (TargetingConditions.Selector) (LivingEntity e, ServerLevel lvl) ->
+                        (e instanceof Player p) && aiKingdomNPCEntity.this.isEnemyPlayer(p)
+        ) {
+            @Override public boolean canUse() { return aiKingdomNPCEntity.this.isCombatant() && super.canUse(); }
+        });
+
+        // Attack enemy soldiers (your war soldiers)
+        this.targetSelector.addGoal(4, new NearestAttackableTargetGoal<>(
+                this,
+                SoldierEntity.class,
+                true,
+                (TargetingConditions.Selector) (LivingEntity e, ServerLevel lvl) ->
+                        (e instanceof SoldierEntity s) && aiKingdomNPCEntity.this.isEnemySoldier(s)
+        ) {
+            @Override public boolean canUse() { return aiKingdomNPCEntity.this.isCombatant() && super.canUse(); }
+        });
+
     }
+
 
     @Override
     protected void defineSynchedData(SynchedEntityData.Builder builder) {
         super.defineSynchedData(builder);
         builder.define(AI_TYPE_ID, "villager");
         builder.define(SKIN_ID, 0);
-        builder.define(NPC_NAME, ""); // ✅ NEW
+        builder.define(NPC_NAME, ""); 
         builder.define(HAS_SPAWNER, false);
         builder.define(SPAWNER_POS, BlockPos.ZERO);
+        builder.define(KINGDOM_UUID, "");
     }
 
     // --- Type / skin / name ---
@@ -186,7 +260,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         if (chosen < 0) {
             int maxExclusive = switch (type) {
                 case "guard" -> 1;   // number of skins
-                case "noble" -> 1;   // 
+                case "noble" -> 25;   // 
                 default -> 12;       // 
             };
             if (maxExclusive < 1) maxExclusive = 1;
@@ -324,8 +398,10 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         out.putString("AiTypeId", getAiTypeId());
         out.putInt("SkinId", getSkinId());
 
-        // ✅ NEW: persist name
         out.putString("NpcName", getNpcName());
+
+        UUID kid = getKingdomUUID();
+        if (kid != null) out.putString("KingdomUUID", kid.toString());
 
         if (homePos != null) out.putLong("HomePos", homePos.asLong());
         if (assignedBedPos != null) out.putLong("BedPos", assignedBedPos.asLong());
@@ -340,8 +416,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
         this.entityData.set(AI_TYPE_ID, in.getString("AiTypeId").orElse("villager"));
         this.entityData.set(SKIN_ID, in.getInt("SkinId").orElse(0));
-
-        // ✅ NEW: restore name
+        this.entityData.set(KINGDOM_UUID, in.getString("KingdomUUID").orElse(""));
         this.entityData.set(NPC_NAME, in.getString("NpcName").orElse(""));
 
         homePos = in.getLong("HomePos").map(BlockPos::of).orElse(null);
@@ -552,4 +627,61 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             return best;
         }
     }
+
+    @Nullable
+    public UUID getKingdomUUID() {
+        String s = this.entityData.get(KINGDOM_UUID);
+        if (s == null || s.isBlank()) return null;
+        try { return UUID.fromString(s); } catch (IllegalArgumentException e) { return null; }
+    }
+
+    public void setKingdomUUID(@Nullable UUID id) {
+        this.entityData.set(KINGDOM_UUID, id == null ? "" : id.toString());
+    }
+    
+    private boolean equippedCombatSword = false;
+
+    private boolean isCombatant() {
+        String t = getAiTypeId();
+        return "guard".equals(t) || "soldier".equals(t);
+    }
+
+    private void setCombatSword(boolean equip) {
+            if (this.level().isClientSide()) return;
+
+            if (equip) {
+                if (!equippedCombatSword) {
+                    this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.IRON_SWORD));
+                    equippedCombatSword = true;
+                }
+            } else {
+                if (equippedCombatSword) {
+                    this.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+                    equippedCombatSword = false;
+                }
+            }
+        }
+
+        private boolean isEnemyPlayer(Player p) {
+            if (!(this.level() instanceof ServerLevel sl)) return false;
+
+            UUID myKid = getKingdomUUID();
+            if (myKid == null) return false; // not bound -> don't aggro anyone
+
+            var ks = kingdomState.get(sl.getServer());
+            var pk = ks.getPlayerKingdom(p.getUUID());
+            if (pk == null) return false;
+
+            var war = WarState.get(sl.getServer());
+            return war.isAtWar(myKid, pk.id); // war-gated aggression
+        }
+    
+        private boolean isEnemySoldier(SoldierEntity s) {
+           
+            return s.getSide() == SoldierEntity.Side.ENEMY;
+        }
+
+
+
+
 }

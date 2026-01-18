@@ -109,6 +109,27 @@ public final class DiplomacyResponseQueue {
         return String.format(java.util.Locale.US, "%.2f", v);
     }
 
+    private static String buildOutcomeSubject(Letter.Kind kind, boolean accepted) {
+        String verb = accepted ? "Accepted" : "Refused";
+        String what = switch (kind) {
+            case OFFER -> "Offer";
+            case REQUEST -> "Request";
+            case CONTRACT -> "Contract";
+            case ULTIMATUM -> "Ultimatum";
+            case ALLIANCE_PROPOSAL -> "Alliance Proposal";
+            case WHITE_PEACE -> "White Peace";
+            case SURRENDER -> "Surrender";
+            case WAR_DECLARATION -> "War Declaration";
+            case ALLIANCE_BREAK -> "Alliance Break";
+            case COMPLIMENT -> "Compliment";
+            case INSULT -> "Insult";
+            case WARNING -> "Warning";
+            default -> kind.name();
+        };
+        return verb + ": " + what;
+    }
+
+
     /**
      * Stamp news with a "local" position so distance filtering works.
      * For player↔AI interactions, the most intuitive anchor is the player's kingdom terminal (if present),
@@ -467,6 +488,8 @@ public final class DiplomacyResponseQueue {
             // -----------------------------
             String aiName = (aiK.name == null || aiK.name.isBlank()) ? "Unknown Kingdom" : aiK.name;
             String toName = (playerK.name == null || playerK.name.isBlank()) ? "your kingdom" : playerK.name;
+            String subject = buildOutcomeSubject(p.kind, accepted);
+
 
             long defaultExpires = now + (20L * 60L * 10L);
 
@@ -496,7 +519,7 @@ public final class DiplomacyResponseQueue {
                     UUID.randomUUID(),
                     aiK.id,
                     p.playerId,
-                    true,
+                    false,
                     aiName,
                     p.kind,
                     accepted ? Letter.Status.ACCEPTED : Letter.Status.REFUSED,
@@ -506,8 +529,10 @@ public final class DiplomacyResponseQueue {
                     p.bType, p.bAmount,
                     p.maxAmount,
                     p.cb,
+                    subject,
                     outcomeNote
             );
+
 
             mailbox.addLetter(p.playerId, outcome);
 

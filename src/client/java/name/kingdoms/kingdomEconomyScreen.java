@@ -64,7 +64,7 @@ public class kingdomEconomyScreen extends Screen {
         double per10sec = deltaPerSec * 10.0;
         if (Math.abs(per10sec) < 0.001) per10sec = 0.0;
 
-        String deltaStr = String.format("%+.2f /10s", per10sec);
+        String deltaStr = String.format("%+.2f /5 minutes", per10sec);
         String line = label + ": " + valStr + "  (" + deltaStr + ")";
 
         gui.drawString(this.font, Component.literal(line), x, y, 0xFFFFFFFF);

@@ -34,7 +34,7 @@ public final class WarState extends SavedData {
 
     private record AiWarSim(double moraleA, double moraleB) {}
 
-    private static final int AI_WAR_TICK_INTERVAL = 20 * 60 * 10; // 10 min
+    private static final int AI_WAR_TICK_INTERVAL = 20 * 60 * 5; // 5 MINUTES DEBUG FOR DEV
 
     // -----------------------------
     // Zone quality tuning
@@ -268,17 +268,96 @@ public final class WarState extends SavedData {
         ));
     }
 
+    public static record AiWarSimSnap(double moraleA, double moraleB) {}
 
+
+    public record WarSnapshot(
+        Set<String> wars,
+        Map<String, BattleZone> zones,
+        Map<String, AiWarSimSnap> aiSim
+    ) {}
+
+    public WarSnapshot exportState() {
+        // deep copy
+        Set<String> warsCopy = new HashSet<>(this.wars);
+        Map<String, BattleZone> zonesCopy = new HashMap<>(this.zones); // BattleZone is immutable record-like
+        Map<String, AiWarSimSnap> simCopy = new HashMap<>();
+        for (var e : this.aiSim.entrySet()) {
+            var v = e.getValue();
+            simCopy.put(e.getKey(), new AiWarSimSnap(v.moraleA(), v.moraleB()));
+        }
+        return new WarSnapshot(warsCopy, zonesCopy, simCopy);
+    }
+
+    @SuppressWarnings("unchecked")
+    public void importState(WarSnapshot snap) {
+        this.wars.clear();
+        this.zones.clear();
+        this.aiSim.clear();
+
+        if (snap != null) {
+            if (snap.wars() != null) this.wars.addAll(snap.wars());
+            if (snap.zones() != null) this.zones.putAll(snap.zones());
+
+            if (snap.aiSim() != null) {
+                for (var e : snap.aiSim().entrySet()) {
+                    var v = e.getValue();
+                    this.aiSim.put(e.getKey(), new AiWarSim(v.moraleA(), v.moraleB()));
+                }
+            }
+        }
+
+        setDirty();
+    }
+
+
+
+    // -----------------------------
+    // War telemetry (read-only view)
+    // -----------------------------
+
+    public record AiSimView(double moraleA, double moraleB) {}
+
+    /**
+     * Read-only morale view for the AI war sim.
+     * Returns (100,100) if no sim state exists yet for this war key.
+     */
+    public AiSimView getAiSimView(UUID a, UUID b) {
+        String k = key(a, b);
+        AiWarSim sim = aiSim.get(k);
+        if (sim == null) return new AiSimView(100.0, 100.0);
+        return new AiSimView(sim.moraleA(), sim.moraleB());
+    }
+
+    public String warKey(UUID a, UUID b) {
+        return key(a, b);
+    }
+
+
+    // Keep existing signature for live gameplay
     public void tickAiWars(MinecraftServer server) {
-        if (server.getTickCount() % AI_WAR_TICK_INTERVAL != 0) return;
+        tickAiWars(server, server.getTickCount());
+    }
+
+    // New overload for sim (clockable)
+    public void tickAiWars(MinecraftServer server, long nowTick) {
+        if (nowTick % AI_WAR_TICK_INTERVAL != 0) return;
 
         var aiState = aiKingdomState.get(server);
         var rng = server.overworld().getRandom();
 
-        for (var key : wars) {
+        // Snapshot to avoid ConcurrentModificationException when makePeace() removes from wars.
+        for (String key : new ArrayList<>(wars)) {
             var parts = key.split("\\|");
-            UUID a = UUID.fromString(parts[0]);
-            UUID b = UUID.fromString(parts[1]);
+            if (parts.length != 2) continue;
+
+            UUID a, b;
+            try {
+                a = UUID.fromString(parts[0]);
+                b = UUID.fromString(parts[1]);
+            } catch (IllegalArgumentException ex) {
+                continue;
+            }
 
             var aiA = aiState.getById(a);
             var aiB = aiState.getById(b);
@@ -291,34 +370,44 @@ public final class WarState extends SavedData {
             aiA.aliveSoldiers = Math.max(0, aiA.aliveSoldiers - lossA);
             aiB.aliveSoldiers = Math.max(0, aiB.aliveSoldiers - lossB);
 
-            
-            // Get sim morale for this war pair (initialize at 100/100)
+            // morale
             AiWarSim sim = aiSim.get(key);
             if (sim == null) sim = new AiWarSim(100.0, 100.0);
 
-            // RandomSource doesn't have nextDouble(min,max); use Mth.nextDouble
-            double dA = net.minecraft.util.Mth.nextDouble(rng, 0.5, 2.0);
-            double dB = net.minecraft.util.Mth.nextDouble(rng, 0.5, 2.0);
+            double dA = Mth.nextDouble(rng, 0.5, 2.0);
+            double dB = Mth.nextDouble(rng, 0.5, 2.0);
 
             double moraleA = Math.max(0.0, sim.moraleA() - dA);
             double moraleB = Math.max(0.0, sim.moraleB() - dB);
 
             aiSim.put(key, new AiWarSim(moraleA, moraleB));
 
+            // surrender logic (make it exclusive; peace ends the war)
+            boolean aSurrenders = (aiA.aliveSoldiers <= 0) || (moraleA <= 0.0);
+            boolean bSurrenders = (aiB.aliveSoldiers <= 0) || (moraleB <= 0.0);
 
-            // --- surrender logic ---
-            if (aiA.aliveSoldiers <= 0 || moraleA <= 0.0) {
+            if (aSurrenders && !bSurrenders) {
                 makePeace(a, b);
                 logAiPeace(server, aiB, aiA);
-            }
-            if (aiB.aliveSoldiers <= 0 || moraleB <= 0.0)  {
+            } else if (bSurrenders && !aSurrenders) {
                 makePeace(a, b);
                 logAiPeace(server, aiA, aiB);
+            } else if (aSurrenders && bSurrenders) {
+                // tie case: pick a winner deterministically/randomly
+                if (rng.nextBoolean()) {
+                    makePeace(a, b);
+                    logAiPeace(server, aiB, aiA);
+                } else {
+                    makePeace(a, b);
+                    logAiPeace(server, aiA, aiB);
+                }
             }
         }
 
         aiState.setDirty();
     }
+
+
 
 
     public record ZoneView(UUID enemyId, BattleZone zone) {}

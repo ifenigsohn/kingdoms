@@ -6,6 +6,7 @@ import name.kingdoms.client.borderWandClient;
 import name.kingdoms.client.clientProxyImpl;
 import name.kingdoms.client.kingdomWorkerRenderer;
 import name.kingdoms.client.KingdomTransitionHUD;
+import name.kingdoms.client.ScribeLines;
 import name.kingdoms.client.SoldierRenderer;
 import name.kingdoms.client.aiKingdomEntityRenderer;
 import name.kingdoms.client.mailScreen;
@@ -27,10 +28,14 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 import net.fabricmc.fabric.api.event.player.AttackEntityCallback;
+import net.fabricmc.fabric.api.resource.ResourceManagerHelper;
+import net.fabricmc.fabric.api.resource.SimpleSynchronousResourceReloadListener;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.packs.PackType;
+import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 
@@ -75,6 +80,20 @@ public class kingdomsClient implements ClientModInitializer {
                 ClientPlayNetworking.send(new name.kingdoms.payload.warCommandCycleGroupC2SPayload());
                 return InteractionResult.FAIL; // cancels block breaking
         });
+
+        ResourceManagerHelper.get(PackType.CLIENT_RESOURCES).registerReloadListener(
+        new SimpleSynchronousResourceReloadListener() {
+                @Override
+                public ResourceLocation getFabricId() {
+                return ResourceLocation.fromNamespaceAndPath("kingdoms", "scribe_lines_loader");
+                }
+
+                @Override
+                public void onResourceManagerReload(ResourceManager manager) {
+                ScribeLines.load(manager);
+                }
+        }
+        );
 
         AttackEntityCallback.EVENT.register((player, world, hand, entity, hitResult) -> {
                 if (hand != InteractionHand.MAIN_HAND) return InteractionResult.PASS;

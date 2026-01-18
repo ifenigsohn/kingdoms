@@ -413,15 +413,13 @@ public class kingdomBordersMapScreen extends Screen {
                 long now = System.currentTimeMillis();
 
                 // Optional: if already cached, don't keep requesting every 250ms
-                boolean haveCard = (name.kingdoms.client.clientHoverCardCache.get(hoveredKingdomId) != null);
-
-                if (!haveCard && now >= nextHoverReqMs) {
-                    nextHoverReqMs = now + 250;
-
-                    ClientPlayNetworking.send(
-                            new name.kingdoms.payload.kingdomHoverRequestC2SPayload(hoveredKingdomId)
-                    );
+                boolean stale = name.kingdoms.client.clientHoverCardCache.ageMs(hoveredKingdomId) > 1000; // 1s TTL
+                
+                if (stale && now >= nextHoverReqMs) {
+                    nextHoverReqMs = now + 250; // still throttle
+                    ClientPlayNetworking.send(new name.kingdoms.payload.kingdomHoverRequestC2SPayload(hoveredKingdomId));
                 }
+
 
                 var card = name.kingdoms.client.clientHoverCardCache.get(hoveredKingdomId);
                 if (card != null) {
@@ -708,18 +706,23 @@ public class kingdomBordersMapScreen extends Screen {
         int y = mouseY + 12;
 
         int w = 210;
-        int h = 86;
+
+        boolean war = card.atWar();
+        int h = war ? 118 : 86; // extra space for war section
 
         // clamp to screen
         if (x + w > this.width) x = this.width - w - 6;
         if (y + h > this.height) y = this.height - h - 6;
 
-        // background + border
-        g.fill(x, y, x + w, y + h, 0xCC000000);
-        g.hLine(x, x + w, y, 0xFFAAAAAA);
-        g.hLine(x, x + w, y + h, 0xFFAAAAAA);
-        g.vLine(x, y, y + h, 0xFFAAAAAA);
-        g.vLine(x + w, y, y + h, 0xFFAAAAAA);
+        // background + border (war = red tint + red outline)
+        int bg = war ? 0xCC2A0000 : 0xCC000000;        // semi-transparent dark red vs black
+        int border = war ? 0xFFFF4444 : 0xFFAAAAAA;    // bright red vs gray
+
+        g.fill(x, y, x + w, y + h, bg);
+        g.hLine(x, x + w, y, border);
+        g.hLine(x, x + w, y + h, border);
+        g.vLine(x, y, y + h, border);
+        g.vLine(x + w, y, y + h, border);
 
         int headX = x + 6;
         int headY = y + 6;
@@ -736,6 +739,25 @@ public class kingdomBordersMapScreen extends Screen {
 
         g.drawString(this.font, Component.literal(card.kingdomName()), tx, ty, 0xFFFFFFFF, false);
         ty += 12;
+
+        // WAR banner + details
+        if (war) {
+            g.drawString(this.font, Component.literal("⚔ AT WAR"), tx, ty, 0xFFFF6666, false);
+            ty += 12;
+
+            // Keep lines short (you can server-truncate, but client-side fallback is nice)
+            String allies = card.allies();
+            if (allies == null || allies.isBlank()) allies = "None";
+
+            String enemies = card.enemies();
+            if (enemies == null || enemies.isBlank()) enemies = "None";
+
+            g.drawString(this.font, Component.literal("Allies: " + allies), tx, ty, 0xFFFFCCCC, false);
+            ty += 12;
+
+            g.drawString(this.font, Component.literal("Enemies: " + enemies), tx, ty, 0xFFFFCCCC, false);
+            ty += 12;
+        }
 
         g.drawString(this.font, Component.literal("Relation: " + card.relation()), tx, ty, 0xFFC0C0C0, false);
         ty += 12;
@@ -754,6 +776,7 @@ public class kingdomBordersMapScreen extends Screen {
         g.drawString(this.font, Component.literal("Wood " + (int)card.wood() + "  Metal " + (int)card.metal()
                 + "  Arms " + (int)(card.armor() + card.weapons())), tx, ty, 0xFFC0C0C0, false);
     }
+
 
     /*private void drawAiKingHead(GuiGraphics g, int x, int y, int skinId) {
         skinId = Mth.clamp(skinId, 0, name.kingdoms.kingSkinPoolState.MAX_SKIN_ID);

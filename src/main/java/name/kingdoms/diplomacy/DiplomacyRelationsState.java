@@ -33,7 +33,14 @@ public final class DiplomacyRelationsState extends SavedData {
                     REL_CODEC.fieldOf("rel").forGetter(s -> s.rel)
             ).apply(inst, (loadedRel) -> {
                 DiplomacyRelationsState s = new DiplomacyRelationsState();
-                s.rel.putAll(loadedRel);
+
+                // Deep copy so inner maps are always mutable
+                for (var e : loadedRel.entrySet()) {
+                    UUID playerId = e.getKey();
+                    Map<UUID, Integer> inner = e.getValue();
+                    s.rel.put(playerId, new HashMap<>(inner));
+                }
+
                 return s;
             }));
 

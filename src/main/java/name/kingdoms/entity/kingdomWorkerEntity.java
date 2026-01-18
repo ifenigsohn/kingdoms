@@ -8,7 +8,6 @@ import net.minecraft.network.chat.Component;
 import name.kingdoms.RetinueRespawnManager;
 import name.kingdoms.kingdomState;
 import name.kingdoms.kingdomsClientProxy;
-
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -22,12 +21,19 @@ import net.minecraft.world.InteractionResult;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.PathfinderMob;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.goal.*;
+import net.minecraft.world.entity.ai.goal.target.HurtByTargetGoal;
+import net.minecraft.world.entity.ai.goal.target.NearestAttackableTargetGoal;
+import net.minecraft.world.entity.ai.goal.target.TargetGoal;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.level.storage.ValueOutput;
@@ -36,37 +42,56 @@ import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
 import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
-
+import net.minecraft.world.entity.ai.targeting.TargetingConditions;
 import net.minecraft.world.entity.animal.horse.Horse;
+import net.minecraft.world.entity.monster.Creeper;
+import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.EntitySpawnReason;
 
 import java.util.UUID;
 
 public class kingdomWorkerEntity extends PathfinderMob {
 
+        private boolean equippedCombatSword = false;
 
-        private void updateDisplayName() {
-            if (!this.isRetinue()) return;
 
-            String job = getJobId();
-            if (job == null || job.isBlank()) return;
 
-            String base = getRetinueBaseName();
-            if (base == null) base = "";
-            base = base.trim();
-
-            // job title
-            String prettyJob = job.substring(0, 1).toUpperCase() + job.substring(1);
-
-            // if base name is missing, fall back to just job (still better than blank)
-            Component name = base.isBlank()
-                    ? Component.literal(prettyJob)
-                    : Component.literal(base + " (" + prettyJob + ")");
-
-            this.setCustomName(name);
-            this.setCustomNameVisible(true);
+        private boolean isCombatant() {
+            if (this.isRetinue()) return true; // retinue always combat-capable
+            String job = this.getJobId();
+            return "guard".equals(job) || "soldier".equals(job);
         }
 
+
+        private void updateDisplayName() {
+        if (!this.isRetinue()) return;
+
+        String job = getJobId();
+        if (job == null || job.isBlank()) return;
+
+        String base = getRetinueBaseName();
+        if (base == null) base = "";
+        base = base.trim();
+
+        Component prettyJob = Component.translatable("job.kingdoms." + job);
+
+        Component name = base.isBlank()
+                ? prettyJob
+                : Component.literal(base + " (").append(prettyJob).append(Component.literal(")"));
+
+        this.setCustomName(name);
+        this.setCustomNameVisible(true);
+    }
+
+
+    @Override
+    public boolean doHurtTarget(ServerLevel level, Entity target) {
+        if (target instanceof LivingEntity) {
+            this.swing(InteractionHand.MAIN_HAND, true);
+            this.setAggressive(true);
+        }
+        return super.doHurtTarget(level, target);
+    }
 
 
 
@@ -127,7 +152,8 @@ public class kingdomWorkerEntity extends PathfinderMob {
         return Mob.createMobAttributes()
                 .add(Attributes.MAX_HEALTH, 20.0D)
                 .add(Attributes.MOVEMENT_SPEED, 0.20D)
-                .add(Attributes.FOLLOW_RANGE, 24.0D);
+                .add(Attributes.FOLLOW_RANGE, 24.0D)
+                .add(Attributes.ATTACK_DAMAGE, 3.0D);
     }
 
     @Override
@@ -140,15 +166,39 @@ public class kingdomWorkerEntity extends PathfinderMob {
     @Override
     protected void registerGoals() {
         this.goalSelector.addGoal(0, new FloatGoal(this));
-        this.goalSelector.addGoal(1, new PanicGoal(this, 1.35D));
-        this.goalSelector.addGoal(4, new OpenDoorGoal(this, true));
 
-        // Retinue follow
-        this.goalSelector.addGoal(3, new RetinueSeparationGoal(this, 3.0, 1.0));
-        this.goalSelector.addGoal(2, new FollowOwnerGoal(this, 2.0D, 8.0F, 4.0F));
+        // Panic only for non-combatants
+        this.goalSelector.addGoal(1, new PanicGoal(this, 1.35D) {
+            @Override public boolean canUse() {
+                return !kingdomWorkerEntity.this.isCombatant() && super.canUse();
+            }
+            @Override public boolean canContinueToUse() {
+                return !kingdomWorkerEntity.this.isCombatant() && super.canContinueToUse();
+            }
+        });
 
-        // Bed/home goals should NOT run while retinue
-        this.goalSelector.addGoal(3, new FindBedAtNightGoal(this, 1.05D, 30) {
+        // Combatants can melee attack
+        this.goalSelector.addGoal(2, new MeleeAttackGoal(this, 1.15D, true) {
+            @Override public boolean canUse() {
+                return kingdomWorkerEntity.this.isCombatant()
+                        && !kingdomWorkerEntity.this.isSleeping()
+                        && super.canUse();
+            }
+            @Override public boolean canContinueToUse() {
+                return kingdomWorkerEntity.this.isCombatant()
+                        && !kingdomWorkerEntity.this.isSleeping()
+                        && super.canContinueToUse();
+            }
+        });
+
+        // Retinue follow (unique priorities)
+        this.goalSelector.addGoal(3, new FollowOwnerGoal(this, 2.0D, 8.0F, 4.0F));
+        this.goalSelector.addGoal(4, new RetinueSeparationGoal(this, 3.0, 1.0));
+
+        this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
+
+        // Worker-only goals should NOT run while retinue
+        this.goalSelector.addGoal(6, new FindBedAtNightGoal(this, 1.05D, 30) {
             @Override public boolean canUse() {
                 return !kingdomWorkerEntity.this.isRetinue() && super.canUse();
             }
@@ -157,7 +207,7 @@ public class kingdomWorkerEntity extends PathfinderMob {
             }
         });
 
-        this.goalSelector.addGoal(4, new ReturnHomeDayGoal(this, 1.05D) {
+        this.goalSelector.addGoal(7, new ReturnHomeDayGoal(this, 1.05D) {
             @Override public boolean canUse() {
                 return !kingdomWorkerEntity.this.isRetinue() && super.canUse();
             }
@@ -166,26 +216,58 @@ public class kingdomWorkerEntity extends PathfinderMob {
             }
         });
 
-        // Prevent wandering while asleep, and prevent wandering while retinue
-        this.goalSelector.addGoal(6, new WaterAvoidingRandomStrollGoal(this, 0.9D) {
-            @Override
-            public boolean canUse() {
+        this.goalSelector.addGoal(8, new WaterAvoidingRandomStrollGoal(this, 0.9D) {
+            @Override public boolean canUse() {
                 return !kingdomWorkerEntity.this.isRetinue()
                         && !kingdomWorkerEntity.this.isSleeping()
                         && super.canUse();
             }
-
-            @Override
-            public boolean canContinueToUse() {
+            @Override public boolean canContinueToUse() {
                 return !kingdomWorkerEntity.this.isRetinue()
                         && !kingdomWorkerEntity.this.isSleeping()
                         && super.canContinueToUse();
             }
         });
 
-        this.goalSelector.addGoal(7, new LookAtPlayerGoal(this, Player.class, 6.0F));
-        this.goalSelector.addGoal(8, new RandomLookAroundGoal(this));
+        this.goalSelector.addGoal(9, new LookAtPlayerGoal(this, Player.class, 6.0F));
+        this.goalSelector.addGoal(10, new RandomLookAroundGoal(this));
+
+        // --------------------
+        // Target goals
+        // --------------------
+
+        // Retaliate vs mobs, but never retaliate vs players
+        this.targetSelector.addGoal(1, new HurtByTargetGoal(this) {
+            @Override public boolean canUse() {
+                if (!kingdomWorkerEntity.this.isCombatant()) return false;
+                if (!super.canUse()) return false;
+                return !(this.mob.getLastHurtByMob() instanceof Player);
+            }
+
+            @Override protected void alertOther(Mob ally, LivingEntity target) {
+                if (target instanceof Player) return;
+                super.alertOther(ally, target);
+            }
+        });
+
+        // Retinue attacks players only when owner hits them
+        this.targetSelector.addGoal(2, new OwnerHurtTargetGoal(this));
+
+                // Combatants attack hostile mobs
+                this.targetSelector.addGoal(3, new NearestAttackableTargetGoal<>(
+                this,
+                Monster.class,
+                true,
+                (TargetingConditions.Selector) (LivingEntity e, ServerLevel lvl) -> !(e instanceof Creeper)
+        ) {
+            @Override public boolean canUse() {
+                return kingdomWorkerEntity.this.isCombatant()
+                        && !kingdomWorkerEntity.this.isSleeping()
+                        && super.canUse();
+            }
+        });
     }
+
 
     @Override
     protected void defineSynchedData(SynchedEntityData.Builder builder) {
@@ -339,6 +421,10 @@ public class kingdomWorkerEntity extends PathfinderMob {
         return h2 <= (RETINUE_OWNER_MAX_TP_SPEED * RETINUE_OWNER_MAX_TP_SPEED);
     }
 
+    private boolean isRoyalGuard() {
+        return this.isRetinue() && "royal_guard".equals(this.getJobId());
+    }
+
 
     // -----------------------
     // Retinue horse helpers
@@ -445,6 +531,29 @@ public class kingdomWorkerEntity extends PathfinderMob {
             }
         }
 
+
+        // --- Retinue leash: don't chase too far from owner ---
+        if (this.level() instanceof ServerLevel sl && this.isRetinue()) {
+            UUID ownerId = getOwnerUUID();
+            if (ownerId != null) {
+                var owner = sl.getServer().getPlayerList().getPlayer(ownerId);
+                if (owner != null) {
+
+                    LivingEntity t = this.getTarget();
+                    if (t != null && t.isAlive()) {
+                        double max = 18.0; // blocks, tune (16–24 feels good)
+                        double d2 = this.distanceToSqr(owner);
+                        if (d2 > max * max) {
+                            // Drop target and snap back to guard behavior
+                            this.setTarget(null);
+                            this.getNavigation().stop();
+                        }
+                    }
+                }
+            }
+        }
+
+
         // --- If still sleeping after the wake check, freeze & return ---
         if (this.isSleeping()) {
             this.getNavigation().stop();
@@ -473,9 +582,21 @@ public class kingdomWorkerEntity extends PathfinderMob {
         }
         this.setSprinting(panicTicks > 0);
 
+        
+        // --- Combatants equip sword while fighting ---
+        if (this.level() instanceof ServerLevel && this.isCombatant()) {
+               boolean fighting = this.getTarget() != null && this.getTarget().isAlive();
+                setCombatSword(this.isRoyalGuard() || fighting);
+        }
+
+        boolean fighting = this.getTarget() != null
+        && this.getTarget().isAlive()
+        && this.distanceToSqr(this.getTarget()) < 64; // 8 blocks
+
         // --- Retinue follow/teleport overrides (SERVER) ---
         if (this.level() instanceof ServerLevel sl && this.isRetinue()) {
 
+        
             // horse cooldown tick
             if (horseCooldown > 0) horseCooldown--;
 
@@ -625,5 +746,68 @@ public class kingdomWorkerEntity extends PathfinderMob {
         RetinueRespawnManager.onRetinueDied(sl, ownerId, job, skin, pretty);
     }
 
+    private void setCombatSword(boolean equip) {
+        if (this.level().isClientSide()) return;
+
+        if (equip) {
+            if (!equippedCombatSword) {
+                this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.IRON_SWORD));
+                equippedCombatSword = true;
+            }
+        } else {
+            if (equippedCombatSword) {
+                this.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+                equippedCombatSword = false;
+            }
+        }
+    }
+
+    
+    public static class OwnerHurtTargetGoal extends TargetGoal {
+        private final kingdomWorkerEntity guard;
+        private LivingEntity lastOwnerTarget;
+        private int lastTimestamp;
+
+        public OwnerHurtTargetGoal(kingdomWorkerEntity guard) {
+            super(guard, false);
+            this.guard = guard;
+        }
+
+        @Override
+        public boolean canUse() {
+            if (!guard.isRetinue()) return false;
+
+            UUID ownerId = guard.getOwnerUUID();
+            if (ownerId == null) return false;
+
+            if (!(guard.level().getPlayerByUUID(ownerId) instanceof Player owner)) return false;
+
+            LivingEntity ownerTarget = owner.getLastHurtMob();
+            if (ownerTarget == null || !ownerTarget.isAlive()) return false;
+
+            // Only care about player-vs-player aggression
+            if (!(ownerTarget instanceof Player)) return false;
+
+            int ts = owner.getLastHurtMobTimestamp();
+            if (ts == this.lastTimestamp) return false;
+
+            this.lastOwnerTarget = ownerTarget;
+            return true;
+        }
+
+        @Override
+        public void start() {
+            this.mob.setTarget(this.lastOwnerTarget);
+            UUID ownerId = guard.getOwnerUUID();
+            if (ownerId != null) {
+                var owner = guard.level().getPlayerByUUID(ownerId);
+                if (owner instanceof Player p) this.lastTimestamp = p.getLastHurtMobTimestamp();
+            }
+            super.start();
+        }
+    }
+
 
 }
+
+

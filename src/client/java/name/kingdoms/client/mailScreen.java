@@ -45,6 +45,9 @@ public final class mailScreen extends Screen {
 
     private Button newsTabBtn;
 
+    // inbox gating message (why Accept is disabled)
+    private String inboxAcceptBlockMsg = "";
+
     // recipients refresh tick (server-authoritative relations)
     private int recipientsRefreshCooldown = 0;
 
@@ -371,14 +374,14 @@ public final class mailScreen extends Screen {
             case OFFER -> "You give (A): " + composeAType.name();
             case REQUEST -> "You request (A): " + composeAType.name();
             case ULTIMATUM -> "They demand (A): " + composeAType.name();
-            case CONTRACT -> "They give (A): " + composeAType.name();
+            case CONTRACT -> "You give (A): " + composeAType.name();
             default -> "A: " + composeAType.name();
         };
     }
 
 
     private String labelBType() {
-        return "You pay (B): " + composeBType.name();
+        return "They pay (B): " + composeBType.name(); // in CONTRACT, recipient pays B
     }
 
     private boolean isNumber(String s) {
@@ -724,16 +727,33 @@ public final class mailScreen extends Screen {
             boolean actionable = isActionable(l);
             boolean ackOnly = isAcknowledgeOnly(l);
 
-            acceptBtn.active = actionable;
-            refuseBtn.active = actionable;
+            inboxAcceptBlockMsg = "";
 
-            acceptBtn.visible = actionable;
-            refuseBtn.visible = actionable;
+            if (actionable) {
+                inboxAcceptBlockMsg = acceptBlockedReason(l);
+                boolean canAccept = inboxAcceptBlockMsg.isEmpty();
 
-            ackBtn.active = ackOnly;
-            ackBtn.visible = (!actionable) && ackOnly;
+                acceptBtn.active = canAccept;
+                refuseBtn.active = true;
+
+                acceptBtn.visible = true;
+                refuseBtn.visible = true;
+
+                ackBtn.active = false;
+                ackBtn.visible = false;
+            } else {
+                acceptBtn.active = false;
+                refuseBtn.active = false;
+
+                acceptBtn.visible = false;
+                refuseBtn.visible = false;
+
+                ackBtn.active = ackOnly;
+                ackBtn.visible = ackOnly;
+            }
             return;
         }
+
 
         boolean usesA = kindUsesEconomyA(composeKind);
         boolean isContract = kindUsesContractB(composeKind);
@@ -809,7 +829,9 @@ public final class mailScreen extends Screen {
             double maxAmt = parseAmt(maxAmtBox.getValue());
             if (bAmt <= 0 || maxAmt <= 0) return false;
             if (composeBType == composeAType) return false;
-            return playerCanAfford(composeBType, bAmt);
+           
+                // You are the sender: you must afford A per trade (or at least A once, depending on how you apply it)
+                return playerCanAfford(composeAType, aAmt);
         }
 
         return true;
@@ -829,17 +851,74 @@ public final class mailScreen extends Screen {
         }
 
         if (composeKind == Letter.Kind.CONTRACT) {
-            double haveB = ClientEconomyView.get(composeBType);
-            if (bAmt > haveB) bAmtBox.setValue(fmt(haveB));
+            // Clamp A (you give) to what YOU have
+            double haveA = ClientEconomyView.get(composeAType);
+            if (aAmt > haveA) aAmtBox.setValue(fmt(haveA));
 
-            double clampedMax = Math.max(maxAmt, parseAmt(aAmtBox.getValue()));
+            // Keep maxAmount >= A per trade so at least 1 trade is possible
+            double aPerTrade = parseAmt(aAmtBox.getValue());
+            double clampedMax = Math.max(maxAmt, aPerTrade);
             if (Math.abs(clampedMax - maxAmt) > 0.000001) maxAmtBox.setValue(fmt(clampedMax));
+
+            // DO NOT clamp B to your economy (they pay B, not you)
         }
+
     }
 
     private boolean playerCanAfford(ResourceType type, double amt) {
         return ClientEconomyView.get(type) >= amt;
     }
+
+    private String acceptBlockedReason(Letter l) {
+        if (l == null) return "No letter selected.";
+        if (l.status() != Letter.Status.PENDING) return "Already resolved.";
+
+        // Only meaningful for kinds that have accept actions
+        if (!isActionable(l)) return "";
+
+        // What does the PLAYER have to pay to accept?
+        // Based on your server logic:
+        // - REQUEST: player pays A
+        // - CONTRACT: player pays B
+        // - ULTIMATUM (AI -> player): player pays A
+        // - OFFER: player pays nothing
+        ResourceType costType = null;
+        double costAmt = 0.0;
+
+        switch (l.kind()) {
+            case REQUEST -> { // player pays A
+                costType = l.aType();
+                costAmt = l.aAmount();
+            }
+            case CONTRACT -> { // player pays B (at least once)
+                costType = l.bType();
+                costAmt = l.bAmount();
+            }
+            case ULTIMATUM -> {
+                // Only costs player resources if AI sent the ultimatum
+                if (l.fromIsAi()) {
+                    costType = l.aType();
+                    costAmt = l.aAmount();
+                }
+            }
+            case OFFER -> {
+                // Accepting an offer costs player nothing
+                return "";
+            }
+            default -> {
+                return "";
+            }
+        }
+
+        if (costType == null) return "";
+
+        double have = ClientEconomyView.get(costType);
+        if (have + 0.000001 < costAmt) {
+            return "Not enough " + costType.name() + " (need " + fmt(costAmt) + ", have " + fmt(have) + ").";
+        }
+        return "";
+    }
+
 
     @Override
     public void tick() {
@@ -953,11 +1032,57 @@ public final class mailScreen extends Screen {
             }
 
             case CONTRACT -> {
-                g.drawString(this.font, "Contract:", dx, dy, 0xFFFFFFFF); dy += 12;
-                g.drawString(this.font, "You pay: " + fmt(sel.bAmount()) + " " + safeRes(sel.bType()), dx, dy, 0xFFFFFFFF); dy += 12;
-                g.drawString(this.font, "You get: " + fmt(sel.aAmount()) + " " + sel.aType(), dx, dy, 0xFFFFFFFF); dy += 12;
-                g.drawString(this.font, "Cap: " + fmt(sel.maxAmount()) + " " + sel.aType(), dx, dy, 0xAAAAAAAA);
+                boolean fromAi = sel.fromIsAi();
+                boolean resolved = sel.status() != Letter.Status.PENDING;
+
+                String header;
+                if (!resolved) {
+                    header = fromAi ? "They propose a contract:" : "You propose a contract:";
+                } else if (sel.status() == Letter.Status.ACCEPTED) {
+                    header = "Contract executed.";
+                } else if (sel.status() == Letter.Status.REFUSED) {
+                    header = "Contract refused.";
+                } else { // EXPIRED
+                    header = "Contract expired.";
+                }
+
+                g.drawString(this.font, header, dx, dy, 0xFFFFFFFF);
+                dy += 12;
+
+                // Direction depends on who sent it
+                if (fromAi) {
+                    // AI -> you: you pay B, you get A
+                    g.drawString(this.font,
+                            "You pay: " + fmt(sel.bAmount()) + " " + safeRes(sel.bType()),
+                            dx, dy, 0xFFFFFFFF);
+                    dy += 12;
+
+                    g.drawString(this.font,
+                            "You get: " + fmt(sel.aAmount()) + " " + sel.aType(),
+                            dx, dy, 0xFFFFFFFF);
+                    dy += 12;
+
+                    g.drawString(this.font,
+                            "Cap: " + fmt(sel.maxAmount()) + " " + sel.aType(),
+                            dx, dy, 0xAAAAAAAA);
+                } else {
+                    // You -> them: you give A, they pay B
+                    g.drawString(this.font,
+                            "You give: " + fmt(sel.aAmount()) + " " + sel.aType(),
+                            dx, dy, 0xFFFFFFFF);
+                    dy += 12;
+
+                    g.drawString(this.font,
+                            "They pay: " + fmt(sel.bAmount()) + " " + safeRes(sel.bType()),
+                            dx, dy, 0xFFFFFFFF);
+                    dy += 12;
+
+                    g.drawString(this.font,
+                            "Cap: " + fmt(sel.maxAmount()) + " " + sel.aType(),
+                            dx, dy, 0xAAAAAAAA);
+                }
             }
+
             case ULTIMATUM -> {
                 g.drawString(this.font, "They demand:", dx, dy, 0xFFFFFFFF); dy += 12;
                 g.drawString(this.font, fmt(sel.aAmount()) + " " + sel.aType(), dx, dy, 0xFFFFFFFF);
@@ -976,6 +1101,14 @@ public final class mailScreen extends Screen {
             int by = dy + 10;// adjust if you want it higher/lower
             int maxW = rightEdge - (detailsLeft + 20);
             drawWrapped(g, body, bx, by, maxW, 0xFFDDDDDD, 6);
+        }
+
+        // Show accept-block reason near buttons
+        if (inboxAcceptBlockMsg != null && !inboxAcceptBlockMsg.isBlank()) {
+            int msgX = detailsLeft + 10;
+            int msgY = top + 225; // near the buttons; adjust if you want
+            int maxW = rightEdge - (detailsLeft + 20);
+            drawWrapped(g, inboxAcceptBlockMsg, msgX, msgY, maxW, 0xFFFF7777, 2);
         }
 
 
@@ -1016,10 +1149,14 @@ public final class mailScreen extends Screen {
         g.drawString(font, "To: " + (rec == null ? "(none)" : rec.name()), x, y, 0xFFFFFFFF);
         y += 12;
 
-        if (!composeBlockMsg.isEmpty()) {
-            g.drawString(font, composeBlockMsg, x, y, 0xFFFF7777);
-            y += 12;
+       if (!composeBlockMsg.isEmpty()) {
+            int msgX = detailsLeft + 10;
+            int msgY = top + 165; // below compose controls, above Send button
+            int maxW = rightEdge - (detailsLeft + 20);
+
+            drawWrapped(g, composeBlockMsg, msgX, msgY, maxW, 0xFFFF7777, 2);
         }
+
 
         // Draw labels for the 3 amount boxes when CONTRACT
         if (composeKind == Letter.Kind.CONTRACT) {
@@ -1062,9 +1199,13 @@ public final class mailScreen extends Screen {
    private static String summarize(Letter l) {
         if (l == null) return "";
 
+        if (l.subject() != null && !l.subject().isBlank()) {
+            return l.subject();
+        }
+
         boolean sentByPlayer = !l.fromIsAi();
         boolean resolved = l.status() != Letter.Status.PENDING;
-
+        
         String kindLabel = switch (l.kind()) {
             case OFFER -> "Offer";
             case REQUEST -> "Request";
@@ -1114,10 +1255,19 @@ public final class mailScreen extends Screen {
 
         if (l.kind() == Letter.Kind.CONTRACT) {
             if (!resolved) {
-                return "Contract: "
-                        + fmt(l.bAmount()) + " " + safeRes(l.bType())
-                        + " → "
-                        + fmt(l.aAmount()) + " " + l.aType();
+                if (l.fromIsAi()) {
+                    // AI -> you: you pay B to receive A
+                    return "Contract: "
+                            + fmt(l.bAmount()) + " " + safeRes(l.bType())
+                            + " → "
+                            + fmt(l.aAmount()) + " " + l.aType();
+                } else {
+                    // You -> them: you give A to receive B
+                    return "Contract: "
+                            + fmt(l.aAmount()) + " " + l.aType()
+                            + " → "
+                            + fmt(l.bAmount()) + " " + safeRes(l.bType());
+                }
             }
 
             return switch (l.status()) {

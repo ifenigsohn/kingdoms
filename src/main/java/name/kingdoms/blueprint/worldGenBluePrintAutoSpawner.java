@@ -38,7 +38,7 @@ public final class worldGenBluePrintAutoSpawner {
     private static final int REGION_SIZE_BLOCKS = 700;
 
     /** 1/RARITY regions are WIN. */
-    private static final int RARITY = 1;
+    private static final int RARITY = 2;
 
     private static final String MOD_ID = "kingdoms";
     private static final String[] CASTLE_POOL = { "castlelarge1", "castlemed1","castlesmall2" };

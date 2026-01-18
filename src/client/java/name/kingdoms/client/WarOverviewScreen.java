@@ -1,7 +1,10 @@
 package name.kingdoms.client;
 
+import name.kingdoms.payload.royalGuardToggleC2SPayload;
 import name.kingdoms.payload.warOverviewSyncS2CPayload;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
@@ -18,6 +21,43 @@ public final class WarOverviewScreen extends Screen {
     protected void init() {
         // later: add buttons (close, refresh, etc.)
         super.init();
+
+        try {
+                royalOn = (boolean) data.getClass().getMethod("royalGuardsEnabled").invoke(data);
+            } catch (Throwable ignored) {
+                royalOn = false;
+            }
+
+            int x = this.width / 2 - 160;
+            int y = 20;
+
+            // Put the toggle near the top
+            int btnY = y + 140; // after your basic header lines
+            int btnW = 160;
+            int btnH = 20;
+
+            royalToggleBtn = Button.builder(toggleLabel(), (btn) -> {
+                royalOn = !royalOn;
+
+                // send to server
+                ClientPlayNetworking.send(new royalGuardToggleC2SPayload(royalOn));
+
+                // update label immediately
+                btn.setMessage(toggleLabel());
+
+                // optional click sound (vanilla handles this)
+            }).bounds(x, btnY, btnW, btnH).build();
+
+            this.addRenderableWidget(royalToggleBtn);
+        
+
+    }
+
+    private Button royalToggleBtn;
+    private boolean royalOn;
+
+    private Component toggleLabel() {
+        return Component.literal("Royal Guards: " + (royalOn ? "ON" : "OFF"));
     }
 
     @Override

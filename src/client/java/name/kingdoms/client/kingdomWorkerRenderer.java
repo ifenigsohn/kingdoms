@@ -2,12 +2,14 @@ package name.kingdoms.client;
 
 import name.kingdoms.Kingdoms;
 import name.kingdoms.entity.kingdomWorkerEntity;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.model.geom.ModelLayers;
 import net.minecraft.client.renderer.entity.EntityRendererProvider;
 import net.minecraft.client.renderer.entity.HumanoidMobRenderer;
 import net.minecraft.client.renderer.entity.state.HumanoidRenderState;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.HumanoidArm;
 
 public class kingdomWorkerRenderer
         extends HumanoidMobRenderer<kingdomWorkerEntity, kingdomWorkerRenderer.WorkerState, HumanoidModel<kingdomWorkerRenderer.WorkerState>> {
@@ -25,11 +27,16 @@ public class kingdomWorkerRenderer
         return new WorkerState();
     }
 
-    @Override
+   @Override
     public void extractRenderState(kingdomWorkerEntity entity, WorkerState state, float partialTick) {
         super.extractRenderState(entity, state, partialTick);
+
         state.jobId = entity.getJobId();
+        state.attackArm = entity.getMainArm();
+        state.attackTime = entity.getAttackAnim(partialTick);
     }
+
+
 
     @Override
     public ResourceLocation getTextureLocation(WorkerState state) {

@@ -31,6 +31,7 @@ import name.kingdoms.payload.kingdomTransitionS2CPayload;
 import name.kingdoms.payload.opendiplomacyS2CPayload;
 import name.kingdoms.payload.openKingdomMenuPayload;
 import name.kingdoms.payload.requestBorderWandPayload;
+import name.kingdoms.payload.royalGuardToggleC2SPayload;
 import name.kingdoms.payload.toggleJobEnabledPayload;
 import name.kingdoms.payload.treasuryBuyJobPayload;
 import name.kingdoms.payload.treasuryOpenPayload;
@@ -124,7 +125,7 @@ public final class networkInit {
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.warOverviewSyncS2CPayload.TYPE,name.kingdoms.payload.warOverviewSyncS2CPayload.STREAM_CODEC);
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.kingdomHoverSyncS2CPayload.TYPE,name.kingdoms.payload.kingdomHoverSyncS2CPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(mailPolicySyncS2CPayload.TYPE, mailPolicySyncS2CPayload.STREAM_CODEC);
-
+        PayloadTypeRegistry.playC2S().register(royalGuardToggleC2SPayload.TYPE, royalGuardToggleC2SPayload.CODEC);
     }
 
     public static void registerServerReceivers() {
@@ -161,6 +162,22 @@ public final class networkInit {
                 ServerPlayNetworking.send(player, new name.kingdoms.payload.bordersSyncPayload(list));
             });
         });
+
+        ServerPlayNetworking.registerGlobalReceiver(royalGuardToggleC2SPayload.TYPE, (payload, ctx) -> {
+            ctx.server().execute(() -> {
+                ServerPlayer player = ctx.player();
+
+                var ks = name.kingdoms.kingdomState.get(ctx.server());
+                var k  = ks.getPlayerKingdom(player.getUUID());
+                if (k == null) return;
+
+                k.royalGuardsEnabled = payload.enabled();
+                ks.markDirty();
+
+                name.kingdoms.entity.RoyalGuardManager.setEnabled(player, k.royalGuardsEnabled);
+            });
+        });
+
 
         ServerPlayNetworking.registerGlobalReceiver(
                 name.kingdoms.payload.kingdomHoverRequestC2SPayload.TYPE,
@@ -219,6 +236,25 @@ public final class networkInit {
                     // economy source
                     double gold, meat, grain, fish, wood, metal, armor, weapons, gems, horses, potions;
 
+                    // --- war source ---
+                    var warState = name.kingdoms.war.WarState.get(server);
+                    var allianceState = name.kingdoms.diplomacy.AllianceState.get(server);
+
+                    boolean atWar = warState.isAtWarWithAny(k.id);
+
+                    // enemies = everyone we have a war zone with
+                    var zones = warState.getZonesFor(server, k.id);
+                    var enemyIds = new java.util.ArrayList<java.util.UUID>(zones.size());
+                    for (var zv : zones) enemyIds.add(zv.enemyId());
+
+                    // allies = alliance members
+                    var allyIds = new java.util.ArrayList<java.util.UUID>(allianceState.alliesOf(k.id));
+
+                    // format short strings for tooltip
+                    String allies = formatKingdomNameList(server, ks, aiState, allyIds, 3);
+                    String enemies = formatKingdomNameList(server, ks, aiState, enemyIds, 3);
+
+
                     if (isAi) {
                         gold    = aiK.gold;
                         meat    = aiK.meat;
@@ -256,6 +292,10 @@ public final class networkInit {
 
                         soldiersAlive, soldiersMax,
                         ticketsAlive, ticketsMax,
+
+                        atWar,
+                        allies,
+                        enemies,
 
                         gold,
                         meat, grain, fish,
@@ -478,9 +518,7 @@ public final class networkInit {
                 boolean playerCan = switch (payload.kind()) {
                     case REQUEST -> true;
                     case OFFER -> EconomyMutator.get(playerK, payload.aType()) >= payload.aAmount();
-                    case CONTRACT -> (payload.bType() != null)
-                            && payload.bAmount() > 0
-                            && EconomyMutator.get(playerK, payload.bType()) >= payload.bAmount();
+                    case CONTRACT -> EconomyMutator.get(playerK, payload.aType()) >= payload.aAmount();
                     case ULTIMATUM -> true;
 
                     // non-economic / always allowed to send (validation handled elsewhere)
@@ -1090,18 +1128,19 @@ public final class networkInit {
                         }
 
                         addAiAckLetter(
-                                ctx.server(),
-                                player,
-                                mailbox,
-                                aiFrom,
-                                otherK,
-                                aiName,
-                                toName,
-                                relForOutcome,
-                                letter,
-                                acceptedOutcome,
-                                true
-                        );
+                        ctx.server(),
+                        player,
+                        mailbox,
+                        aiFrom,
+                        otherK,
+                        aiName,
+                        toName,
+                        relForOutcome,
+                        letter,
+                        accept,   // ✅ final accept after any flips
+                        true
+                    );
+
                     }
 
 
@@ -1157,11 +1196,21 @@ public final class networkInit {
                     else {
                         ok = applyAcceptAi(playerK, aiFrom, letter);
                         aiState.setDirty();
+                        kState.markDirty();
                     }
                 } else {
                     kingdomState.Kingdom fromK = kState.getKingdom(letter.fromKingdomId());
                     ok = (fromK != null) && applyAccept(kState, playerK, fromK, letter);
                     kState.markDirty();
+                }
+
+                if (!ok) {
+                    player.sendSystemMessage(net.minecraft.network.chat.Component.literal(
+                        "Trade failed: not enough resources to execute."
+                    ));
+                    // Keep letter pending in inbox; just re-sync inbox view
+                    serverMail.syncInbox(player, mailbox.getInbox(player.getUUID()));
+                    return;
                 }
 
                 // Remove the letter no matter what; outcome can be communicated via a new response letter if you want
@@ -1584,9 +1633,30 @@ public final class networkInit {
             original.cb()
     );
 
+    
 
-        // Status should NOT mirror player action.
-        // Make it resolved so it won't show action buttons.
+
+        boolean actionable = switch (original.kind()) {
+            case REQUEST, OFFER, CONTRACT, ULTIMATUM,
+                ALLIANCE_PROPOSAL, WHITE_PEACE, SURRENDER -> true;
+            default -> false;
+        };
+
+        boolean success = playerAccepted && executedOk;
+
+        String subject;
+        if (actionable) {
+            subject = (success ? "Accepted: " : "Refused: ") + labelFor(original.kind());
+        } else {
+            subject = "Acknowledged: " + labelFor(original.kind());
+        }
+
+        //status should match outcome for actionable letters
+        Letter.Status replyStatus = actionable
+                ? (success ? Letter.Status.ACCEPTED : Letter.Status.REFUSED)
+                : Letter.Status.ACCEPTED; // ack-only kinds
+
+
         Letter reply = new Letter(
                 UUID.randomUUID(),
                 aiKingdomId,
@@ -1594,7 +1664,7 @@ public final class networkInit {
                 true,
                 aiName,
                 original.kind(),
-                Letter.Status.ACCEPTED, // ALWAYS resolved/acknowledged
+                replyStatus,
                 now,
                 0L,
                 original.aType(),
@@ -1603,8 +1673,10 @@ public final class networkInit {
                 original.bAmount(),
                 original.maxAmount(),
                 original.cb(),
+                subject,
                 note
         );
+
 
         mailbox.addLetter(player.getUUID(), reply);
         mailbox.setDirty();
@@ -1752,7 +1824,7 @@ public final class networkInit {
         return new name.kingdoms.payload.warOverviewSyncS2CPayload.Entry(kingdomId, name, 0, 0);
     }
 
-   public static void sendWarOverviewTo(MinecraftServer server, ServerPlayer player) {
+    public static void sendWarOverviewTo(MinecraftServer server, ServerPlayer player) {
         kingdomState ks = kingdomState.get(server);
         kingdomState.Kingdom pk = ks.getPlayerKingdom(player.getUUID());
         if (pk == null) return;
@@ -1784,6 +1856,47 @@ public final class networkInit {
                 enemies
         ));
     }
+
+    private static String formatKingdomNameList(
+            net.minecraft.server.MinecraftServer server,
+            name.kingdoms.kingdomState ks,
+            name.kingdoms.aiKingdomState aiState,
+            java.util.List<java.util.UUID> ids,
+            int maxShown
+    ) {
+        if (ids == null || ids.isEmpty()) return "None";
+
+        // De-dupe while preserving order
+        var seen = new java.util.HashSet<java.util.UUID>();
+        var uniq = new java.util.ArrayList<java.util.UUID>(ids.size());
+        for (var id : ids) if (seen.add(id)) uniq.add(id);
+
+        int shown = Math.min(maxShown, uniq.size());
+        var parts = new java.util.ArrayList<String>(shown);
+
+        for (int i = 0; i < shown; i++) {
+            var id = uniq.get(i);
+
+            // prefer kingdomState name
+            var kk = ks.getKingdom(id);
+            String name = (kk != null && kk.name != null && !kk.name.isBlank()) ? kk.name : null;
+
+            // fallback to ai
+            if (name == null) {
+                var aiK = aiState.getById(id);
+                if (aiK != null && aiK.name != null && !aiK.name.isBlank()) name = aiK.name;
+            }
+
+            if (name == null) name = "Unknown";
+            parts.add(name);
+        }
+
+        int extra = uniq.size() - shown;
+        String s = String.join(", ", parts);
+        if (extra > 0) s += " (+" + extra + ")";
+        return s;
+    }
+
 
     public static void sendWarOverviewTo(ServerPlayer player) {
         if (!(player.level() instanceof ServerLevel sl)) return;
@@ -1859,6 +1972,24 @@ public final class networkInit {
         k.horses  -= j.costHorses()  * qty;
         k.potions -= j.costPotions() * qty;
     }
+
+        private static String labelFor(Letter.Kind k) {
+            return switch (k) {
+                case OFFER -> "Offer";
+                case REQUEST -> "Request";
+                case CONTRACT -> "Contract";
+                case ULTIMATUM -> "Ultimatum";
+                case ALLIANCE_PROPOSAL -> "Alliance Proposal";
+                case WHITE_PEACE -> "White Peace";
+                case SURRENDER -> "Surrender";
+                case WAR_DECLARATION -> "War Declaration";
+                case ALLIANCE_BREAK -> "Alliance Break";
+                case COMPLIMENT -> "Compliment";
+                case INSULT -> "Insult";
+                case WARNING -> "Warning";
+                default -> k.name();
+            };
+        }
 
     // -------------------------
     // War consequences

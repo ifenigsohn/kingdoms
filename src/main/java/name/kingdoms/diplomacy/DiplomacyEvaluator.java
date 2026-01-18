@@ -1,6 +1,7 @@
 package name.kingdoms.diplomacy;
 
 import name.kingdoms.aiKingdomState;
+import name.kingdoms.aiKingdomState.AiKingdom;
 import net.minecraft.util.RandomSource;
 
 import java.util.EnumMap;
@@ -8,6 +9,14 @@ import java.util.EnumMap;
 public final class DiplomacyEvaluator {
 
     public enum Decision { ACCEPT, REFUSE, COUNTER }
+
+    public record WarDecision( // for logging
+        boolean shouldDeclare,
+        double totalScore,
+        double econScore,
+        double relScore,
+        double personalityScore
+    ) {}
 
     public record Result(
             Decision decision,
@@ -43,6 +52,9 @@ public final class DiplomacyEvaluator {
     ) {}
 
     private DiplomacyEvaluator() {}
+
+    
+
 
     // -------------------------
     // Policy knobs (tune these)
@@ -111,7 +123,13 @@ public final class DiplomacyEvaluator {
             return Result.accept(dRel, "");
         }
         if (kind == Letter.Kind.INSULT) {
-            int dRel = clampRel((int)Math.round(-6 - 8*p.honor() - 6*p.aggression()));
+            double relNeg = clamp01((-ctx.relation) / 100.0); // stronger when already bad
+            int dRel = clampRel((int)Math.round(
+                    -8
+                    - 8*p.aggression()
+                    - 4*p.honor()
+                    - 6*relNeg
+            ));
             return Result.accept(dRel, "");
         }
         if (kind == Letter.Kind.WARNING) {
@@ -180,10 +198,42 @@ public final class DiplomacyEvaluator {
                 int dRel = clampRel((int)Math.round(-2 - 2*agg - 1*(1.0-trust)));
                 // counter: offer smaller amount sometimes when relations aren't awful
                 if (ctx.relation > -60 && rng.nextFloat() < (0.10f + 0.25f*(float)trust + 0.15f*(float)prag)) {
-                    double offerAmt = Math.max(1, aAmt * (0.45 + 0.25*gen - 0.20*greed));
-                    offerAmt = Math.min(offerAmt, aAmt);
-                    return Result.counter(0, aType, offerAmt, null, 0, "");
+
+                    // Base "we'll give some" (generosity/trust up, greed down)
+                    double rawOffer = aAmt * (0.20 + 0.55*gen + 0.25*trust - 0.35*greed);
+                    rawOffer = clamp(rawOffer, 1.0, aAmt);
+
+                    // HARD CAP: never offer more than we can actually spare
+                    double cap = maxGive(ai, p, ctx, aType, warPressure);
+                    double offerAmt = Math.min(rawOffer, cap);
+
+                    // If we truly can't spare anything, refuse instead of nonsense counter
+                    if (offerAmt < 1.0) {
+                        int dRel2 = clampRel((int)Math.round(-2 - 2*agg - 1*(1.0-trust)));
+                        return Result.refuse(dRel2, "");
+                    }
+
+                    // Optional but recommended: REQUEST counter becomes "small contract"
+                    // We give offerAmt, but ask for something we need so it's not just charity.
+                    ResourceType wantT = pickMostNeeded(ai, ctx, warPressure);
+                    if (wantT == aType) wantT = ResourceType.WOOD;
+
+                    // Target fairness: greedier AIs demand more, friendlier AIs demand less
+                    double neededFair = 1.05 + 0.55*greed - 0.40*trust - (ctx.allied ? 0.10 : 0.0);
+
+                    double outGold = ResourceValues.goldValue(aType, offerAmt) * pain(ai, aType, ctx, warPressure);
+                    double perUnitIn = ResourceValues.goldValue(wantT) * desirability(ai, wantT, ctx, warPressure);
+                    if (perUnitIn <= EPS) perUnitIn = Math.max(EPS, ResourceValues.goldValue(wantT));
+
+                    double wantAmt = Math.ceil((neededFair * outGold) / perUnitIn);
+
+                    // Keep want reasonable (avoid insane asks)
+                    wantAmt = clamp(wantAmt, 1.0, Math.max(10.0, offerAmt * 3.0));
+
+                    int dRel2 = clampRel((int)Math.round(+1 + 2*trust));
+                    return Result.counter(dRel2, aType, offerAmt, wantT, wantAmt, "");
                 }
+
                 return Result.refuse(dRel, "");
             }
 
@@ -221,12 +271,27 @@ public final class DiplomacyEvaluator {
                 int dRel = clampRel((int)Math.round(-2 - 2*agg - 1*honor));
                 // Counter instead of refuse when relations aren't awful
                 if (ctx.relation > -60 && rng.nextFloat() < (0.25f + 0.25f*(float)trust + 0.20f*(float)prag)) {
-                    if (bType != null && bAmt > 0 && aAmt > 0) {
-                        double want = computeCounterWantB(deal, bType, bAmt, greed, UNFAIR_CUTOFF - alliedBonus);
-                        int dRel2 = clampRel((int)Math.round(+1 + 2*trust));
-                        return Result.counter(dRel2, aType, aAmt, bType, want, "");
+                if (bType != null && bAmt > 0 && aAmt > 0) {
+
+                    // HARD CAP the give side
+                    double cap = maxGive(ai, p, ctx, aType, warPressure);
+                    double giveA = Math.min(aAmt, cap);
+
+                    // If we can't give enough to make a meaningful contract, refuse
+                    if (giveA < 1.0) {
+                        int dRel2 = clampRel((int)Math.round(-2 - 2*agg - 1*honor));
+                        return Result.refuse(dRel2, "");
                     }
+
+                    // Recompute "deal" values based on clamped giveA, then compute want
+                    ValueDeal deal2 = computeDealValues(kind, ai, ctx, aType, giveA, bType, bAmt, warPressure);
+                    double want = computeCounterWantB(deal2, bType, bAmt, greed, UNFAIR_CUTOFF - alliedBonus);
+
+                    int dRel2 = clampRel((int)Math.round(+1 + 2*trust));
+                    return Result.counter(dRel2, aType, giveA, bType, want, "");
                 }
+            }
+
                 return Result.refuse(dRel, "");
             }
 
@@ -303,6 +368,8 @@ public final class DiplomacyEvaluator {
         }
     }
 
+    
+
     // -------------------------
     // Deal value model
     // -------------------------
@@ -347,6 +414,59 @@ public final class DiplomacyEvaluator {
 
         return new ValueDeal(in, out);
     }
+
+    // -------------------------
+    // Counter budget helpers
+    // -------------------------
+
+    /** How much of current stock we refuse to part with (reserve), based on personality + war. */
+    private static double reserveFrac(aiKingdomState.KingdomPersonality p, Context ctx, ResourceType t, double warPressure) {
+        double greed = clamp01(p.greed());
+        double prag  = clamp01(p.pragmatism());
+
+        // Baseline reserve (keep some buffer always)
+        double frac = 0.12 + 0.28 * greed + 0.10 * prag;
+
+        // War: hoard war materials harder
+        if (ctx.atWarWithAnyone && isWarMaterial(t)) {
+            frac += 0.10 + 0.20 * warPressure;
+        }
+
+        return clamp( frac, 0.10, 0.85 );
+    }
+
+    /** Maximum amount AI is willing/able to give *right now* for resource t. */
+    private static double maxGive(aiKingdomState.AiKingdom ai, aiKingdomState.KingdomPersonality p, Context ctx, ResourceType t, double warPressure) {
+        double have = Math.max(0.0, stock(ai, t));
+        double reserve = have * reserveFrac(p, ctx, t, warPressure);
+        double spendable = Math.max(0.0, have - reserve);
+
+        // Also avoid giving away stuff we actually need (unless very friendly/generous — handled elsewhere)
+        // This is a soft cap layered on top of reserve: if we need it, reduce max.
+        double need = needFactor(ai, t); // 0..1
+        spendable *= (1.0 - 0.60 * need);
+
+        return Math.max(0.0, spendable);
+    }
+
+    private static ResourceType pickMostNeeded(aiKingdomState.AiKingdom ai, Context ctx, double warPressure) {
+        ResourceType best = ResourceType.GOLD;
+        double bestScore = -1e9;
+        for (ResourceType t : ResourceType.values()) {
+            double score = needFactor(ai, t);
+            // during war, boost war materials a bit
+            if (ctx.atWarWithAnyone && isWarMaterial(t)) score *= (1.0 + 0.35 * warPressure);
+            if (score > bestScore) { bestScore = score; best = t; }
+        }
+        return best;
+    }
+
+    private static double clamp(double v, double lo, double hi) {
+        if (v < lo) return lo;
+        if (v > hi) return hi;
+        return v;
+    }
+
 
     // -------------------------
     // Need / desirability / pain
@@ -419,6 +539,8 @@ public final class DiplomacyEvaluator {
         };
     }
 
+    
+
     // -------------------------
     // Counter helper
     // -------------------------
@@ -453,4 +575,7 @@ public final class DiplomacyEvaluator {
     private static int clampRel(int d) {
         return Math.max(-100, Math.min(100, d));
     }
+
+   
+
 }

@@ -40,6 +40,33 @@ public final class DiplomacyMailboxState extends SavedData {
     // CODECS (SavedData / disk)
     // -------------------------
 
+    private record LetterPayload(
+            ResourceType aType,
+            double aAmt,
+            Optional<ResourceType> bType,
+            double bAmt,
+            double maxAmt,
+            Optional<Letter.CasusBelli> cb,
+            String subject,
+            String note
+    ) {
+        private static final Codec<LetterPayload> CODEC =
+                RecordCodecBuilder.create(inst -> inst.group(
+                        RESOURCE_CODEC.fieldOf("aType").forGetter(LetterPayload::aType),
+                        Codec.DOUBLE.fieldOf("aAmt").forGetter(LetterPayload::aAmt),
+
+                        RESOURCE_CODEC.optionalFieldOf("bType").forGetter(LetterPayload::bType),
+                        Codec.DOUBLE.optionalFieldOf("bAmt", 0.0).forGetter(LetterPayload::bAmt),
+                        Codec.DOUBLE.optionalFieldOf("maxAmt", 0.0).forGetter(LetterPayload::maxAmt),
+
+                        CB_CODEC.optionalFieldOf("cb").forGetter(LetterPayload::cb),
+
+                        Codec.STRING.optionalFieldOf("subject", "").forGetter(LetterPayload::subject),
+                        Codec.STRING.optionalFieldOf("note", "").forGetter(LetterPayload::note)
+                ).apply(inst, LetterPayload::new));
+    }
+
+
     private static final Codec<UUID> UUID_CODEC =
             Codec.STRING.xmap(UUID::fromString, UUID::toString);
 
@@ -56,50 +83,52 @@ public final class DiplomacyMailboxState extends SavedData {
             Codec.STRING.xmap(Letter.CasusBelli::valueOf, Letter.CasusBelli::name);
 
     private static final Codec<Letter> LETTER_CODEC =
-            RecordCodecBuilder.create(inst -> inst.group(
-                    UUID_CODEC.fieldOf("id").forGetter(Letter::id),
-                    UUID_CODEC.fieldOf("from").forGetter(Letter::fromKingdomId),
-                    UUID_CODEC.fieldOf("to").forGetter(Letter::toPlayer),
+        RecordCodecBuilder.create(inst -> inst.group(
+                UUID_CODEC.fieldOf("id").forGetter(Letter::id),
+                UUID_CODEC.fieldOf("from").forGetter(Letter::fromKingdomId),
+                UUID_CODEC.fieldOf("to").forGetter(Letter::toPlayer),
 
-                    // NEW
-                    Codec.BOOL.optionalFieldOf("fromIsAi", false).forGetter(Letter::fromIsAi),
-                    Codec.STRING.optionalFieldOf("fromName", "Unknown").forGetter(Letter::fromName),
+                Codec.BOOL.optionalFieldOf("fromIsAi", false).forGetter(Letter::fromIsAi),
+                Codec.STRING.optionalFieldOf("fromName", "Unknown").forGetter(Letter::fromName),
 
-                    KIND_CODEC.fieldOf("kind").forGetter(Letter::kind),
-                    STATUS_CODEC.fieldOf("status").forGetter(Letter::status),
+                KIND_CODEC.fieldOf("kind").forGetter(Letter::kind),
+                STATUS_CODEC.fieldOf("status").forGetter(Letter::status),
 
-                    Codec.LONG.fieldOf("created").forGetter(Letter::createdTick),
-                    Codec.LONG.optionalFieldOf("expires", 0L).forGetter(Letter::expiresTick),
+                Codec.LONG.fieldOf("created").forGetter(Letter::createdTick),
+                Codec.LONG.optionalFieldOf("expires", 0L).forGetter(Letter::expiresTick),
 
-                    RESOURCE_CODEC.fieldOf("aType").forGetter(Letter::aType),
-                    Codec.DOUBLE.fieldOf("aAmt").forGetter(Letter::aAmount),
+                // ✅ bundle the rest
+                LetterPayload.CODEC.fieldOf("payload").forGetter(l -> new LetterPayload(
+                        l.aType(),
+                        l.aAmount(),
+                        Optional.ofNullable(l.bType()),
+                        l.bAmount(),
+                        l.maxAmount(),
+                        Optional.ofNullable(l.cb()),
+                        (l.subject() == null ? "" : l.subject()),
+                        (l.note() == null ? "" : l.note())
+                ))
+        ).apply(inst, (id, from, to, fromIsAi, fromName, kind, status, created, expires, payload) -> {
+            ResourceType bType = payload.bType().orElse(null);
+            Letter.CasusBelli cb = payload.cb().orElse(null);
 
-                    // Optional bType (only meaningful for CONTRACT)
-                    RESOURCE_CODEC.optionalFieldOf("bType").forGetter(l -> Optional.ofNullable(l.bType())),
-                    Codec.DOUBLE.optionalFieldOf("bAmt", 0.0).forGetter(Letter::bAmount),
-                    Codec.DOUBLE.optionalFieldOf("maxAmt", 0.0).forGetter(Letter::maxAmount),
+            String safeSubject = payload.subject() == null ? "" : payload.subject();
+            String safeNote    = payload.note() == null ? "" : payload.note();
 
-                    // NEW: persist casus belli and note
-                    CB_CODEC.optionalFieldOf("cb").forGetter(l -> Optional.ofNullable(l.cb())),
-                    Codec.STRING.optionalFieldOf("note", "").forGetter(l -> l.note() == null ? "" : l.note())
-            ).apply(inst, (id, from, to, fromIsAi, fromName, kind, status, created, expires,
-                           aType, aAmt, bTypeOpt, bAmt, maxAmt, cbOpt, note) -> {
-                ResourceType bType = bTypeOpt.orElse(null);
-                Letter.CasusBelli cb = cbOpt.orElse(null);
-                String safeNote = (note == null) ? "" : note;
+            return new Letter(
+                    id, from, to,
+                    fromIsAi, fromName,
+                    kind, status,
+                    created, expires,
+                    payload.aType(), payload.aAmt(),
+                    bType, payload.bAmt(),
+                    payload.maxAmt(),
+                    cb,
+                    safeSubject,
+                    safeNote
+            );
+        }));
 
-                return new Letter(
-                        id, from, to,
-                        fromIsAi, fromName,
-                        kind, status,
-                        created, expires,
-                        aType, aAmt,
-                        bType, bAmt,
-                        maxAmt,
-                        cb,
-                        safeNote
-                );
-            }));
 
     private static final Codec<Map<UUID, List<Letter>>> INBOX_CODEC =
             Codec.unboundedMap(UUID_CODEC, LETTER_CODEC.listOf());
@@ -165,11 +194,29 @@ public final class DiplomacyMailboxState extends SavedData {
             double maxAmount,
             Letter.CasusBelli cb,
             String note
+            
     ) {
         if (recipientPlayerId == null || fromKingdomId == null || kind == null || aType == null) return;
 
         String safeName = (fromName == null || fromName.isBlank()) ? "Unknown Kingdom" : fromName;
         String safeNote = (note == null) ? "" : note;
+
+        String subject = switch (kind) {
+            case OFFER -> "Offer";
+            case REQUEST -> "Request";
+            case CONTRACT -> "Contract";
+            case ULTIMATUM -> "Ultimatum";
+            case WAR_DECLARATION -> "War Declaration";
+            case ALLIANCE_PROPOSAL -> "Alliance Proposal";
+            case WHITE_PEACE -> "White Peace";
+            case SURRENDER -> "Surrender";
+            case ALLIANCE_BREAK -> "Alliance Break";
+            case COMPLIMENT -> "Compliment";
+            case INSULT -> "Insult";
+            case WARNING -> "Warning";
+            default -> kind.name();
+        };
+
 
         Letter letter = new Letter(
                 UUID.randomUUID(),
@@ -190,6 +237,7 @@ public final class DiplomacyMailboxState extends SavedData {
                 maxAmount,
 
                 cb,
+                subject,
                 safeNote
         );
 

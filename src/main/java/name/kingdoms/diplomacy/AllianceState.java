@@ -18,6 +18,31 @@ public final class AllianceState extends SavedData {
 
     public AllianceState() {}
 
+    /** Snapshot: deep copy of allies map */
+    public Map<UUID, List<UUID>> exportAllies() {
+        Map<UUID, List<UUID>> out = new HashMap<>();
+        for (var e : allies.entrySet()) {
+            out.put(e.getKey(), new ArrayList<>(e.getValue()));
+        }
+        return out;
+    }
+
+    /** Restore: replace internal state */
+    public void importAllies(Map<UUID, List<UUID>> decoded) {
+        allies.clear();
+        if (decoded != null) {
+            for (var e : decoded.entrySet()) {
+                if (e.getKey() == null) continue;
+                Set<UUID> set = new HashSet<>();
+                if (e.getValue() != null) for (UUID id : e.getValue()) if (id != null) set.add(id);
+                allies.put(e.getKey(), set);
+            }
+        }
+        normalizeSymmetry();
+        setDirty();
+    }
+
+
     private AllianceState(Map<UUID, List<UUID>> decoded) {
         allies.clear();
         for (var e : decoded.entrySet()) {

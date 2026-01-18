@@ -30,6 +30,9 @@ public record Letter(
         // war legitimacy / reason 
         CasusBelli cb,
 
+        // short title shown in inbox list/header
+        String subject,
+
         // short message/tone text (
         String note
 ) {
@@ -40,6 +43,7 @@ public record Letter(
         if (kind == null) kind = Kind.REQUEST;
         if (status == null) status = Status.PENDING;
         if (aType == null) aType = ResourceType.GOLD;
+        if (subject == null) subject = "";
         if (note == null) note = "";
         // bType may be null unless CONTRACT; that's fine
         // cb may be null for non-war letters; that's fine
@@ -89,6 +93,8 @@ public record Letter(
                     String fromName = buf.readUtf(32767);
                     if (fromName == null || fromName.isBlank()) fromName = "Unknown Kingdom";
 
+                   
+
                     Kind kind = buf.readEnum(Kind.class);
                     Status status = buf.readEnum(Status.class);
 
@@ -110,6 +116,10 @@ public record Letter(
                     CasusBelli cbRaw = buf.readEnum(CasusBelli.class);
                     CasusBelli cb = hasCb ? cbRaw : null;
 
+                    // NEW: subject
+                    String subject = buf.readUtf(32767);
+                    if (subject == null) subject = "";
+
                     // NEW: note (nullable, but normalized to "")
                     String note = buf.readUtf(32767);
                     if (note == null) note = "";
@@ -123,6 +133,7 @@ public record Letter(
                             bType, bAmt,
                             maxAmt,
                             cb,
+                            subject,
                             note
                     );
                 }
@@ -159,8 +170,12 @@ public record Letter(
                     buf.writeBoolean(hasCb);
                     buf.writeEnum(hasCb ? value.cb() : CB_SENTINEL);
 
-                    // NEW: note
+                    // NEW: subject
+                    buf.writeUtf(value.subject() == null ? "" : value.subject(), 32767);
+
+                    // note
                     buf.writeUtf(value.note() == null ? "" : value.note(), 32767);
+
                 }
             };
 
@@ -195,6 +210,7 @@ public record Letter(
                 0.0,
                 0.0,
                 null,
+                "",
                 safeNote(note)
         );
     }
@@ -227,6 +243,7 @@ public record Letter(
                 0.0,
                 0.0,
                 null,
+                "",
                 safeNote(note)
         );
     }
@@ -262,6 +279,7 @@ public record Letter(
                 playerGivesAmount,
                 maxKingdomGivesAmount,
                 null,
+                "",
                 safeNote(note)
         );
     }
@@ -277,6 +295,7 @@ public record Letter(
                 null, 0.0,
                 0.0,
                 null,
+                "",
                 safeNote(note)
         );
     }
@@ -290,6 +309,7 @@ public record Letter(
                 null, 0.0,
                 0.0,
                 null,
+                "",
                 safeNote(note)
         );
     }
@@ -303,6 +323,7 @@ public record Letter(
                 null, 0.0,
                 0.0,
                 null,
+                "",
                 safeNote(note)
         );
     }
@@ -317,6 +338,7 @@ public record Letter(
                 null, 0.0,
                 0.0,
                 null,
+                "",
                 safeNote(note)
         );
     }
@@ -331,6 +353,7 @@ public record Letter(
                 null, 0.0,
                 0.0,
                 null,
+                "",
                 safeNote(note)
         );
     }
@@ -345,6 +368,7 @@ public record Letter(
                 null, 0.0,
                 0.0,
                 null,
+                "",
                 safeNote(note)
         );
     }
@@ -361,6 +385,7 @@ public record Letter(
                 null, 0.0,
                 0.0,
                 null,
+                "",
                 safeNote(note)
         );
     }
@@ -376,6 +401,7 @@ public record Letter(
                 null, 0.0,
                 0.0,
                 (cb == null ? CasusBelli.UNKNOWN : cb),
+                "",
                 safeNote(note)
         );
     }
@@ -407,6 +433,7 @@ public record Letter(
                 bType, bAmount,
                 maxAmount,
                 cb,
+                subject,
                 note
         );
     }

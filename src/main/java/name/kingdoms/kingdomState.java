@@ -3,6 +3,8 @@ package name.kingdoms;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 
+import name.kingdoms.aiKingdomState.BorderData;
+import name.kingdoms.kingdomState.Kingdom;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
@@ -100,7 +102,6 @@ public class kingdomState extends SavedData {
         setDirty();
         return created;
     }
-
 
 
     public boolean tryConsumeResource(UUID kingdomId, String resource, double amount) {
@@ -538,6 +539,8 @@ public class kingdomState extends SavedData {
         }
 
         
+        // Royal Guard toggle (persisted)
+        public boolean royalGuardsEnabled = false;
 
         public static final Codec<Kingdom> CODEC =
                 RecordCodecBuilder.create(inst -> inst.group(
@@ -565,7 +568,8 @@ public class kingdomState extends SavedData {
                         Codec.BOOL.optionalFieldOf("hasTerminal", false).forGetter(k -> k.hasTerminal),
                         DIM_KEY_CODEC.optionalFieldOf("terminalDim", Level.OVERWORLD).forGetter(k -> k.terminalDim),
                         BLOCKPOS_CODEC.optionalFieldOf("terminalPos", BlockPos.ZERO).forGetter(k -> k.terminalPos),
-
+                        Codec.BOOL.optionalFieldOf("royalGuardsEnabled", false)
+                                .forGetter(k -> k.royalGuardsEnabled),
                         UUID_CODEC.optionalFieldOf("retinueScribe", NIL_UUID)
                                 .forGetter(k -> k.retinueScribe == null ? NIL_UUID : k.retinueScribe),
                         UUID_CODEC.optionalFieldOf("retinueTreasurer", NIL_UUID)
@@ -576,7 +580,7 @@ public class kingdomState extends SavedData {
                 ).apply(inst, (id, owner, name, origin,
                                activeMap, placedMap,
                                eco, border,
-                               hasTerminal, terminalDim, terminalPos,
+                               hasTerminal, terminalDim, terminalPos, royalGuardsEnabled,
                                retinueScribe, retinueTreasurer, retinueGeneral) -> {
 
                     Kingdom k = new Kingdom(id, owner, name, origin);
