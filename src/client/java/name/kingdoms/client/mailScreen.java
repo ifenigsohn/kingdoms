@@ -88,6 +88,12 @@ public final class mailScreen extends Screen {
     private int listW, detailsW;
     private int rowW, detailsInnerW;
 
+    // dynamic panel geometry
+    private int panelBottom;
+    private int rowH = 20;
+    private int visibleRows = 9;
+
+
     private int listX, listY, listH;
 
     public mailScreen() {
@@ -261,13 +267,25 @@ public final class mailScreen extends Screen {
 
     @Override
     protected void init() {
-        rightEdge = this.width - 10;
+       rightEdge = this.width - 10;
 
-        int totalMinW = 540;
-        int usableW = Math.max(totalMinW, rightEdge - 10);
+        // width: keep your existing behavior, but cap it so huge monitors don't stretch too far
+        int usableW = Math.min(this.width - 20, 820);
+        usableW = Math.max(540, usableW);
 
         left = Math.max(10, (this.width - usableW) / 2);
-        top  = Math.max(10, this.height / 2 - 110);
+        top  = 18; // anchor near top; we’ll make height responsive instead of fixed-center
+
+        // dynamic panel height based on screen
+        panelBottom = this.height - 24; // leaves room for hints / bottom UI
+        int panelTop = top + 15;
+        int availableH = Math.max(120, panelBottom - panelTop);
+
+        // list gets as many rows as fit
+        visibleRows = Math.max(6, Math.min(18, availableH / rowH));
+        listH = visibleRows * rowH;
+
+        panelBottom = panelTop + listH; // clamp panel to exact rows
 
         listW = Math.max(240, (int)(usableW * 0.55));
         detailsW = Math.max(220, usableW - listW - 10);
@@ -280,7 +298,7 @@ public final class mailScreen extends Screen {
 
         listX = left + 8;
         listY = top + 20;
-        listH = 9 * 20;
+
 
         inboxTabBtn = Button.builder(Component.literal("Inbox"), b -> setTab(Tab.INBOX))
                 .bounds(left, top - 22, 80, 20).build();
@@ -300,7 +318,7 @@ public final class mailScreen extends Screen {
         addRenderableWidget(composeTabBtn);
 
         int actionX = detailsLeft + 10;
-        int actionY = top + 185;
+        int actionY = panelBottom - 22;
         int actionW = Math.max(150, detailsInnerW);
         int halfW = Math.max(70, (actionW - 5) / 2);
 
@@ -363,7 +381,8 @@ public final class mailScreen extends Screen {
         addRenderableWidget(cbBtn);
 
         sendBtn = Button.builder(Component.literal("Send"), b -> onSend())
-                .bounds(rx, top + 195, Math.min(detailsInnerW, 270), 18).build();
+            .bounds(rx, panelBottom - 20, Math.min(detailsInnerW, 270), 18).build();
+
         addRenderableWidget(sendBtn);
 
         setTab(tab);
@@ -391,8 +410,7 @@ public final class mailScreen extends Screen {
     private void buildRowButtons() {
         rowButtons.clear();
 
-        int rowH = 20;
-        for (int i = 0; i < 9; i++) {
+        for (int i = 0; i < visibleRows; i++) {
             final int visibleIdx = i;
             Button row = Button.builder(Component.literal(""), b -> onRowClicked(visibleIdx))
                     .bounds(listX, listY + visibleIdx * rowH, rowW, rowH)
@@ -401,6 +419,7 @@ public final class mailScreen extends Screen {
             addRenderableWidget(row);
         }
     }
+
 
     // -------------------------
     // Scrollable list
@@ -954,7 +973,7 @@ public final class mailScreen extends Screen {
         g.fill(0, 0, this.width, this.height, 0xAA000000);
         g.drawString(this.font, this.title, left, top - 36, 0xFFFFFFFF);
 
-        int panelBottom = top + 220;
+        int panelBottom = this.panelBottom;
 
         g.fill(left, top + 15, listRight, panelBottom, 0x66000000);
         g.fill(detailsLeft, top + 15, rightEdge, panelBottom, 0x66000000);
@@ -1106,7 +1125,7 @@ public final class mailScreen extends Screen {
         // Show accept-block reason near buttons
         if (inboxAcceptBlockMsg != null && !inboxAcceptBlockMsg.isBlank()) {
             int msgX = detailsLeft + 10;
-            int msgY = top + 225; // near the buttons; adjust if you want
+            int msgY = panelBottom + 6;
             int maxW = rightEdge - (detailsLeft + 20);
             drawWrapped(g, inboxAcceptBlockMsg, msgX, msgY, maxW, 0xFFFF7777, 2);
         }

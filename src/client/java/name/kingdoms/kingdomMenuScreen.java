@@ -50,9 +50,9 @@ public class kingdomMenuScreen extends Screen {
                         if (minecraft != null && minecraft.player != null) {
                             minecraft.player.displayClientMessage(Component.literal(
                                     "Left/Right click with the border wand to set borders. " +
-                                    "Borders are shown with particles. " +
-                                    "Once they are set as a square, throw the wand away. " +
-                                    "You can always re-set the borders again."
+                                            "Borders are shown with particles. " +
+                                            "Once they are set as a square, throw the wand away. " +
+                                            "You can always re-set the borders again."
                             ), false);
                         }
 
@@ -76,13 +76,12 @@ public class kingdomMenuScreen extends Screen {
                         onClose();
                     }).bounds(cx - 60, cy + 20, 120, 20).build()
             );
-
         } else {
+            // Open confirm screen instead of one-click disband
             addRenderableWidget(
                     Button.builder(Component.literal("Disband Kingdom"), b -> {
-                        b.active = false;
-                        ClientPlayNetworking.send(new disbandKingdomPayload(origin));
-                        onClose();
+                        if (minecraft == null) return;
+                        minecraft.setScreen(new DisbandConfirmScreen(this, origin));
                     }).bounds(cx - 60, cy + 20, 120, 20).build()
             );
         }
@@ -127,5 +126,65 @@ public class kingdomMenuScreen extends Screen {
     @Override
     public boolean isPauseScreen() {
         return false;
+    }
+
+    /**
+     * Simple confirmation modal for disbanding the kingdom.
+     */
+    private static final class DisbandConfirmScreen extends Screen {
+
+        private final Screen parent;
+        private final BlockPos origin;
+
+        protected DisbandConfirmScreen(Screen parent, BlockPos origin) {
+            super(Component.literal("Confirm Disband"));
+            this.parent = parent;
+            this.origin = origin;
+        }
+
+        @Override
+        protected void init() {
+            int cx = width / 2;
+            int cy = height / 2;
+
+            addRenderableWidget(
+                    Button.builder(Component.literal("Yes, disband kingdom"), b -> {
+                        b.active = false;
+                        ClientPlayNetworking.send(new disbandKingdomPayload(origin));
+                        onClose();
+                    }).bounds(cx - 90, cy + 10, 180, 20).build()
+            );
+
+            addRenderableWidget(
+                    Button.builder(Component.literal("No"), b -> onClose())
+                            .bounds(cx - 40, cy + 35, 80, 20).build()
+            );
+        }
+
+        @Override
+        public void render(GuiGraphics gui, int mouseX, int mouseY, float delta) {
+            gui.fill(0, 0, this.width, this.height, 0xCC000000);
+
+            int cx = width / 2;
+            int y = height / 2 - 45;
+
+            gui.drawCenteredString(font, Component.literal("Are you sure you want to disband your kingdom?"), cx, y, 0xFFFFFFFF);
+            y += 14;
+            gui.drawCenteredString(font, Component.literal("This cannot be undone."), cx, y, 0xFFFF5555);
+
+            super.render(gui, mouseX, mouseY, delta);
+        }
+
+        @Override
+        public void onClose() {
+            if (minecraft != null) {
+                minecraft.setScreen(parent);
+            }
+        }
+
+        @Override
+        public boolean isPauseScreen() {
+            return false;
+        }
     }
 }

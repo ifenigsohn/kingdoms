@@ -10,26 +10,27 @@ import java.util.List;
 
 public record bordersSyncPayload(List<Entry> entries) implements CustomPacketPayload {
 
-   public record Entry(
-        java.util.UUID id,
-        String name,
-        int minX, int maxX,
-        int minZ, int maxZ,
-        int colorARGB,
-        boolean isYours
+    public record Entry(
+            java.util.UUID id,
+            String name,
+            boolean hasBorder,
+            int minX, int maxX,
+            int minZ, int maxZ,
+            int colorARGB,
+            boolean isYours
     ) {}
-
 
     public static final Type<bordersSyncPayload> TYPE =
             new Type<>(ResourceLocation.fromNamespaceAndPath("kingdoms", "borders_sync"));
 
-        public static final StreamCodec<RegistryFriendlyByteBuf, bordersSyncPayload> STREAM_CODEC =
+    public static final StreamCodec<RegistryFriendlyByteBuf, bordersSyncPayload> STREAM_CODEC =
             StreamCodec.of(
                     (buf, payload) -> {
                         buf.writeVarInt(payload.entries().size());
                         for (Entry e : payload.entries()) {
-                            buf.writeUUID(e.id());         
+                            buf.writeUUID(e.id());
                             buf.writeUtf(e.name());
+                            buf.writeBoolean(e.hasBorder());      // NEW
                             buf.writeInt(e.minX());
                             buf.writeInt(e.maxX());
                             buf.writeInt(e.minZ());
@@ -42,11 +43,12 @@ public record bordersSyncPayload(List<Entry> entries) implements CustomPacketPay
                         int n = buf.readVarInt();
                         List<Entry> out = new ArrayList<>(n);
                         for (int i = 0; i < n; i++) {
-                            java.util.UUID id = buf.readUUID();  
+                            java.util.UUID id = buf.readUUID();
 
                             out.add(new Entry(
-                                    id,                          
+                                    id,
                                     buf.readUtf(),
+                                    buf.readBoolean(),           // NEW
                                     buf.readInt(), buf.readInt(),
                                     buf.readInt(), buf.readInt(),
                                     buf.readInt(),
@@ -56,7 +58,6 @@ public record bordersSyncPayload(List<Entry> entries) implements CustomPacketPay
                         return new bordersSyncPayload(out);
                     }
             );
-
 
     @Override
     public Type<? extends CustomPacketPayload> type() { return TYPE; }

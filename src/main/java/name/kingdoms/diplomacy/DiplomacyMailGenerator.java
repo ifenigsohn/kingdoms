@@ -19,8 +19,8 @@ import java.util.UUID;
 public final class DiplomacyMailGenerator {
 
     // tune
-    private static final int PERIOD_TICKS = 20 * 60 * 5; // every 5 minutes DEBUG FOR DEV
-    private static final double CHANCE_PER_PERIOD = 0.30;
+    private static final int PERIOD_TICKS = 20 * 60 * 8; // every 8 minutes DEBUG FOR DEV
+    private static final double CHANCE_PER_PERIOD = 0.25;
     private static final long EXPIRE_TICKS = 20L * 60L * 10L; // 10 min
 
     private static final double RANGE = 6000.0;

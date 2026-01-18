@@ -99,7 +99,7 @@ public class kingdomBordersMapScreen extends Screen {
     protected void init() {
         super.init();
 
-        // Ask server for current war zones so we can draw them
+        ClientPlayNetworking.send(new name.kingdoms.payload.bordersRequestPayload());
         ClientPlayNetworking.send(new warZonesRequestPayload());
     }
 
@@ -306,8 +306,13 @@ public class kingdomBordersMapScreen extends Screen {
         // Borders overlay
         // -------------------------
         bordersSyncPayload borders = kingdomsClient.CLIENT_BORDERS;
+
         if (borders != null) {
             for (var e : borders.entries()) {
+
+                
+                if (!e.hasBorder()) continue;
+
                 int x1 = (int) Math.round(cx + (e.minX() - px) / scale);
                 int x2 = (int) Math.round(cx + (e.maxX() - px) / scale);
                 int z1 = (int) Math.round(cy + (e.minZ() - pz) / scale);
@@ -327,6 +332,7 @@ public class kingdomBordersMapScreen extends Screen {
         } else {
             g.drawCenteredString(this.font, Component.literal("Requesting borders..."), cx, top + 6, 0xFFFFFFFF);
         }
+
 
         // -------------------------
         // War zones overlay
@@ -387,6 +393,7 @@ public class kingdomBordersMapScreen extends Screen {
                 long bestArea = Long.MAX_VALUE;
 
                 for (var e : borders2.entries()) {
+                    if (!e.hasBorder()) continue;
                     int minX = Math.min(e.minX(), e.maxX());
                     int maxX = Math.max(e.minX(), e.maxX());
                     int minZ = Math.min(e.minZ(), e.maxZ());

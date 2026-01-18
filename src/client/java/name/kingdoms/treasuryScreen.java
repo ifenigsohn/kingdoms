@@ -406,7 +406,7 @@ public class treasuryScreen extends Screen {
         g.drawCenteredString(this.font, name + " Treasury", this.width / 2, 12, 0xFFFFFFFF);
 
         // LEFT: economy
-        int leftX = this.width / 2 - 220;
+        int leftX = PAD;
         int y = 54;
         g.drawString(this.font, "Resources", leftX, y, 0xFFFFFFFF);
         y += 14;

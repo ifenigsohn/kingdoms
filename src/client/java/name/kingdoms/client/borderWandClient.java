@@ -1,5 +1,6 @@
 package name.kingdoms.client;
 
+import name.kingdoms.kingdomsClient;
 import name.kingdoms.modItem;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
@@ -17,6 +18,32 @@ public final class borderWandClient {
 
     private static BlockPos a = null;
     private static BlockPos b = null;
+
+    public static void clearSelection() {
+        a = null;
+        b = null;
+    }
+    
+    private static void spawnNoBorderHint(Minecraft mc, ParticleOptions particle) {
+        if (mc.player == null || mc.level == null) return;
+
+        BlockPos p = mc.player.blockPosition();
+        int baseY = p.getY() + 1;
+
+        // light ring around feet (cheap + readable)
+        for (int i = 0; i < 12; i++) {
+            double ang = mc.level.random.nextDouble() * Math.PI * 2.0;
+            double r = 1.2 + mc.level.random.nextDouble() * 0.8;
+
+            double x = p.getX() + 0.5 + Math.cos(ang) * r;
+            double z = p.getZ() + 0.5 + Math.sin(ang) * r;
+            double y = baseY + mc.level.random.nextDouble() * 1.2;
+
+            mc.level.addParticle(particle, x, y, z, 0.0, 0.01, 0.0);
+        }
+    }
+
+
 
     // throttle particle spam
     private static int tick = 0;
@@ -50,25 +77,50 @@ public final class borderWandClient {
             return InteractionResult.PASS;
         });
 
-        // Spawn particles while wand is held
-        ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (client.player == null || client.level == null) return;
-            if (!client.player.getMainHandItem().is(modItem.BORDER_WAND)) return;
+       ClientTickEvents.END_CLIENT_TICK.register(client -> {
+    if (client.player == null || client.level == null) return;
+    if (!client.player.getMainHandItem().is(modItem.BORDER_WAND)) return;
 
-            // don't render anything until at least A or B is set
-            if (a == null && b == null) return;
+    // Local selection state (instant; doesn't depend on server sync)
+    boolean selecting = (a != null || b != null);
 
-            tick++;
-            if ((tick % 2) != 0) return; // every 2 ticks
+    // "Do I have a kingdom?" can be briefly false before sync arrives
+    boolean haveKingdom = kingdomsClient.hasKingdomClient();
+    boolean hasBorder   = kingdomsClient.hasBorderClient();
 
-            ParticleOptions particle = ParticleTypes.LARGE_SMOKE;
+    // If client thinks you DON'T have a kingdom:
+    // - never show the "no border hint" ring (the thing that follows you)
+    // - BUT still show selection preview if you're selecting (A/B set)
+    if (!haveKingdom && !selecting) {
+        return;
+    }
 
-            if (a != null && b == null) {
-                spawnEdgeBox(client, a, a, particle, 20);
-            } else if (a != null && b != null) {
-                spawnEdgeBox(client, a, b, particle, 60);
-            }
-        });
+    // If you're not selecting, only show hint smoke when your kingdom has NO border
+    // (but only when haveKingdom is true, because we returned above otherwise)
+    if (!selecting && hasBorder) return;
+
+    tick++;
+    if ((tick % 2) != 0) return;
+
+    ParticleOptions particle = ParticleTypes.LARGE_SMOKE;
+
+    if (!selecting) {
+        // This is the ring that follows the player.
+        // It will now only appear when haveKingdom == true.
+        spawnNoBorderHint(client, particle);
+        return;
+    }
+
+    // selection visuals
+    if (a != null && b == null) {
+        spawnEdgeBox(client, a, a, particle, 20);
+    } else if (a != null && b != null) {
+        spawnEdgeBox(client, a, b, particle, 60);
+    }
+});
+
+
+
     }
 
     /**

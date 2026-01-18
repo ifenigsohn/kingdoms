@@ -1,5 +1,7 @@
 package name.kingdoms;
 
+import name.kingdoms.network.networkInit;
+import name.kingdoms.payload.kingdomInfoSyncPayload;
 import name.kingdoms.payload.openKingdomMenuPayload;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.BlockPos;
@@ -87,4 +89,37 @@ public class kingdomBlock extends Block {
 
         return InteractionResult.CONSUME;
     }
+
+    @Override
+    public BlockState playerWillDestroy(Level level, BlockPos pos, BlockState state, Player player) {
+        // Do our server-side cleanup BEFORE the block is fully gone
+        if (!level.isClientSide() && level instanceof ServerLevel sl) {
+            var ks = kingdomState.get(sl.getServer());
+
+            var k = ks.getKingdomAt(sl, pos);
+            if (k != null && ks.isTerminal(sl, k, pos)) {
+
+                // Clear border + terminal immediately
+                ks.clearKingdomBorder(sl, k);
+                ks.clearTerminalIfMatches(sl, k, pos);
+                ks.markDirty();
+
+                // Update map borders for everyone (so visuals disappear now)
+                name.kingdoms.network.networkInit.broadcastBorders(sl.getServer());
+
+                // Optional: clear the owner's local UI state immediately
+                var owner = sl.getServer().getPlayerList().getPlayer(k.owner);
+                if (owner != null) {
+                    ServerPlayNetworking.send(owner, new name.kingdoms.payload.kingdomInfoSyncPayload(false, ""));
+                }
+            }
+        }
+
+        // IMPORTANT: return the super result (correct signature)
+        return super.playerWillDestroy(level, pos, state, player);
+    }
+
+
+
+    
 }

@@ -70,15 +70,32 @@ public final class clientNetworkInit {
     
     public static void registerClientReceivers() {
 
-        ClientPlayNetworking.registerGlobalReceiver(bordersSyncPayload.TYPE, (payload, ctx) -> {
+       ClientPlayNetworking.registerGlobalReceiver(bordersSyncPayload.TYPE, (payload, ctx) -> {
             ctx.client().execute(() -> {
                 name.kingdoms.kingdomsClient.CLIENT_BORDERS = payload;
 
-                if (net.minecraft.client.Minecraft.getInstance().screen instanceof name.kingdoms.client.kingdomBordersMapScreen s) {
+                boolean haveKingdom = false;
+                boolean hasBorder = true;
+
+                // Server includes your kingdom entry even if hasBorder==false
+                for (var e : payload.entries()) {
+                    if (e.isYours()) {
+                        haveKingdom = true;
+                        hasBorder = e.hasBorder();
+                        break;
+                    }
+                }
+
+                name.kingdoms.kingdomsClient.YOU_HAVE_A_KINGDOM = haveKingdom;
+                name.kingdoms.kingdomsClient.YOUR_KINGDOM_HAS_BORDER = hasBorder;
+
+                if (Minecraft.getInstance().screen instanceof name.kingdoms.client.kingdomBordersMapScreen s) {
                     s.onBordersUpdated();
                 }
             });
         });
+
+
 
         ClientPlayNetworking.registerGlobalReceiver(warZonesSyncPayload.TYPE, (payload, ctx) -> {
             ctx.client().execute(() -> {
@@ -93,6 +110,7 @@ public final class clientNetworkInit {
                 clientWarZoneCache.setAll(zones);
             });
         });
+
 
         ClientPlayNetworking.registerGlobalReceiver(
                 name.kingdoms.payload.warBattleHudSyncPayload.TYPE,
@@ -333,8 +351,19 @@ public final class clientNetworkInit {
         );
 
         ClientPlayNetworking.registerGlobalReceiver(kingdomInfoSyncPayload.TYPE, (payload, ctx) ->
-                ctx.client().execute(() -> kingdomsClient.CLIENT_KINGDOM_INFO = payload)
+                ctx.client().execute(() -> {
+                    kingdomsClient.CLIENT_KINGDOM_INFO = payload;
+
+                    if (!payload.hasKingdom()) {
+                        kingdomsClient.CLIENT_BORDERS =
+                                new name.kingdoms.payload.bordersSyncPayload(java.util.List.of());
+
+                        // Stop any client-side preview particles immediately
+                        name.kingdoms.client.borderWandClient.clearSelection();
+                    }
+                })
         );
+
 
         // --- Treasury shop sync ---
         ClientPlayNetworking.registerGlobalReceiver(treasuryShopSyncPayload.TYPE, (payload, ctx) -> {
@@ -351,8 +380,15 @@ public final class clientNetworkInit {
 
         // --- Job requirements screen ---
         ClientPlayNetworking.registerGlobalReceiver(jobReqsS2CPayload.TYPE, (payload, ctx) ->
-                ctx.client().execute(() -> Minecraft.getInstance().setScreen(new jobRequirementsScreen(payload)))
+                ctx.client().execute(() -> {
+                    // Ask server for up-to-date economy + kingdom info (same pattern as hover/economy UI)
+                    ClientPlayNetworking.send(new name.kingdoms.payload.kingdomInfoRequestPayload());
+                    ClientPlayNetworking.send(new name.kingdoms.payload.ecoRequestPayload());
+
+                    Minecraft.getInstance().setScreen(new jobRequirementsScreen(payload));
+                })
         );
+
 
         // --- Kingdom query result screen ---
         ClientPlayNetworking.registerGlobalReceiver(kingdomQueryResultPayload.TYPE, (payload, ctx) -> {

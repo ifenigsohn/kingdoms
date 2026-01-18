@@ -20,7 +20,7 @@ import java.util.UUID;
 public final class DiplomacyResponseQueue {
 
     /** DEBUG: instant AI responses (DEV ONLY) */
-    public static boolean DEBUG_INSTANT = true;
+    public static boolean DEBUG_INSTANT = false;
 
     private record PendingMail(
             UUID playerId,

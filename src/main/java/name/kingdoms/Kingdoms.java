@@ -2,9 +2,12 @@ package name.kingdoms;
 
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
+
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityDimensions;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobCategory;
+import net.minecraft.world.entity.animal.horse.Horse;
 import name.kingdoms.blueprint.BlueprintPlacerEngine;
 import name.kingdoms.blueprint.KingdomSatelliteSpawner;
 import name.kingdoms.blueprint.RoadBuilder;
@@ -20,6 +23,7 @@ import name.kingdoms.payload.kingdomTransitionS2CPayload;
 import name.kingdoms.payload.mailInboxSyncPayload;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
@@ -67,6 +71,18 @@ public class Kingdoms implements ModInitializer {
     }
     
     public static kingdomsClientProxy PROXY = new kingdomsClientProxy();
+
+    private static void cleanupRetinueMounts(MinecraftServer server) {
+    for (ServerLevel level : server.getAllLevels()) {
+        for (Entity e : level.getAllEntities()) {
+            if (e instanceof Horse && e.getTags().contains("kingdoms_retinue_mount")) {
+                // discard passengers first (optional, but avoids rider weirdness)
+                for (Entity p : e.getPassengers()) p.discard();
+                e.discard();
+            }
+        }
+    }
+}
 
 
     private static final long TRANSITION_COOLDOWN_TICKS = 20L * 10L; // 10 seconds
@@ -198,6 +214,7 @@ public class Kingdoms implements ModInitializer {
         name.kingdoms.network.networkInit.registerPayloadTypes();
         name.kingdoms.network.networkInit.registerServerReceivers();
 
+        ServerLifecycleEvents.SERVER_STOPPING.register(Kingdoms::cleanupRetinueMounts);
         ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickEconomy);
         ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickKingdomTransitions);
 
@@ -418,6 +435,27 @@ public class Kingdoms implements ModInitializer {
                 }
 
                 ks.markDirty();
+
+                // --- PUSH UPDATED BORDERS TO ALL PLAYERS ---
+                for (ServerPlayer p : sl.getServer().getPlayerList().getPlayers()) {
+                    ServerPlayNetworking.send(
+                        p,
+                        new name.kingdoms.payload.bordersSyncPayload(
+                            ks.getAllKingdoms().stream()
+                                .filter(kk -> kk.hasBorder)
+                                .map(kk -> new name.kingdoms.payload.bordersSyncPayload.Entry(
+                                        kk.id,
+                                        kk.name,
+                                        ok, kk.borderMinX, kk.borderMaxX,
+                                        kk.borderMinZ, kk.borderMaxZ,
+                                        0xFF000000 | (kk.id.hashCode() & 0x00FFFFFF),
+                                        kk.owner.equals(p.getUUID())
+                                ))
+                                .toList()
+                        )
+                    );
+                }
+
 
                 player.displayClientMessage(Component.literal(
                         "Kingdom border applied: X[" + minX + "," + maxX + "] Z[" + minZ + "," + maxZ + "]"

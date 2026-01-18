@@ -12,17 +12,27 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.entity.projectile.Arrow;
 import net.minecraft.world.item.BowItem;
+import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.entity.BannerPattern;
+import net.minecraft.world.level.block.entity.BannerPatternLayers;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.level.storage.ValueOutput;
 
 import java.util.EnumSet;
 
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 
@@ -169,11 +179,11 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
 
             if (cooldown <= 0 && d2 <= reach2 && self.getSensing().hasLineOfSight(t)) {
                 if (self.level() instanceof ServerLevel sl) {
-                    boolean ok = self.doHurtTarget(sl, t);
-                    if (ok) self.swing(InteractionHand.MAIN_HAND, true);
+                    self.doHurtTarget(sl, t); // doHurtTarget handles swing
                 }
-                cooldown = 12; // ~0.6s; tweak feel
+                cooldown = 12;
             }
+
         }
     }
 
@@ -469,14 +479,22 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
     private void applyLoadout() {
         if (this.level() == null) return;
 
+        // Mainhand
         if (this.getRole() == Role.ARCHER) {
             this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.BOW));
         } else {
             this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.IRON_SWORD));
         }
 
-        this.setItemSlot(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
+        // Offhand: shields ONLY for footmen
+        if (this.getRole() == Role.FOOTMAN) {
+            DyeColor base = (this.getSide() == Side.FRIEND) ? DyeColor.BLUE : DyeColor.RED;
+            this.setItemSlot(EquipmentSlot.OFFHAND, makeBannerShield(base));
+        } else {
+            this.setItemSlot(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
+        }
 
+        // Bannerman helmet banner (your existing behavior)
         if (this.isBannerman()) {
             ItemStack banner = (this.getSide() == Side.FRIEND)
                     ? new ItemStack(Items.BLUE_BANNER)
@@ -487,9 +505,27 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
         }
     }
 
+
+    private static ItemStack makeBannerShield(DyeColor baseColor) {
+        ItemStack shield = new ItemStack(Items.SHIELD);
+        shield.set(DataComponents.BASE_COLOR, baseColor); // solid colored banner overlay
+        return shield;
+    }
+
+
+
+
     @Override
     public boolean removeWhenFarAway(double distanceToClosestPlayer) {
         return false;
+    }
+
+
+    @Override
+    public boolean doHurtTarget(ServerLevel level, Entity target) {
+        this.swing(InteractionHand.MAIN_HAND, true); // broadcast to clients
+        this.setAggressive(true);
+        return super.doHurtTarget(level, target);
     }
 
     @Override
@@ -500,8 +536,6 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
             tickFormationTeleportAssist(sl, this.getFormationTarget());
         }
     }
-
-    
 
 
     // -------------------------

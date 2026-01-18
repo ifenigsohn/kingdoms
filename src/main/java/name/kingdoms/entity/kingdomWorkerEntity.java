@@ -289,6 +289,13 @@ public class kingdomWorkerEntity extends PathfinderMob {
         updateDisplayName(); // recompose
     }
 
+    @Override
+    public void aiStep() {
+        this.updateSwingTime(); // <-- makes swing() actually animate reliably
+        super.aiStep();
+    }
+
+
     // -----------------------
     // MENUS
     // -----------------------
@@ -469,8 +476,9 @@ public class kingdomWorkerEntity extends PathfinderMob {
 
         if (horse == null) return;
 
-        horse.setPersistenceRequired();
         horse.tameWithName(owner);
+        horse.addTag("kingdoms_retinue_mount");
+        horse.addTag("kingdoms_owner:" + owner.getUUID());
 
         // place + face
         horse.teleportTo(this.getX(), this.getY(), this.getZ());
@@ -492,6 +500,17 @@ public class kingdomWorkerEntity extends PathfinderMob {
         retinueHorseUuid = horse.getUUID();
         horseCooldown = HORSE_COOLDOWN_TICKS;
     }
+
+    private void forceDespawnRetinueHorse(ServerLevel sl) {
+        Horse h = getRetinueHorseIfAlive(sl);
+        if (h != null) {
+            if (this.getVehicle() == h) this.stopRiding();
+            h.discard();
+        }
+        retinueHorseUuid = null;
+        horseCooldown = HORSE_COOLDOWN_TICKS; // optional anti-spam if owner relogs instantly
+    }
+
 
 
     @Override
@@ -596,7 +615,6 @@ public class kingdomWorkerEntity extends PathfinderMob {
         // --- Retinue follow/teleport overrides (SERVER) ---
         if (this.level() instanceof ServerLevel sl && this.isRetinue()) {
 
-        
             // horse cooldown tick
             if (horseCooldown > 0) horseCooldown--;
 
@@ -604,32 +622,35 @@ public class kingdomWorkerEntity extends PathfinderMob {
             // 2) If owner dismounts -> despawn our horse (and dismount)
             if (ownerIsOnHorse(sl)) {
                 ensureRetinueHorse(sl);
-                
-            } else {
-                if (retinueHorseUuid != null) {
-                    despawnRetinueHorse(sl);
-                }
+            } else if (retinueHorseUuid != null) {
+                despawnRetinueHorse(sl);
             }
 
             UUID ownerId = getOwnerUUID();
-            if (ownerId != null) {
-                var owner = sl.getServer().getPlayerList().getPlayer(ownerId);
-                if (owner != null) {
-                    double d2 = this.distanceToSqr(owner);
+            ServerPlayer owner = (ownerId == null) ? null : sl.getServer().getPlayerList().getPlayer(ownerId);
 
-                    if (d2 > (HARD_TELEPORT_RADIUS * HARD_TELEPORT_RADIUS)) {
-                        // Only hard-teleport when the owner is NOT flying and is moving slowly enough
-                        if (canTeleportToOwner(owner)) {
-                            this.getNavigation().stop();
-                            this.teleportTo(owner.getX() + 1.0, owner.getY(), owner.getZ() + 1.0);
-                        }
-                    }
+            // If owner is offline, we should NOT keep a retinue horse around.
+            if (owner == null) {
+                if (retinueHorseUuid != null) {
+                    forceDespawnRetinueHorse(sl);
+                }
+                return; // still skip worker logic
+            }
 
+            // (Optional) any owner-based retinue teleport logic can stay here
+            // e.g. hard teleport if too far:
+            double d2 = this.distanceToSqr(owner);
+            if (d2 > (HARD_TELEPORT_RADIUS * HARD_TELEPORT_RADIUS)) {
+                if (canTeleportToOwner(owner)) {
+                    this.getNavigation().stop();
+                    this.teleportTo(owner.getX() + 1.0, owner.getY(), owner.getZ() + 1.0);
                 }
             }
-            // IMPORTANT: don't run home/job teleport logic while retinue
-            return;
+
+            return; // IMPORTANT: don't run home/job logic while retinue
         }
+
+
 
         // --- Normal worker (job/home) logic ---
         if (!(this.level() instanceof ServerLevel level)) return;

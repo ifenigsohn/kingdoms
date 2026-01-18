@@ -17,6 +17,7 @@ import name.kingdoms.payload.OpenTreasuryS2CPayload;
 import name.kingdoms.payload.aiTradeInfoS2CPayload;
 import name.kingdoms.payload.aiTradeQueryC2SPayload;
 import name.kingdoms.payload.bordersRequestPayload;
+import name.kingdoms.payload.bordersSyncPayload;
 import name.kingdoms.payload.createKingdomResultPayload;
 import name.kingdoms.payload.diplomacyFreezeC2SPayload;
 import name.kingdoms.payload.disbandKingdomPayload;
@@ -98,8 +99,9 @@ public final class networkInit {
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.warOverviewRequestC2SPayload.TYPE,name.kingdoms.payload.warOverviewRequestC2SPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.kingdomHoverRequestC2SPayload.TYPE,name.kingdoms.payload.kingdomHoverRequestC2SPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.newsRequestC2SPayload.TYPE,name.kingdoms.payload.newsRequestC2SPayload.STREAM_CODEC);
-        PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.newsSyncS2CPayload.TYPE,name.kingdoms.payload.newsSyncS2CPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.mailPolicyRequestC2SPayload.TYPE,name.kingdoms.payload.mailPolicyRequestC2SPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playC2S().register(royalGuardToggleC2SPayload.TYPE, royalGuardToggleC2SPayload.CODEC);
+
 
         // ----- S2C -----
         PayloadTypeRegistry.playS2C().register(aiTradeInfoS2CPayload.TYPE, aiTradeInfoS2CPayload.CODEC);
@@ -125,43 +127,10 @@ public final class networkInit {
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.warOverviewSyncS2CPayload.TYPE,name.kingdoms.payload.warOverviewSyncS2CPayload.STREAM_CODEC);
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.kingdomHoverSyncS2CPayload.TYPE,name.kingdoms.payload.kingdomHoverSyncS2CPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(mailPolicySyncS2CPayload.TYPE, mailPolicySyncS2CPayload.STREAM_CODEC);
-        PayloadTypeRegistry.playC2S().register(royalGuardToggleC2SPayload.TYPE, royalGuardToggleC2SPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.newsSyncS2CPayload.TYPE,name.kingdoms.payload.newsSyncS2CPayload.STREAM_CODEC);
     }
 
     public static void registerServerReceivers() {
-
-        ServerPlayNetworking.registerGlobalReceiver(bordersRequestPayload.TYPE, (payload, ctx) -> {
-            ctx.server().execute(() -> {
-                var player = ctx.player();
-                var ks = name.kingdoms.kingdomState.get(ctx.server());
-
-                var yours = ks.getPlayerKingdom(player.getUUID());
-                var list = new java.util.ArrayList<name.kingdoms.payload.bordersSyncPayload.Entry>();
-
-                // TODO: implement ks.getAllKingdoms() if you don't have it yet
-                for (var k : ks.getAllKingdoms()) {
-                    if (!k.hasBorder) continue;
-
-                    // simple deterministic color from UUID hash
-                    int rgb = 0x00FFFFFF & k.id.hashCode();
-                    int argb = 0xFF000000 | rgb;
-
-                    boolean isYours = (yours != null && k.id.equals(yours.id));
-
-                    list.add(new name.kingdoms.payload.bordersSyncPayload.Entry(
-                            k.id,                
-                            k.name,
-                            k.borderMinX, k.borderMaxX,
-                            k.borderMinZ, k.borderMaxZ,
-                            argb,
-                            isYours
-                    ));
-
-                }
-
-                ServerPlayNetworking.send(player, new name.kingdoms.payload.bordersSyncPayload(list));
-            });
-        });
 
         ServerPlayNetworking.registerGlobalReceiver(royalGuardToggleC2SPayload.TYPE, (payload, ctx) -> {
             ctx.server().execute(() -> {
@@ -420,6 +389,16 @@ public final class networkInit {
                 })
         );
 
+        
+                    // --- BORDERS REQUEST (map/wand refresh) ---
+                    ServerPlayNetworking.registerGlobalReceiver(name.kingdoms.payload.bordersRequestPayload.TYPE, (payload, ctx) -> {
+                        ctx.server().execute(() -> {
+                            var player = ctx.player();
+                            var state = kingdomState.get(ctx.server());
+                            ServerPlayNetworking.send(player, buildBordersPayloadFor(player, state));
+                        });
+                    });
+
 
         ServerPlayNetworking.registerGlobalReceiver(mailSendC2SPayload.TYPE, (payload, ctx) -> {
             ctx.server().execute(() -> {
@@ -535,6 +514,8 @@ public final class networkInit {
                     return;
                 }
 
+                
+
                 // ============================================================
                 // WAR DECLARATION
                 // ============================================================
@@ -570,6 +551,7 @@ public final class networkInit {
                         }
                         ServerPlayNetworking.send(player, new name.kingdoms.payload.warZonesSyncPayload(out));
                     }
+
 
                     // PvP: sync zones + notify other player
                     if (!toIsAi && toOwnerOnline != null) {
@@ -1404,11 +1386,22 @@ public final class networkInit {
                     boolean ok = state.disbandAt(level, player.getUUID(), payload.origin());
                     state.markDirty();
 
-                    if (ok) player.sendSystemMessage(Component.literal("Kingdom disbanded."));
-                    else player.sendSystemMessage(Component.literal("No kingdom found here."));
-                } catch (Exception ex) {
-                    player.sendSystemMessage(Component.literal("Failed to disband: " + ex.getMessage()));
+                    if (ok) {
+                        // Clear the owner's local UI/wand state immediately
+                        ServerPlayNetworking.send(player, new kingdomInfoSyncPayload(false, ""));
+                        ServerPlayNetworking.send(player, ecoSyncPayload.zeros());
+
+                        // Refresh map borders for everyone
+                        broadcastBorders(ctx.server());
+
+                        player.sendSystemMessage(Component.literal("Kingdom disbanded."));
+                    } else {
+                        player.sendSystemMessage(Component.literal("No kingdom found here."));
+                    }
+                } catch (Exception e) {
+                    player.sendSystemMessage(Component.literal("Failed to disband: " + e.getMessage()));
                 }
+
             });
         });
 
@@ -1972,6 +1965,59 @@ public final class networkInit {
         k.horses  -= j.costHorses()  * qty;
         k.potions -= j.costPotions() * qty;
     }
+
+    private static name.kingdoms.payload.bordersSyncPayload buildBordersPayloadFor(ServerPlayer viewer, kingdomState state) {
+        java.util.List<name.kingdoms.payload.bordersSyncPayload.Entry> out = new java.util.ArrayList<>();
+
+        var your = state.getPlayerKingdom(viewer.getUUID()); // may be null
+
+        for (kingdomState.Kingdom k : state.getAllKingdoms()) {
+            if (k == null) continue;
+
+            boolean isYours = (k.owner != null && k.owner.equals(viewer.getUUID()));
+            boolean include = k.hasBorder || isYours; // KEY CHANGE
+
+            if (!include) continue;
+
+            int color = colorFor(k.id);
+
+            // If no border, send zeros (or any harmless values)
+            int minX = k.hasBorder ? k.borderMinX : 0;
+            int maxX = k.hasBorder ? k.borderMaxX : 0;
+            int minZ = k.hasBorder ? k.borderMinZ : 0;
+            int maxZ = k.hasBorder ? k.borderMaxZ : 0;
+
+            out.add(new name.kingdoms.payload.bordersSyncPayload.Entry(
+                    k.id,
+                    (k.name == null ? "" : k.name),
+                    k.hasBorder,     // NEW
+                    minX, maxX,
+                    minZ, maxZ,
+                    color,
+                    isYours
+            ));
+        }
+
+        return new name.kingdoms.payload.bordersSyncPayload(out);
+    }
+
+
+    private static int colorFor(java.util.UUID id) {
+        // deterministic bright-ish color from UUID
+        int h = id.hashCode();
+        int rgb = (h & 0x00FFFFFF);
+        // avoid too-dark colors
+        rgb |= 0x00202020;
+        return 0xFF000000 | rgb;
+    }
+
+    public static void broadcastBorders(net.minecraft.server.MinecraftServer server) {
+        var state = kingdomState.get(server);
+        for (var sp : server.getPlayerList().getPlayers()) {
+            ServerPlayNetworking.send(sp, buildBordersPayloadFor(sp, state));
+        }
+    }
+
 
         private static String labelFor(Letter.Kind k) {
             return switch (k) {

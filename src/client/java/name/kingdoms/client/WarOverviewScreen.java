@@ -28,25 +28,25 @@ public final class WarOverviewScreen extends Screen {
                 royalOn = false;
             }
 
-            int x = this.width / 2 - 160;
+            int colW = Math.min(this.width - 20, 360);
+            int x = (this.width - colW) / 2;
             int y = 20;
+
 
             // Put the toggle near the top
             int btnY = y + 140; // after your basic header lines
-            int btnW = 160;
+            int btnW = Math.min(180, colW);
             int btnH = 20;
 
             royalToggleBtn = Button.builder(toggleLabel(), (btn) -> {
-                royalOn = !royalOn;
+            royalOn = !royalOn;
 
-                // send to server
-                ClientPlayNetworking.send(new royalGuardToggleC2SPayload(royalOn));
+            // send to server
+            ClientPlayNetworking.send(new royalGuardToggleC2SPayload(royalOn));
 
-                // update label immediately
-                btn.setMessage(toggleLabel());
-
-                // optional click sound (vanilla handles this)
-            }).bounds(x, btnY, btnW, btnH).build();
+            // update label immediately
+            btn.setMessage(toggleLabel());
+        }).bounds(x, btnY, btnW, btnH).build();
 
             this.addRenderableWidget(royalToggleBtn);
         
@@ -66,8 +66,10 @@ public final class WarOverviewScreen extends Screen {
         this.renderTransparentBackground(g);
         super.render(g, mouseX, mouseY, partialTick);
 
-        int x = this.width / 2 - 160;
+        int colW = Math.min(this.width - 20, 360);
+        int x = (this.width - colW) / 2;
         int y = 20;
+
 
         g.drawString(this.font, "War Room (General)", x, y, 0xFFFFFFFF);
         y += 18;

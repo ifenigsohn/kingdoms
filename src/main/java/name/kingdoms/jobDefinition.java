@@ -408,7 +408,7 @@ public class jobDefinition {
      ----------------------------- */
 
     public static final jobDefinition FARM_JOB =
-            reg(new jobDefinition("farm", 200))
+            reg(new jobDefinition("farm", 6000))
                     .requiresBlock("minecraft:farmland", 8)
                     .requiresBlock("minecraft:water", 1)
                     .outputs(0.5, 0,3,0, 0,
@@ -416,7 +416,7 @@ public class jobDefinition {
                     .cost(5, 0,0,0, 0,0,0,0, 0,0,0);
 
     public static final jobDefinition BUTCHER_JOB =
-            reg(new jobDefinition("butcher", 200))
+            reg(new jobDefinition("butcher", 6000))
                   .requiresBlock("minecraft:smoker", 2)
                   .requiresBlock("#minecraft:beds", 2)
                   .requiresBlock("minecraft:chest", 2)
@@ -425,7 +425,7 @@ public class jobDefinition {
                     .cost(5, 0,5,0, 0,0,0,0, 0,0,0);
 
     public static final jobDefinition FISHING_JOB =
-            reg(new jobDefinition("fishing", 200))
+            reg(new jobDefinition("fishing", 6000))
                 .requiresBlock("minecraft:barrel", 1)
                 .requiresBlock("minecraft:water", 10)
                     .outputs(0.5, 0,0,3, 0,
@@ -433,7 +433,7 @@ public class jobDefinition {
                     .cost(5, 0,0,0, 0,0,0,0, 0,0,0);
 
     public static final jobDefinition WOOD_JOB =
-            reg(new jobDefinition("wood", 200))
+            reg(new jobDefinition("wood", 6000))
                     .requiresBlock("minecraft:chest", 1)
                     .requiresBlock("#minecraft:logs", 10)
                     .inputsFood(0, 2, 0, 0, 0, 0, 0, 0, 0)
@@ -442,7 +442,7 @@ public class jobDefinition {
                     .cost(5, 0,0,0, 0,0,0,0, 0,0,0);
 
     public static final jobDefinition METAL_JOB =
-            reg(new jobDefinition("metal", 200))
+            reg(new jobDefinition("metal", 6000))
                     .requiresBlock("minecraft:chest", 3)
                     .requiresBlock("minecraft:iron_ore", 2)
                     .requiresBlock("#minecraft:beds", 1)
@@ -452,7 +452,7 @@ public class jobDefinition {
                     .cost(5, 0,0,0, 10,0,0,0, 0,0,0);
 
     public static final jobDefinition GEM_JOB =
-            reg(new jobDefinition("gem", 200))
+            reg(new jobDefinition("gem", 6000))
                     .requiresBlock("minecraft:chest", 3)
                     .requiresBlock("minecraft:diamond_ore", 2)
                     .requiresBlock("#minecraft:beds", 1)
@@ -462,7 +462,7 @@ public class jobDefinition {
                     .cost(15, 0,0,0, 0,10,0,0, 0,0,0);
 
     public static final jobDefinition ALCHEMY_JOB =
-            reg(new jobDefinition("alchemy", 200))
+            reg(new jobDefinition("alchemy", 6000))
                     .requiresBlock("minecraft:brewing_stand", 1)
                     .requiresBlock("minecraft:bookshelf", 5)
                     .inputsFood(0, 1, 0, 2, 0, 0, 1, 0, 0)
@@ -471,7 +471,7 @@ public class jobDefinition {
                     .cost(50, 0,0,0, 0,10,0,0, 10,0,0);
 
     public static final jobDefinition ARMOR_JOB =
-            reg(new jobDefinition("armor", 200))
+            reg(new jobDefinition("armor", 6000))
                     .requiresBlock("minecraft:smithing_table", 1)
                     .requiresBlock("#minecraft:beds", 1)
                     .requiresBlock("minecraft:lava_cauldron", 1)
@@ -481,8 +481,8 @@ public class jobDefinition {
                     .cost(10, 0,0,0, 5,5,0,0, 0,0,0);
 
     public static final jobDefinition WEAPON_JOB =
-            reg(new jobDefinition("weapon", 200))
-                    .requiresBlock("minecraft:anvil", 1)
+            reg(new jobDefinition("weapon", 6000))
+                    .requiresBlock("#minecraft:anvil", 1)
                     .requiresBlock("minecraft:grindstone", 1)
                     .requiresBlock("#minecraft:beds", 1)
                     .inputsFood(0, 2, 0, 5, 0, 0, 0, 0, 0)
@@ -501,7 +501,7 @@ public class jobDefinition {
                     .cost(15, 0,10,0, 0,5,0,0, 0,0,0);
 
     public static final jobDefinition GUARD_JOB =
-            reg(new jobDefinition("guard", 200))
+            reg(new jobDefinition("guard", 6000))
                     .requiresBlock("#minecraft:beds", 3)
                     .requiresBlock("minecraft:chest", 3)
                     .requiresBlock("minecraft:barrel", 1)
@@ -513,7 +513,7 @@ public class jobDefinition {
 
 
     public static final jobDefinition TRAINING_JOB =
-            reg(new jobDefinition("training", 200))
+            reg(new jobDefinition("training", 6000))
                     .requiresBlock("#minecraft:fences", 5)
                     .requiresBlock("#minecraft:beds", 3)
                     .requiresBlock("minecraft:target", 2)
@@ -527,14 +527,14 @@ public class jobDefinition {
             reg(new jobDefinition("garrison", 200))
                     .requiresBlock("#minecraft:beds", 3)
                     .requiresBlock("minecraft:barrel", 1)
-                    .requiresBlock("minecraft:anvil", 1)
+                    .requiresBlock("#minecraft:anvil", 1)
                    .inputsFood(5, 15, 3, 5, 0, 0, 0, 0, 0)
                     .outputs(0, 0,0,0, 0,
                             0,0,0, 0,0,0)
                     .costFood(20, 20, 0, 0, 10, 10, 0, 0, 0);
 
     public static final jobDefinition CHAPEL_JOB =
-            reg(new jobDefinition("chapel", 200))
+            reg(new jobDefinition("chapel", 6000))
                     .requiresBlock("#minecraft:beds", 2)
                     .requiresBlock("minecraft:lectern", 1)
                     .requiresBlock("minecraft:glass", 1)
@@ -544,7 +544,7 @@ public class jobDefinition {
                     .cost(30, 0,0,0, 0,2,0,0, 1,0,0);
 
     public static final jobDefinition TAVERN_JOB =
-            reg(new jobDefinition("tavern", 200))
+            reg(new jobDefinition("tavern", 6000))
                     .requiresBlock("minecraft:dispenser", 2)
                     .requiresBlock("minecraft:flower_pot", 3)
                     .requiresBlock("#minecraft:beds", 3)
@@ -555,7 +555,7 @@ public class jobDefinition {
 
 
     public static final jobDefinition SHOP_JOB =
-            reg(new jobDefinition("shop", 200))
+            reg(new jobDefinition("shop", 6000))
                     .requiresBlock("minecraft:item_frame", 2)
                     .requiresBlock("minecraft:chest", 2)
                     .inputsFood(0, 5, 0, 5, 0, 0, 1, 0, 0)
@@ -565,7 +565,7 @@ public class jobDefinition {
 
 
     public static final jobDefinition NOBILITY_JOB =
-            reg(new jobDefinition("nobility", 200))
+            reg(new jobDefinition("nobility", 6000))
                     .requiresBlock("#minecraft:beds", 4)
                     .requiresBlock("minecraft:note_block", 2)
                     .inputsFood(0, 10, 0, 3, 0, 0, 0, 0, 0)

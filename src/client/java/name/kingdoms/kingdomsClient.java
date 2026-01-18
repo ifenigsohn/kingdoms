@@ -46,6 +46,19 @@ public class kingdomsClient implements ClientModInitializer {
     public static volatile kingdomInfoSyncPayload CLIENT_KINGDOM_INFO =
             new kingdomInfoSyncPayload(false, "");
 
+        public static boolean hasKingdomClient() {
+                return CLIENT_KINGDOM_INFO != null && CLIENT_KINGDOM_INFO.hasKingdom();
+        }
+
+        public static boolean hasBorderClient() {
+        if (CLIENT_BORDERS == null) return false;
+        for (var e : CLIENT_BORDERS.entries()) {
+                if (e.isYours()) return e.hasBorder();
+        }
+        return false;
+        }
+
+
     public static volatile treasuryShopSyncPayload CLIENT_TREASURY_SHOP =
             new treasuryShopSyncPayload(java.util.List.of());
 
@@ -54,12 +67,18 @@ public class kingdomsClient implements ClientModInitializer {
 
     public static KeyMapping OPEN_ECONOMY_KEY;
     public static KeyMapping OPEN_MAIL_KEY;
+    public static volatile boolean YOU_HAVE_A_KINGDOM = false;
+    public static volatile boolean YOUR_KINGDOM_HAS_BORDER = true; 
+
 
     private static final KeyMapping.Category KINGDOMS_CATEGORY =
             new KeyMapping.Category(ResourceLocation.fromNamespaceAndPath(Kingdoms.MOD_ID, "category"));
 
     public static BlockPos LAST_KINGDOM_BLOCK;
-    public static name.kingdoms.payload.bordersSyncPayload CLIENT_BORDERS;
+    public static volatile name.kingdoms.payload.bordersSyncPayload CLIENT_BORDERS =
+        new name.kingdoms.payload.bordersSyncPayload(java.util.List.of());
+
+                
 
     @Override
     public void onInitializeClient() {

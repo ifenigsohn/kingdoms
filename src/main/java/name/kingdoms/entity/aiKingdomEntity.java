@@ -71,7 +71,7 @@ public class aiKingdomEntity extends PathfinderMob {
     @Nullable private BlockPos assignedBedPos;
 
     // --- Teleport safety ---
-    private static final int HARD_TELEPORT_RADIUS = 70;
+    private static final int HARD_TELEPORT_RADIUS = 50;
     private static final long MORNING_TIME = 1000L;
     private static final long NOON_TIME = 6000L;
     private static final int NOON_TELEPORT_RADIUS = 48;

@@ -8,10 +8,10 @@ public final class DiplomacyRelationNormalizer {
     private DiplomacyRelationNormalizer() {}
 
     // Every 20 minutes: 20 min * 60 sec * 20 ticks = 24000 ticks
-    private static final long PERIOD_TICKS = 20L * 60L * 20L;
+    private static final long PERIOD_TICKS = 20L * 60L * 20L; // DEBUG FOR PLAYTEST 20 MINUTES
 
     // Move 5 points toward 0 each period
-    private static final int STEP = 5;
+    private static final int STEP = 2;
 
     public static void init() {
         ServerTickEvents.END_SERVER_TICK.register(DiplomacyRelationNormalizer::onTick);
