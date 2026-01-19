@@ -5,6 +5,7 @@ import name.kingdoms.kingdomsClient;
 import name.kingdoms.payload.bordersSyncPayload;
 import name.kingdoms.payload.warZonesRequestPayload;
 
+import com.mojang.authlib.GameProfile;
 import com.mojang.blaze3d.platform.NativeImage;
 
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
@@ -13,10 +14,16 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.multiplayer.PlayerInfo;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.component.DataComponentType;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.ResolvableProfile;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -712,10 +719,25 @@ public class kingdomBordersMapScreen extends Screen {
         int x = mouseX + 12;
         int y = mouseY + 12;
 
-        int w = 210;
+        int w = 230;
 
         boolean war = card.atWar();
-        int h = war ? 118 : 86; // extra space for war section
+
+        // Height: header region + dynamic lines
+        int base = 6 + 16 + 6;  // top padding + head box + spacing
+        int lines = 0;
+
+        // Lines we draw below name:
+        lines += 1; // Allies
+        if (war) lines += 2; // "⚔ AT WAR" + Enemies
+        lines += 1; // Relation
+        lines += 1; // Soldiers
+        // (Tickets removed)
+        lines += 1; // Gold/Food
+        lines += 1; // Wood/Metal/Arms
+
+        int h = base + 12 /*name*/ + (lines * 12) + 8; // +8 bottom padding
+
 
         // clamp to screen
         if (x + w > this.width) x = this.width - w - 6;
@@ -741,38 +763,47 @@ public class kingdomBordersMapScreen extends Screen {
             tryDrawPlayerSkull(g, headX, headY, card.rulerId(), card.rulerName());
         }
 
+        // Heraldry icon (top-right)
+        var heraldcard = card.heraldry();
+        if (heraldcard != null && !heraldcard.isEmpty()) {
+            int iconX = (x + w) - 6 - 16; // right padding 6, item size 16
+            int iconY = y + 6;
+            g.renderItem(heraldcard, iconX, iconY);
+        }
+
+
+
         int tx = x + 28;
         int ty = y + 6;
 
-        g.drawString(this.font, Component.literal(card.kingdomName()), tx, ty, 0xFFFFFFFF, false);
+        int titleMaxW = (x + w) - tx - 6 - 16 - 4; // leave space for icon
+        String title = this.font.plainSubstrByWidth(card.kingdomName(), titleMaxW);
+        g.drawString(this.font, Component.literal(title), tx, ty, 0xFFFFFFFF, false);
         ty += 12;
 
-        // WAR banner + details
+        
+        // Allies always visible
+        String allies = card.allies();
+        if (allies == null || allies.isBlank()) allies = "None";
+        g.drawString(this.font, Component.literal("Allies: " + allies), tx, ty, 0xFFFFCCCC, false);
+        ty += 12;
+
+        // War banner + enemies only when at war
         if (war) {
             g.drawString(this.font, Component.literal("⚔ AT WAR"), tx, ty, 0xFFFF6666, false);
             ty += 12;
 
-            // Keep lines short (you can server-truncate, but client-side fallback is nice)
-            String allies = card.allies();
-            if (allies == null || allies.isBlank()) allies = "None";
-
             String enemies = card.enemies();
             if (enemies == null || enemies.isBlank()) enemies = "None";
-
-            g.drawString(this.font, Component.literal("Allies: " + allies), tx, ty, 0xFFFFCCCC, false);
-            ty += 12;
-
             g.drawString(this.font, Component.literal("Enemies: " + enemies), tx, ty, 0xFFFFCCCC, false);
             ty += 12;
         }
+
 
         g.drawString(this.font, Component.literal("Relation: " + card.relation()), tx, ty, 0xFFC0C0C0, false);
         ty += 12;
 
         g.drawString(this.font, Component.literal("Soldiers: " + card.soldiersAlive() + "/" + card.soldiersMax()), tx, ty, 0xFFC0C0C0, false);
-        ty += 12;
-
-        g.drawString(this.font, Component.literal("Tickets: " + card.ticketsAlive() + "/" + card.ticketsMax()), tx, ty, 0xFFC0C0C0, false);
         ty += 12;
 
         // economy quick lines (keep it short in tooltip)
@@ -817,22 +848,64 @@ public class kingdomBordersMapScreen extends Screen {
 
     private void tryDrawPlayerSkull(GuiGraphics g, int x, int y, java.util.UUID id, String name) {
         try {
-            var stack = new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.PLAYER_HEAD);
+            ItemStack stack = new ItemStack(Items.PLAYER_HEAD);
 
-            // Build SkullOwner tag
-            var owner = new net.minecraft.nbt.CompoundTag();
-            owner.putIntArray("Id", uuidToIntArray(id)); // ✅ supported in your CompoundTag
-            if (name != null && !name.isBlank()) owner.putString("Name", name);
+            Minecraft mc = Minecraft.getInstance();
 
-            var tag = new net.minecraft.nbt.CompoundTag();
-            tag.put("SkullOwner", owner);
+            // Best case: if the client knows this player (tab list), use that profile (includes textures)
+            if (mc.getConnection() != null && id != null) {
+                PlayerInfo info = mc.getConnection().getPlayerInfo(id);
+                if (info != null) {
+                    GameProfile gp = info.getProfile();
+                    setPlayerHeadProfile(stack, gp);
+                    g.renderItem(stack, x, y);
+                    return;
+                }
+            }
 
-            // Attach tag to stack using reflection (method names differ by version/mappings)
-            attachTagToItemStack(stack, tag);
+            // Fallback: UUID/name only (may still be Steve if textures unknown)
+            if (id != null || (name != null && !name.isBlank())) {
+                GameProfile gp = new GameProfile(id, (name == null || name.isBlank()) ? null : name);
+                setPlayerHeadProfile(stack, gp);
+            }
 
             g.renderItem(stack, x, y);
         } catch (Throwable ignored) {
-            // fallback: do nothing (background box remains)
+            // leave the gray box behind it
+        }
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static void setPlayerHeadProfile(ItemStack stack, GameProfile gp) {
+        if (gp == null) return;
+
+        try {
+            // ResolvableProfile exists but is not "new"-able in your version.
+            Class<?> rpClass = Class.forName("net.minecraft.world.item.component.ResolvableProfile");
+
+            Object rp = null;
+
+            // Try common static factories across versions/mappings
+            for (String m : new String[]{"of", "create", "from", "fromProfile", "forProfile", "fromGameProfile"}) {
+                try {
+                    rp = rpClass.getMethod(m, GameProfile.class).invoke(null, gp);
+                    break;
+                } catch (Throwable ignored) {}
+            }
+
+            // Some versions might still have a ctor(GameProfile)
+            if (rp == null) {
+                try {
+                    rp = rpClass.getConstructor(GameProfile.class).newInstance(gp);
+                } catch (Throwable ignored) {}
+            }
+
+            if (rp != null) {
+                // Bypass generic signature mismatch with raw cast
+                stack.set((DataComponentType) DataComponents.PROFILE, rp);
+            }
+        } catch (Throwable ignored) {
+            // If this fails, head will render as default (Steve). That's OK fallback.
         }
     }
 

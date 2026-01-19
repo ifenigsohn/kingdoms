@@ -48,6 +48,11 @@ public class jobDefinition {
     public String getId() { return id; }
     public int getWorkInterval() { return workIntervalTicks; }
 
+    // Generic food input/cost (base units; consumed from meat/grain/fish pool)
+        private double inFoodGeneric;
+        private double costFoodGeneric;
+
+
     /* -----------------------------
        INPUTS per cycle
      ----------------------------- */
@@ -88,8 +93,8 @@ public class jobDefinition {
     public double inHorses()  { return inHorses; }
     public double inPotions() { return inPotions; }
 
-    /** Generic food input (meat+grain+fish). Use this for UI. */
-    public double inFood() { return inMeat + inGrain + inFish; }
+    /** Total base food input required (generic + any legacy per-type amounts). */
+        public double inFood() { return inFoodGeneric + inMeat + inGrain + inFish; }
 
     /* -----------------------------
        OUTPUT GETTERS
@@ -224,8 +229,24 @@ public class jobDefinition {
                 double wood, double metal, double armor, double weapons,
                 double gems, double horses, double potions
         ) {
-        double each = food / 3.0;
-        return inputs(gold, each, each, each, wood, metal, armor, weapons, gems, horses, potions);
+                this.inGold = gold;
+
+                // store as a single pool requirement
+                this.inFoodGeneric = food;
+
+                // do NOT split into meat/grain/fish
+                this.inMeat = 0;
+                this.inGrain = 0;
+                this.inFish = 0;
+
+                this.inWood = wood;
+                this.inMetal = metal;
+                this.inArmor = armor;
+                this.inWeapons = weapons;
+                this.inGems = gems;
+                this.inHorses = horses;
+                this.inPotions = potions;
+                return this;
         }
 
 
@@ -276,8 +297,24 @@ public class jobDefinition {
                 double wood, double metal, double armor, double weapons,
                 double gems, double horses, double potions
         ) {
-        double each = food / 3.0;
-        return cost(gold, each, each, each, wood, metal, armor, weapons, gems, horses, potions);
+                this.costGold = gold;
+
+                // store as a single pool cost
+                this.costFoodGeneric = food;
+
+                // do NOT split into meat/grain/fish
+                this.costMeat = 0;
+                this.costGrain = 0;
+                this.costFish = 0;
+
+                this.costWood = wood;
+                this.costMetal = metal;
+                this.costArmor = armor;
+                this.costWeapons = weapons;
+                this.costGems = gems;
+                this.costHorses = horses;
+                this.costPotions = potions;
+                return this;
         }
 
 
@@ -286,10 +323,10 @@ public class jobDefinition {
      ----------------------------- */
 
     public boolean canAfford(kingdomState.Kingdom k, int qty) {
+        double foodCost = costFood() * qty;
+
         return  k.gold    >= costGold    * qty &&
-                k.meat    >= costMeat    * qty &&
-                k.grain   >= costGrain   * qty &&
-                k.fish    >= costFish    * qty &&
+                kingdomState.effectiveFood(k) >= foodCost &&
                 k.wood    >= costWood    * qty &&
                 k.metal   >= costMetal   * qty &&
                 k.armor   >= costArmor   * qty &&
@@ -297,13 +334,14 @@ public class jobDefinition {
                 k.gems    >= costGems    * qty &&
                 k.horses  >= costHorses  * qty &&
                 k.potions >= costPotions * qty;
-    }
+        }
+
 
     public void spend(kingdomState.Kingdom k, int qty) {
+        double foodCost = costFood() * qty;
+        kingdomState.consumeFood(k, foodCost);
+
         k.gold    -= costGold    * qty;
-        k.meat    -= costMeat    * qty;
-        k.grain   -= costGrain   * qty;
-        k.fish    -= costFish    * qty;
         k.wood    -= costWood    * qty;
         k.metal   -= costMetal   * qty;
         k.armor   -= costArmor   * qty;
@@ -311,7 +349,8 @@ public class jobDefinition {
         k.gems    -= costGems    * qty;
         k.horses  -= costHorses  * qty;
         k.potions -= costPotions * qty;
-    }
+        }
+
 
     /* -----------------------------
        NET + COST HELPERS
@@ -344,8 +383,8 @@ public class jobDefinition {
     public double costHorses()  { return costHorses; }
     public double costPotions() { return costPotions; }
 
-    /** Generic cost food (meat+grain+fish). */
-    public double costFood() { return costMeat + costGrain + costFish; }
+    /** Total base food cost (generic + any legacy per-type amounts). */
+        public double costFood() { return costFoodGeneric + costMeat + costGrain + costFish; }
 
     /* -----------------------------
        EXECUTION
@@ -371,6 +410,7 @@ public class jobDefinition {
         double foodNeeded = inFood();
 
         if (!kingdomState.consumeFood(k, foodNeeded)) return false;
+
 
         k.gold -= inGold;
         k.wood    -= inWood;
@@ -408,7 +448,7 @@ public class jobDefinition {
      ----------------------------- */
 
     public static final jobDefinition FARM_JOB =
-            reg(new jobDefinition("farm", 6000))
+            reg(new jobDefinition("farm", 4000))
                     .requiresBlock("minecraft:farmland", 8)
                     .requiresBlock("minecraft:water", 1)
                     .outputs(0.5, 0,3,0, 0,
@@ -416,7 +456,7 @@ public class jobDefinition {
                     .cost(5, 0,0,0, 0,0,0,0, 0,0,0);
 
     public static final jobDefinition BUTCHER_JOB =
-            reg(new jobDefinition("butcher", 6000))
+            reg(new jobDefinition("butcher", 4000))
                   .requiresBlock("minecraft:smoker", 2)
                   .requiresBlock("#minecraft:beds", 2)
                   .requiresBlock("minecraft:chest", 2)
@@ -425,7 +465,7 @@ public class jobDefinition {
                     .cost(5, 0,5,0, 0,0,0,0, 0,0,0);
 
     public static final jobDefinition FISHING_JOB =
-            reg(new jobDefinition("fishing", 6000))
+            reg(new jobDefinition("fishing", 4000))
                 .requiresBlock("minecraft:barrel", 1)
                 .requiresBlock("minecraft:water", 10)
                     .outputs(0.5, 0,0,3, 0,
@@ -433,7 +473,7 @@ public class jobDefinition {
                     .cost(5, 0,0,0, 0,0,0,0, 0,0,0);
 
     public static final jobDefinition WOOD_JOB =
-            reg(new jobDefinition("wood", 6000))
+            reg(new jobDefinition("wood", 4000))
                     .requiresBlock("minecraft:chest", 1)
                     .requiresBlock("#minecraft:logs", 10)
                     .inputsFood(0, 2, 0, 0, 0, 0, 0, 0, 0)
@@ -442,7 +482,7 @@ public class jobDefinition {
                     .cost(5, 0,0,0, 0,0,0,0, 0,0,0);
 
     public static final jobDefinition METAL_JOB =
-            reg(new jobDefinition("metal", 6000))
+            reg(new jobDefinition("metal", 4000))
                     .requiresBlock("minecraft:chest", 3)
                     .requiresBlock("minecraft:iron_ore", 2)
                     .requiresBlock("#minecraft:beds", 1)
@@ -452,7 +492,7 @@ public class jobDefinition {
                     .cost(5, 0,0,0, 10,0,0,0, 0,0,0);
 
     public static final jobDefinition GEM_JOB =
-            reg(new jobDefinition("gem", 6000))
+            reg(new jobDefinition("gem", 4000))
                     .requiresBlock("minecraft:chest", 3)
                     .requiresBlock("minecraft:diamond_ore", 2)
                     .requiresBlock("#minecraft:beds", 1)
@@ -462,7 +502,7 @@ public class jobDefinition {
                     .cost(15, 0,0,0, 0,10,0,0, 0,0,0);
 
     public static final jobDefinition ALCHEMY_JOB =
-            reg(new jobDefinition("alchemy", 6000))
+            reg(new jobDefinition("alchemy", 4000))
                     .requiresBlock("minecraft:brewing_stand", 1)
                     .requiresBlock("minecraft:bookshelf", 5)
                     .inputsFood(0, 1, 0, 2, 0, 0, 1, 0, 0)
@@ -471,7 +511,7 @@ public class jobDefinition {
                     .cost(50, 0,0,0, 0,10,0,0, 10,0,0);
 
     public static final jobDefinition ARMOR_JOB =
-            reg(new jobDefinition("armor", 6000))
+            reg(new jobDefinition("armor", 4000))
                     .requiresBlock("minecraft:smithing_table", 1)
                     .requiresBlock("#minecraft:beds", 1)
                     .requiresBlock("minecraft:lava_cauldron", 1)
@@ -481,7 +521,7 @@ public class jobDefinition {
                     .cost(10, 0,0,0, 5,5,0,0, 0,0,0);
 
     public static final jobDefinition WEAPON_JOB =
-            reg(new jobDefinition("weapon", 6000))
+            reg(new jobDefinition("weapon", 4000))
                     .requiresBlock("#minecraft:anvil", 1)
                     .requiresBlock("minecraft:grindstone", 1)
                     .requiresBlock("#minecraft:beds", 1)
@@ -501,7 +541,7 @@ public class jobDefinition {
                     .cost(15, 0,10,0, 0,5,0,0, 0,0,0);
 
     public static final jobDefinition GUARD_JOB =
-            reg(new jobDefinition("guard", 6000))
+            reg(new jobDefinition("guard", 4000))
                     .requiresBlock("#minecraft:beds", 3)
                     .requiresBlock("minecraft:chest", 3)
                     .requiresBlock("minecraft:barrel", 1)
@@ -513,7 +553,7 @@ public class jobDefinition {
 
 
     public static final jobDefinition TRAINING_JOB =
-            reg(new jobDefinition("training", 6000))
+            reg(new jobDefinition("training", 4000))
                     .requiresBlock("#minecraft:fences", 5)
                     .requiresBlock("#minecraft:beds", 3)
                     .requiresBlock("minecraft:target", 2)
@@ -534,7 +574,7 @@ public class jobDefinition {
                     .costFood(20, 20, 0, 0, 10, 10, 0, 0, 0);
 
     public static final jobDefinition CHAPEL_JOB =
-            reg(new jobDefinition("chapel", 6000))
+            reg(new jobDefinition("chapel", 4000))
                     .requiresBlock("#minecraft:beds", 2)
                     .requiresBlock("minecraft:lectern", 1)
                     .requiresBlock("minecraft:glass", 1)
@@ -544,7 +584,7 @@ public class jobDefinition {
                     .cost(30, 0,0,0, 0,2,0,0, 1,0,0);
 
     public static final jobDefinition TAVERN_JOB =
-            reg(new jobDefinition("tavern", 6000))
+            reg(new jobDefinition("tavern", 4000))
                     .requiresBlock("minecraft:dispenser", 2)
                     .requiresBlock("minecraft:flower_pot", 3)
                     .requiresBlock("#minecraft:beds", 3)
@@ -555,7 +595,7 @@ public class jobDefinition {
 
 
     public static final jobDefinition SHOP_JOB =
-            reg(new jobDefinition("shop", 6000))
+            reg(new jobDefinition("shop", 4000))
                     .requiresBlock("minecraft:item_frame", 2)
                     .requiresBlock("minecraft:chest", 2)
                     .inputsFood(0, 5, 0, 5, 0, 0, 1, 0, 0)
@@ -565,7 +605,7 @@ public class jobDefinition {
 
 
     public static final jobDefinition NOBILITY_JOB =
-            reg(new jobDefinition("nobility", 6000))
+            reg(new jobDefinition("nobility", 4000))
                     .requiresBlock("#minecraft:beds", 4)
                     .requiresBlock("minecraft:note_block", 2)
                     .inputsFood(0, 10, 0, 3, 0, 0, 0, 0, 0)

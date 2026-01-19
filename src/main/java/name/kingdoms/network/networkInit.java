@@ -5,6 +5,7 @@ import name.kingdoms.payload.OpenMailS2CPayload;
 import name.kingdoms.Kingdoms;
 import name.kingdoms.RetinueSpawner;
 import name.kingdoms.aiKingdomState;
+import name.kingdoms.entity.RoyalGuardManager;
 import name.kingdoms.entity.aiKingdomEntity;
 import name.kingdoms.jobBlock;
 import name.kingdoms.jobBlocks;
@@ -33,6 +34,7 @@ import name.kingdoms.payload.opendiplomacyS2CPayload;
 import name.kingdoms.payload.openKingdomMenuPayload;
 import name.kingdoms.payload.requestBorderWandPayload;
 import name.kingdoms.payload.royalGuardToggleC2SPayload;
+import name.kingdoms.payload.setHeraldryPayload;
 import name.kingdoms.payload.toggleJobEnabledPayload;
 import name.kingdoms.payload.treasuryBuyJobPayload;
 import name.kingdoms.payload.treasuryOpenPayload;
@@ -101,6 +103,7 @@ public final class networkInit {
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.newsRequestC2SPayload.TYPE,name.kingdoms.payload.newsRequestC2SPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.mailPolicyRequestC2SPayload.TYPE,name.kingdoms.payload.mailPolicyRequestC2SPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(royalGuardToggleC2SPayload.TYPE, royalGuardToggleC2SPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(setHeraldryPayload.TYPE, setHeraldryPayload.CODEC);
 
 
         // ----- S2C -----
@@ -147,6 +150,34 @@ public final class networkInit {
             });
         });
 
+        // --- SET HERALDRY (custom banner) ---
+        ServerPlayNetworking.registerGlobalReceiver(setHeraldryPayload.TYPE, (payload, ctx) -> {
+            ctx.server().execute(() -> {
+                var player = ctx.player();
+
+                ItemStack banner = payload.banner();
+                if (banner == null || banner.isEmpty()) return;
+
+                // must be a banner
+                if (!(banner.getItem() instanceof net.minecraft.world.item.BannerItem)) return;
+
+                // find player's kingdom and store heraldry
+                var state = kingdomState.get(ctx.server());
+                var k = state.getPlayerKingdom(player.getUUID());
+                if (k == null) return;
+
+                k.heraldry = banner.copyWithCount(1);
+                state.markDirty(); // or state.setDirty() depending on your class
+
+                // THIS IS THE LINE YOU ADD:
+                RoyalGuardManager.applyHeraldryNow(player);
+
+                player.sendSystemMessage(Component.literal("Custom banner set."));
+            });
+        });
+
+
+
 
         ServerPlayNetworking.registerGlobalReceiver(
                 name.kingdoms.payload.kingdomHoverRequestC2SPayload.TYPE,
@@ -160,6 +191,12 @@ public final class networkInit {
 
                     var k = ks.getKingdom(payload.kingdomId());
                     if (k == null) return;
+
+                    ItemStack heraldry = ItemStack.EMPTY;
+                    if (k.heraldry != null && !k.heraldry.isEmpty()) {
+                        heraldry = k.heraldry.copyWithCount(1);
+                    }
+
 
                     // relation (you already use this elsewhere)
                     var relState = name.kingdoms.diplomacy.DiplomacyRelationsState.get(server);
@@ -273,7 +310,8 @@ public final class networkInit {
                         gems, horses, potions,
 
                         isAi,
-                        aiSkinId
+                        aiSkinId,
+                        heraldry
                 ));
 
                 })

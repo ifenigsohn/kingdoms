@@ -125,12 +125,19 @@ public class aiKingdomState extends SavedData {
         // Link AI -> kingdomState border/claim system
         kingdomState ks = kingdomState.get(level.getServer());
         kingdomState.Kingdom kk = ks.ensureAiKingdom(k.id, k.kingUuid, k.name, k.origin);
+
+        // --- AI heraldry (only set if missing) ---
+        if (kk.heraldry == null || kk.heraldry.isEmpty()) {
+        kk.heraldry = AiHeraldryPool.randomBanner(level.registryAccess(), level.random).copyWithCount(1);
+}
         kk.hasBorder = true;
         kk.borderMinX = k.borderMinX;
         kk.borderMaxX = k.borderMaxX;
         kk.borderMinZ = k.borderMinZ;
         kk.borderMaxZ = k.borderMaxZ;
         ks.claimRect(level, k.id, k.borderMinX, k.borderMaxX, k.borderMinZ, k.borderMaxZ);
+
+        ks.setDirty(); 
 
         // economy (
         k.gold    = range(r, 200, 2000);

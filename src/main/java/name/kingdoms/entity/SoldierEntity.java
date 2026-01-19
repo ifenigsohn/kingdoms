@@ -20,8 +20,11 @@ import net.minecraft.world.level.block.entity.BannerPattern;
 import net.minecraft.world.level.block.entity.BannerPatternLayers;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.level.storage.ValueOutput;
-
+import com.google.gson.JsonParser;
+import com.mojang.serialization.JsonOps;
 import java.util.EnumSet;
+
+import com.mojang.serialization.JsonOps;
 
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.component.DataComponents;
@@ -58,6 +61,9 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
             SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.INT);
     private static final EntityDataAccessor<Boolean> DATA_CAPTAIN =
             SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.BOOLEAN);
+    private static final EntityDataAccessor<ItemStack> DATA_HERALDRY =
+        SynchedEntityData.defineId(SoldierEntity.class, EntityDataSerializers.ITEM_STACK);
+
 
     public SoldierEntity(EntityType<? extends PathfinderMob> type, Level level) {
         super(type, level);
@@ -87,6 +93,7 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
         builder.define(DATA_ROLE, 0);
         builder.define(DATA_SKIN, 0);
         builder.define(DATA_CAPTAIN, false);
+        builder.define(DATA_HERALDRY, ItemStack.EMPTY);
     }
 
     public Side getSide() { return Side.fromOrdinal(this.entityData.get(DATA_SIDE)); }
@@ -103,6 +110,14 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
 
     public boolean isCaptain() { return this.entityData.get(DATA_CAPTAIN); }
     public void setCaptain(boolean captain) { this.entityData.set(DATA_CAPTAIN, captain); }
+
+    public ItemStack getHeraldry() { return this.entityData.get(DATA_HERALDRY); }
+
+    public void setHeraldry(ItemStack stack) {
+        this.entityData.set(DATA_HERALDRY, (stack == null) ? ItemStack.EMPTY : stack.copyWithCount(1));
+        applyLoadout();
+    }
+
 
     // -------------------------
     // Friendly-fire prevention
@@ -325,6 +340,25 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
         return null;
     }
 
+    public static ItemStack makeShieldFromBanner(ItemStack banner) {
+        ItemStack shield = new ItemStack(Items.SHIELD);
+
+        if (banner == null || banner.isEmpty()) return shield;
+
+        // Copy base color if present
+        var base = banner.get(DataComponents.BASE_COLOR);
+        if (base != null) {
+            shield.set(DataComponents.BASE_COLOR, base);
+        }
+
+        // Copy patterns if present (this is what makes it match the banner visually)
+        var layers = banner.get(DataComponents.BANNER_PATTERNS);
+        if (layers != null) {
+            shield.set(DataComponents.BANNER_PATTERNS, layers);
+        }
+
+        return shield;
+    }
 
 
     // -------------------------
@@ -344,6 +378,8 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
             this.attackRadius = attackRadius;
             this.setFlags(EnumSet.of(Flag.LOOK));
         }
+
+        
 
         @Override
         public boolean canUse() {
@@ -479,6 +515,9 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
     private void applyLoadout() {
         if (this.level() == null) return;
 
+        ItemStack heraldry = getHeraldry();
+        boolean hasHeraldry = heraldry != null && !heraldry.isEmpty();
+
         // Mainhand
         if (this.getRole() == Role.ARCHER) {
             this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.BOW));
@@ -488,18 +527,24 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
 
         // Offhand: shields ONLY for footmen
         if (this.getRole() == Role.FOOTMAN) {
-            DyeColor base = (this.getSide() == Side.FRIEND) ? DyeColor.BLUE : DyeColor.RED;
-            this.setItemSlot(EquipmentSlot.OFFHAND, makeBannerShield(base));
+            if (hasHeraldry) {
+                this.setItemSlot(EquipmentSlot.OFFHAND, makeShieldFromBanner(heraldry));
+            } else {
+                this.setItemSlot(EquipmentSlot.OFFHAND,
+                        makeBannerShield(this.getSide() == Side.FRIEND ? DyeColor.BLUE : DyeColor.RED));
+            }
         } else {
             this.setItemSlot(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
         }
 
-        // Bannerman helmet banner (your existing behavior)
+        // Bannerman head banner
         if (this.isBannerman()) {
-            ItemStack banner = (this.getSide() == Side.FRIEND)
-                    ? new ItemStack(Items.BLUE_BANNER)
-                    : new ItemStack(Items.RED_BANNER);
-            this.setItemSlot(EquipmentSlot.HEAD, banner);
+            if (hasHeraldry) {
+                this.setItemSlot(EquipmentSlot.HEAD, heraldry.copyWithCount(1));
+            } else {
+                this.setItemSlot(EquipmentSlot.HEAD,
+                        new ItemStack(this.getSide() == Side.FRIEND ? Items.BLUE_BANNER : Items.RED_BANNER));
+            }
         } else {
             this.setItemSlot(EquipmentSlot.HEAD, ItemStack.EMPTY);
         }
@@ -549,6 +594,12 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
         output.putInt("KRole", this.entityData.get(DATA_ROLE));
         output.putInt("KSkin", this.entityData.get(DATA_SKIN));
         output.putInt("KCaptain", this.entityData.get(DATA_CAPTAIN) ? 1 : 0);
+    
+       ItemStack h = this.getHeraldry();
+        if (h != null && !h.isEmpty()) {
+            ItemStack.CODEC.encodeStart(JsonOps.INSTANCE, h).result()
+                    .ifPresent(json -> output.putString("KHeraldry", json.toString()));
+        }
     }
 
     @Override
@@ -566,6 +617,21 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
         this.entityData.set(DATA_ROLE, Mth.clamp(role, 0, 1));
         this.entityData.set(DATA_SKIN, Math.max(0, skin));
         this.entityData.set(DATA_CAPTAIN, captain != 0);
+
+        ItemStack loaded = ItemStack.EMPTY;
+
+        String hs = input.getStringOr("KHeraldry", "");
+        if (hs != null && !hs.isBlank()) {
+            try {
+                var el = JsonParser.parseString(hs);
+                loaded = ItemStack.CODEC.parse(JsonOps.INSTANCE, el).result().orElse(ItemStack.EMPTY);
+            } catch (Exception ignored) {
+                loaded = ItemStack.EMPTY;
+            }
+        }
+
+        this.entityData.set(DATA_HERALDRY, loaded);
+
 
         applyLoadout();
     }

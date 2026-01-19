@@ -1,7 +1,9 @@
 package name.kingdoms.entity;
 
 import name.kingdoms.Kingdoms;
+import name.kingdoms.kingdomState;
 import name.kingdoms.namePool;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntitySpawnReason;
@@ -30,6 +32,22 @@ public final class RoyalGuardManager {
         else despawn(owner, level);
     }
 
+    private static ItemStack getPlayerHeraldryOrDefault(ServerPlayer owner) {
+        MinecraftServer server = ((ServerLevel) owner.level()).getServer();
+        if (server == null) return new ItemStack(Items.BLUE_BANNER);
+
+        kingdomState ks = kingdomState.get(server);
+        kingdomState.Kingdom k = ks.getPlayerKingdom(owner.getUUID());
+
+        if (k != null && k.heraldry != null && !k.heraldry.isEmpty()) {
+            return k.heraldry.copyWithCount(1);
+        }
+        return new ItemStack(Items.BLUE_BANNER);
+    }
+
+
+
+
     private static void spawnIfMissing(ServerPlayer owner, ServerLevel level) {
         var existing = level.getEntitiesOfClass(
                 kingdomWorkerEntity.class,
@@ -57,13 +75,14 @@ public final class RoyalGuardManager {
             spawnOne(owner, level, 1 + guards);
             guards++;
         }
+
+        applyHeraldryNow(owner);
     }
 
     private static boolean isBannerman(kingdomWorkerEntity w) {
-        // We can detect bannerman by head banner or skin id. Head banner is safest.
-        var head = w.getItemBySlot(EquipmentSlot.HEAD);
-        return head != null && head.is(Items.BLUE_BANNER);
+        return JOB_BANNER.equals(w.getJobId());
     }
+
 
     private static void ensureExactlyOneBannerman(java.util.List<kingdomWorkerEntity> list) {
         var banners = list.stream().filter(RoyalGuardManager::isBannerman).toList();
@@ -73,8 +92,11 @@ public final class RoyalGuardManager {
         var keep = banners.stream().min(Comparator.comparingInt(kingdomWorkerEntity::getId)).orElse(null);
         for (var w : banners) {
             if (w == keep) continue;
+            w.setJobId(JOB_GUARD);
             w.setItemSlot(EquipmentSlot.HEAD, ItemStack.EMPTY);
             w.setSkinId(SKIN_GUARD);
+
+
         }
     }
 
@@ -116,16 +138,25 @@ public final class RoyalGuardManager {
         // Skin
         e.setSkinId(banner ? SKIN_BANNER : SKIN_GUARD);
 
+        ItemStack heraldry = getPlayerHeraldryOrDefault(owner);
+
         // Equipment
-        e.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.IRON_SWORD));
         if (banner) {
-            e.setItemSlot(EquipmentSlot.HEAD, new ItemStack(Items.BLUE_BANNER));
+            // bannerman holds banner (or you can keep sword if you prefer)
+            e.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+            e.setItemSlot(EquipmentSlot.HEAD, heraldry.copyWithCount(1));
+        } else {
+            e.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.IRON_SWORD));
+            e.setItemSlot(EquipmentSlot.OFFHAND, SoldierEntity.makeShieldFromBanner(heraldry));
         }
+
 
     
         // Prevent drops (optional but usually desired for retinue)
         e.setDropChance(EquipmentSlot.MAINHAND, 0.0f);
         e.setDropChance(EquipmentSlot.HEAD, 0.0f);
+        e.setDropChance(EquipmentSlot.OFFHAND, 0.0f);
+
 
         level.addFreshEntity(e);
     }
@@ -140,4 +171,42 @@ public final class RoyalGuardManager {
         );
         for (var w : list) w.discard();
     }
+
+    public static void applyHeraldryNow(ServerPlayer owner) {
+        if (!(owner.level() instanceof ServerLevel level)) return;
+
+        ItemStack heraldry = getPlayerHeraldryOrDefault(owner);
+
+        // Update *all* retinue combatants + bannermen owned by this player
+        var list = level.getEntitiesOfClass(
+                kingdomWorkerEntity.class,
+                owner.getBoundingBox().inflate(512),
+                w -> w.isRetinue()
+                    && owner.getUUID().equals(w.getOwnerUUID())
+                    && (JOB_GUARD.equals(w.getJobId()) || JOB_BANNER.equals(w.getJobId()))
+
+                    );
+
+        for (var w : list) {
+            String job = w.getJobId();
+
+            // Bannermen show the banner on head
+            if (JOB_BANNER.equals(job)) {
+                w.setItemSlot(EquipmentSlot.HEAD, heraldry.copyWithCount(1));
+                w.setDropChance(EquipmentSlot.HEAD, 0.0f);
+                // optional: make sure bannerman doesn't carry shield
+                w.setItemSlot(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
+                w.setDropChance(EquipmentSlot.OFFHAND, 0.0f);
+            }
+
+            if (JOB_GUARD.equals(job)) {
+                w.setItemSlot(EquipmentSlot.OFFHAND, SoldierEntity.makeShieldFromBanner(heraldry));
+                w.setDropChance(EquipmentSlot.OFFHAND, 0.0f);
+                // optional: guards don't wear banner
+                w.setItemSlot(EquipmentSlot.HEAD, ItemStack.EMPTY);
+            }
+
+        }
+    }
+
 }

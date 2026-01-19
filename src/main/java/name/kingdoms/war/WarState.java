@@ -34,26 +34,26 @@ public final class WarState extends SavedData {
 
     private record AiWarSim(double moraleA, double moraleB) {}
 
-    private static final int AI_WAR_TICK_INTERVAL = 20 * 60 * 5; // 5 MINUTES DEBUG FOR DEV
+    private static final int AI_WAR_TICK_INTERVAL = 20 * 60 * 1; // 1 MINUTE DEBUG FOR DEV
 
     // -----------------------------
     // Zone quality tuning
     // -----------------------------
-    private static final double MAX_WATER_FRAC = 0.10; // <= 10% water samples
-    private static final int MAX_HEIGHT_RANGE = 16;    // blocks (tune)
-    private static final double MAX_STDDEV = 6.0;      // blocks (tune)
+    private static final double MAX_WATER_FRAC = 0.05; 
+    private static final int MAX_HEIGHT_RANGE = 14;    // blocks (tune)
+    private static final double MAX_STDDEV = 4.0;      // blocks (tune)
 
     /** Maximum allowed step between neighboring samples (ravine / cliff detector). */
-    private static final int MAX_ADJACENT_STEP = 3;    // blocks (tune)
+    private static final int MAX_ADJACENT_STEP = 1;    // blocks (tune)
 
     // How hard we search around the computed frontline center
     private static final int ZONE_SEARCH_RADIUS = 128; // base radius (tune)
     private static final int ZONE_SEARCH_STEP   = 16;  // blocks (tune)
+    private static final int SAMPLE_STEP = 6;         
+    private static final int MAX_CELLS = 9000; 
 
-    // Sampling grid resolution per candidate
-    private static final int SAMPLE_GRID = 32;
 
-    private record ZoneQuality(
+   private record ZoneQuality(
             double waterFrac,
             int heightRange,
             double stddev,
@@ -65,12 +65,85 @@ public final class WarState extends SavedData {
 
 
 
+    private static boolean overlapsAnyKingdom(ServerLevel level, BattleZone zone) {
+        kingdomState ks = kingdomState.get(level.getServer());
+        if (ks == null) return false;
+
+        // Sample grid. Step=10 matches your claim cell size (if you use 10x10 claims).
+        final int step = 10;
+
+        for (int z = zone.minZ(); z <= zone.maxZ(); z += step) {
+            for (int x = zone.minX(); x <= zone.maxX(); x += step) {
+                if (ks.getKingdomAt(level, new BlockPos(x, 0, z)) != null) return true;
+            }
+        }
+
+        // Corners too (edge cases)
+        if (ks.getKingdomAt(level, new BlockPos(zone.minX(), 0, zone.minZ())) != null) return true;
+        if (ks.getKingdomAt(level, new BlockPos(zone.maxX(), 0, zone.minZ())) != null) return true;
+        if (ks.getKingdomAt(level, new BlockPos(zone.minX(), 0, zone.maxZ())) != null) return true;
+        if (ks.getKingdomAt(level, new BlockPos(zone.maxX(), 0, zone.maxZ())) != null) return true;
+
+        return false;
+    }
+
+    private static double betweenPenalty(int cx, int cz, int ax, int az, int bx, int bz) {
+        double abx = (double) (bx - ax);
+        double abz = (double) (bz - az);
+        double apx = (double) (cx - ax);
+        double apz = (double) (cz - az);
+
+        double abLen2 = abx * abx + abz * abz;
+        if (abLen2 < 1.0) return 0.0;
+
+        // Projection t onto segment A->B
+        double t = (apx * abx + apz * abz) / abLen2;
+
+        // Perpendicular distance to the infinite line
+        double cross = apx * abz - apz * abx;
+        double perpDist = Math.abs(cross) / Math.sqrt(abLen2);
+
+        // Penalize being off the line corridor
+        double pPerp = perpDist * 1.2; // tune weight
+
+        // Penalize being away from the midpoint (encourages "between")
+        double pMid = Math.abs(t - 0.5) * 600.0; // tune weight
+
+        // Hard penalty if beyond either endpoint
+        double pOutside = 0.0;
+        if (t < 0.0) pOutside += (-t) * 2000.0;
+        if (t > 1.0) pOutside += (t - 1.0) * 2000.0;
+
+        // Soft penalty if too close to an endpoint (prevents zones right next to a kingdom)
+        double pNearEnds = 0.0;
+        if (t < 0.20) pNearEnds += (0.20 - t) * 1200.0;
+        if (t > 0.80) pNearEnds += (t - 0.80) * 1200.0;
+
+        return pPerp + pMid + pOutside + pNearEnds;
+    }
+
+
 
     private static boolean isSurfaceWater(ServerLevel level, int x, int z) {
+        // Use WORLD_SURFACE for "top" (often above water), then check multiple blocks
         int yTop = level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
-        var pos = new BlockPos(x, yTop - 1, z);
-        return level.getBlockState(pos).getFluidState().is(Fluids.WATER);
+
+        // Check at yTop and slightly below. Oceans/rivers often need this.
+        for (int dy = 0; dy <= 3; dy++) {
+            var pos = new BlockPos(x, yTop - dy, z);
+            if (level.getFluidState(pos).is(Fluids.WATER)) return true;
+        }
+
+        // Also check the top of OCEAN_FLOOR column (shorelines)
+        int yFloor = level.getHeight(Heightmap.Types.OCEAN_FLOOR, x, z);
+        for (int dy = 0; dy <= 2; dy++) {
+            var pos = new BlockPos(x, yFloor + dy, z);
+            if (level.getFluidState(pos).is(Fluids.WATER)) return true;
+        }
+
+        return false;
     }
+
 
     private static int groundY(ServerLevel level, int x, int z) {
         // OCEAN_FLOOR gives solid ground even under water (good for hilliness metric)
@@ -83,22 +156,34 @@ public final class WarState extends SavedData {
         int minZ = zone.minZ();
         int maxZ = zone.maxZ();
 
-        int samples = SAMPLE_GRID * SAMPLE_GRID;
+        int spanX = Math.max(1, maxX - minX);
+        int spanZ = Math.max(1, maxZ - minZ);
+
+        int step = SAMPLE_STEP;
+
+        // keep the cap low so we don't miss ravines too easily
+        while (((spanX / step) + 1) * ((spanZ / step) + 1) > MAX_CELLS) {
+            step += 2;
+            if (step > 12) break;
+        }
+
+        int nx = (spanX / step) + 1;
+        int nz = (spanZ / step) + 1;
+        int samples = nx * nz;
 
         int water = 0;
         int minY = Integer.MAX_VALUE;
         int maxY = Integer.MIN_VALUE;
-
         double sum = 0.0;
         double sumSq = 0.0;
 
-        // Store heights so we can detect cliffs/ravines via adjacent deltas
-        int[][] h = new int[SAMPLE_GRID][SAMPLE_GRID];
+        int[][] h = new int[nz][nx];
 
-        for (int iz = 0; iz < SAMPLE_GRID; iz++) {
-            int z = minZ + (int) Math.round((double) iz * (maxZ - minZ) / (SAMPLE_GRID - 1));
-            for (int ix = 0; ix < SAMPLE_GRID; ix++) {
-                int x = minX + (int) Math.round((double) ix * (maxX - minX) / (SAMPLE_GRID - 1));
+        // sample heights + water
+        for (int iz = 0; iz < nz; iz++) {
+            int z = minZ + iz * step;
+            for (int ix = 0; ix < nx; ix++) {
+                int x = minX + ix * step;
 
                 if (isSurfaceWater(level, x, z)) water++;
 
@@ -113,13 +198,27 @@ public final class WarState extends SavedData {
             }
         }
 
-        // Ravine / cliff detector: maximum neighbor step in the sample grid
+        // max adjacent step (cliff/ravine detector at sampling scale)
         int maxStep = 0;
-        for (int iz = 0; iz < SAMPLE_GRID; iz++) {
-            for (int ix = 0; ix < SAMPLE_GRID; ix++) {
+
+        // Optional: average adjacent step as an extra “roughness” signal (still cheap)
+        long adjCount = 0;
+        long adjSum = 0;
+
+        for (int iz = 0; iz < nz; iz++) {
+            for (int ix = 0; ix < nx; ix++) {
                 int y = h[iz][ix];
-                if (ix + 1 < SAMPLE_GRID) maxStep = Math.max(maxStep, Math.abs(y - h[iz][ix + 1]));
-                if (iz + 1 < SAMPLE_GRID) maxStep = Math.max(maxStep, Math.abs(y - h[iz + 1][ix]));
+
+                if (ix + 1 < nx) {
+                    int d = Math.abs(y - h[iz][ix + 1]);
+                    maxStep = Math.max(maxStep, d);
+                    adjSum += d; adjCount++;
+                }
+                if (iz + 1 < nz) {
+                    int d = Math.abs(y - h[iz + 1][ix]);
+                    maxStep = Math.max(maxStep, d);
+                    adjSum += d; adjCount++;
+                }
             }
         }
 
@@ -130,22 +229,100 @@ public final class WarState extends SavedData {
         int range = Math.max(0, maxY - minY);
         double waterFrac = (double) water / (double) samples;
 
-        // Score: hard-penalize water and hilliness; also penalize cliffs heavily
+        double avgAdj = (adjCount == 0) ? 0.0 : ((double) adjSum / (double) adjCount);
+
+        // Score: hard-penalize water and roughness/cliffs
         double score =
-                (waterFrac * 2000.0) +
-                (range * 8.0) +
-                (std * 40.0) +
-                (maxStep * 120.0);
+                (waterFrac * 200000.0) +   // huge penalty; still gated by passes()
+                (range * 10.0) +
+                (std * 45.0) +
+                (maxStep * 300.0) +
+                (avgAdj * 120.0);
 
         return new ZoneQuality(waterFrac, range, std, maxStep, score, water, samples);
     }
 
+
+    private static boolean isTraversableAcross(int[][] h, int maxStep) {
+        int nz = h.length;
+        if (nz == 0) return false;
+        int nx = h[0].length;
+        if (nx == 0) return false;
+
+        // We consider success if we can reach ANY cell on the opposite edge.
+        // We'll try both directions (left->right OR top->bottom). If either works, it's traversable.
+        return bfsEdgeToEdge(h, maxStep, true) || bfsEdgeToEdge(h, maxStep, false);
+    }
+
+    private static boolean bfsEdgeToEdge(int[][] h, int maxStep, boolean leftToRight) {
+        int nz = h.length;
+        int nx = h[0].length;
+
+        boolean[][] vis = new boolean[nz][nx];
+        ArrayDeque<int[]> q = new ArrayDeque<>();
+
+        if (leftToRight) {
+            // start at left edge (x=0)
+            for (int z = 0; z < nz; z++) {
+                vis[z][0] = true;
+                q.add(new int[]{0, z});
+            }
+        } else {
+            // start at top edge (z=0)
+            for (int x = 0; x < nx; x++) {
+                vis[0][x] = true;
+                q.add(new int[]{x, 0});
+            }
+        }
+
+        while (!q.isEmpty()) {
+            int[] cur = q.removeFirst();
+            int x = cur[0], z = cur[1];
+
+            // reached opposite edge?
+            if (leftToRight) {
+                if (x == nx - 1) return true;
+            } else {
+                if (z == nz - 1) return true;
+            }
+
+            int y = h[z][x];
+
+            // 4-neighbors
+            // (x+1, z)
+            if (x + 1 < nx && !vis[z][x + 1] && Math.abs(h[z][x + 1] - y) <= maxStep) {
+                vis[z][x + 1] = true;
+                q.add(new int[]{x + 1, z});
+            }
+            // (x-1, z)
+            if (x - 1 >= 0 && !vis[z][x - 1] && Math.abs(h[z][x - 1] - y) <= maxStep) {
+                vis[z][x - 1] = true;
+                q.add(new int[]{x - 1, z});
+            }
+            // (x, z+1)
+            if (z + 1 < nz && !vis[z + 1][x] && Math.abs(h[z + 1][x] - y) <= maxStep) {
+                vis[z + 1][x] = true;
+                q.add(new int[]{x, z + 1});
+            }
+            // (x, z-1)
+            if (z - 1 >= 0 && !vis[z - 1][x] && Math.abs(h[z - 1][x] - y) <= maxStep) {
+                vis[z - 1][x] = true;
+                q.add(new int[]{x, z - 1});
+            }
+        }
+
+        return false;
+    }
+
+
+
     private static boolean passes(ZoneQuality q) {
         return q.waterFrac <= MAX_WATER_FRAC
+                && q.maxStep <= MAX_ADJACENT_STEP
                 && q.heightRange <= MAX_HEIGHT_RANGE
-                && q.stddev <= MAX_STDDEV
-                && q.maxStep <= MAX_ADJACENT_STEP;
+                && q.stddev <= MAX_STDDEV;
     }
+
 
     // -----------------------------
     // Queries
@@ -346,6 +523,8 @@ public final class WarState extends SavedData {
         var aiState = aiKingdomState.get(server);
         var rng = server.overworld().getRandom();
 
+        boolean changed = false;
+
         // Snapshot to avoid ConcurrentModificationException when makePeace() removes from wars.
         for (String key : new ArrayList<>(wars)) {
             var parts = key.split("\\|");
@@ -364,23 +543,34 @@ public final class WarState extends SavedData {
             if (aiA == null || aiB == null) continue;
 
             // --- simulate battle ---
-            int lossA = rng.nextInt(5, 20);
-            int lossB = rng.nextInt(5, 20);
+            int lossA = rng.nextInt(3, 15);
+            int lossB = rng.nextInt(3, 15);
+
+            int beforeA = aiA.aliveSoldiers;
+            int beforeB = aiB.aliveSoldiers;
 
             aiA.aliveSoldiers = Math.max(0, aiA.aliveSoldiers - lossA);
             aiB.aliveSoldiers = Math.max(0, aiB.aliveSoldiers - lossB);
+
+             if (aiA.aliveSoldiers != beforeA || aiB.aliveSoldiers != beforeB) {
+                changed = true; // NEW
+            }
 
             // morale
             AiWarSim sim = aiSim.get(key);
             if (sim == null) sim = new AiWarSim(100.0, 100.0);
 
-            double dA = Mth.nextDouble(rng, 0.5, 2.0);
-            double dB = Mth.nextDouble(rng, 0.5, 2.0);
+            double dA = Mth.nextDouble(rng, 2, 10.0);
+            double dB = Mth.nextDouble(rng, 2, 10.0);
 
             double moraleA = Math.max(0.0, sim.moraleA() - dA);
             double moraleB = Math.max(0.0, sim.moraleB() - dB);
 
-            aiSim.put(key, new AiWarSim(moraleA, moraleB));
+            AiWarSim newSim = new AiWarSim(moraleA, moraleB);
+            if (!newSim.equals(sim)) {
+                aiSim.put(key, newSim);
+                changed = true; // NEW
+            }
 
             // surrender logic (make it exclusive; peace ends the war)
             boolean aSurrenders = (aiA.aliveSoldiers <= 0) || (moraleA <= 0.0);
@@ -404,7 +594,10 @@ public final class WarState extends SavedData {
             }
         }
 
-        aiState.setDirty();
+         if (changed) {
+            setDirty();
+            aiState.setDirty();
+        }
     }
 
 
@@ -499,7 +692,10 @@ public final class WarState extends SavedData {
         return new int[]{px, pz};
     }
 
-    private static BattleZone searchForPassingZone(ServerLevel level, int frontX, int frontZ, int half, int searchRadius) {
+    private static BattleZone searchForPassingZone(ServerLevel level,
+                                                int frontX, int frontZ,
+                                                int half, int searchRadius,
+                                                int ax, int az, int bx, int bz) {
         BattleZone bestPassZone = null;
         double bestScorePass = Double.POSITIVE_INFINITY;
 
@@ -509,11 +705,18 @@ public final class WarState extends SavedData {
                 int cz = frontZ + oz;
 
                 BattleZone candidate = BattleZone.of(cx - half, cz - half, cx + half, cz + half);
+
+                // ✅ Hard reject: inside ANY kingdom territory
+                if (overlapsAnyKingdom(level, candidate)) continue;
+
                 ZoneQuality q = evaluateZone(level, candidate);
 
-                if (passes(q) && q.score < bestScorePass) {
-                    bestScorePass = q.score;
-                    bestPassZone = candidate;
+                if (passes(q)) {
+                    double score = q.score + betweenPenalty(cx, cz, ax, az, bx, bz);
+                    if (score < bestScorePass) {
+                        bestScorePass = score;
+                        bestPassZone = candidate;
+                    }
                 }
             }
         }
@@ -521,7 +724,11 @@ public final class WarState extends SavedData {
         return bestPassZone;
     }
 
-    private static BattleZone searchForBestAnyZone(ServerLevel level, int frontX, int frontZ, int half, int searchRadius) {
+
+    private static BattleZone searchForBestAnyZone(ServerLevel level,
+                                                int frontX, int frontZ,
+                                                int half, int searchRadius,
+                                                int ax, int az, int bx, int bz) {
         BattleZone bestAnyZone = null;
         double bestScoreAny = Double.POSITIVE_INFINITY;
 
@@ -531,10 +738,15 @@ public final class WarState extends SavedData {
                 int cz = frontZ + oz;
 
                 BattleZone candidate = BattleZone.of(cx - half, cz - half, cx + half, cz + half);
+
+                // ✅ Still reject zones inside kingdom territory even for fallback.
+                if (overlapsAnyKingdom(level, candidate)) continue;
+
                 ZoneQuality q = evaluateZone(level, candidate);
 
-                if (q.score < bestScoreAny) {
-                    bestScoreAny = q.score;
+                double score = q.score + betweenPenalty(cx, cz, ax, az, bx, bz);
+                if (score < bestScoreAny) {
+                    bestScoreAny = score;
                     bestAnyZone = candidate;
                 }
             }
@@ -542,6 +754,7 @@ public final class WarState extends SavedData {
 
         return bestAnyZone;
     }
+
 
     private static BattleZone computeZone(MinecraftServer server, UUID a, UUID b) {
         Rect ra = rectFor(server, a);
@@ -592,7 +805,7 @@ public final class WarState extends SavedData {
 
         for (int hTry : halfTries) {
             for (int rTry : radiusTries) {
-                BattleZone pass = searchForPassingZone(level, frontX, frontZ, hTry, rTry);
+                BattleZone pass = searchForPassingZone(level, frontX, frontZ, hTry, rTry, pa[0], pa[1], pb[0], pb[1]);
                 if (pass != null) {
                     if (hTry != half || rTry != ZONE_SEARCH_RADIUS) {
                         Kingdoms.LOGGER.info("[War] computeZone: expanded search r={} half={} (origHalf={}) chosen={}",
@@ -606,7 +819,7 @@ public final class WarState extends SavedData {
         // Last resort: pick the best-any in the widest search with the smallest half.
         int widest = radiusTries[radiusTries.length - 1];
         int smallestHalf = halfTries[halfTries.length - 1];
-        BattleZone fallback = searchForBestAnyZone(level, frontX, frontZ, smallestHalf, widest);
+        BattleZone fallback = searchForBestAnyZone(level, frontX, frontZ, smallestHalf, widest, pa[0], pa[1], pb[0], pb[1]);
 
         if (fallback == null) {
             fallback = BattleZone.of(frontX - half, frontZ - half, frontX + half, frontZ + half);
@@ -669,6 +882,42 @@ public final class WarState extends SavedData {
         String sb = b.toString();
         return (sa.compareTo(sb) <= 0) ? (sa + "|" + sb) : (sb + "|" + sa);
     }
+
+
+       public void makePeaceWithAllies(MinecraftServer server, UUID a, UUID b) {
+            var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
+
+            // closure on each side
+            HashSet<UUID> sideA = new HashSet<>();
+            HashSet<UUID> sideB = new HashSet<>();
+            ArrayDeque<UUID> qa = new ArrayDeque<>();
+            ArrayDeque<UUID> qb = new ArrayDeque<>();
+
+            sideA.add(a); qa.add(a);
+            sideB.add(b); qb.add(b);
+
+            while (!qa.isEmpty()) {
+                UUID cur = qa.removeFirst();
+                for (UUID ally : alliance.alliesOf(cur)) if (sideA.add(ally)) qa.addLast(ally);
+            }
+            while (!qb.isEmpty()) {
+                UUID cur = qb.removeFirst();
+                for (UUID ally : alliance.alliesOf(cur)) if (sideB.add(ally)) qb.addLast(ally);
+            }
+
+            boolean changed = false;
+            for (UUID x : sideA) {
+                for (UUID y : sideB) {
+                    String k = key(x, y);
+                    changed |= wars.remove(k);
+                    changed |= (zones.remove(k) != null);
+                    changed |= (aiSim.remove(k) != null);
+                }
+            }
+
+            if (changed) setDirty();
+        }
+
 
     public WarState() {}
 }

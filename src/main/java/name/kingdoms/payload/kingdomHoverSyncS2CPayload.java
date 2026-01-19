@@ -4,6 +4,7 @@ import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.item.ItemStack;
 
 import java.util.UUID;
 
@@ -32,9 +33,9 @@ public record kingdomHoverSyncS2CPayload(
         double armor, double weapons,
         double gems, double horses, double potions,
 
-        // ✅ NEW: AI flag + skin id (0..9)
         boolean isAi,
-        int aiSkinId
+        int aiSkinId,
+        ItemStack heraldry
 ) implements CustomPacketPayload {
 
     public static final Type<kingdomHoverSyncS2CPayload> TYPE =
@@ -78,6 +79,8 @@ public record kingdomHoverSyncS2CPayload(
                     // AI info (also in record order)
                     buf.writeBoolean(p.isAi());
                     buf.writeVarInt(p.aiSkinId());
+
+                    ItemStack.OPTIONAL_STREAM_CODEC.encode(buf, p.heraldry());
                 },
                 (buf) -> new kingdomHoverSyncS2CPayload(
                         buf.readUUID(),
@@ -114,7 +117,8 @@ public record kingdomHoverSyncS2CPayload(
 
                         // AI info
                         buf.readBoolean(),
-                        buf.readVarInt()
+                        buf.readVarInt(),
+                        ItemStack.OPTIONAL_STREAM_CODEC.decode(buf)
                 )
         );
 

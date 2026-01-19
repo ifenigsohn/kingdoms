@@ -11,6 +11,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
@@ -421,6 +422,7 @@ public class kingdomState extends SavedData {
         public UUID retinueScribe = null;
         public UUID retinueTreasurer = null;
         public UUID retinueGeneral = null;
+        public ItemStack heraldry = ItemStack.EMPTY;
 
         // IMPORTANT: networking expects k.name
         public String name;
@@ -552,6 +554,10 @@ public class kingdomState extends SavedData {
                         STRING_INT_MAP_CODEC.optionalFieldOf("active", Map.of()).forGetter(k -> k.active),
                         STRING_INT_MAP_CODEC.optionalFieldOf("placed", Map.of()).forGetter(k -> k.placed),
 
+                        ItemStack.OPTIONAL_CODEC.optionalFieldOf("heraldry", ItemStack.EMPTY)
+                         .forGetter(k -> k.heraldry),
+
+
                         EconomyData.CODEC.optionalFieldOf("eco", new EconomyData(
                                 0,0,0,0, 0,0,0,0, 0,0,0
                         )).forGetter(EconomyData::from),
@@ -578,7 +584,7 @@ public class kingdomState extends SavedData {
                                 .forGetter(k -> k.retinueGeneral == null ? NIL_UUID : k.retinueGeneral)
 
                 ).apply(inst, (id, owner, name, origin,
-                               activeMap, placedMap,
+                               activeMap, placedMap, heraldry,
                                eco, border,
                                hasTerminal, terminalDim, terminalPos, royalGuardsEnabled,
                                retinueScribe, retinueTreasurer, retinueGeneral) -> {
@@ -606,6 +612,7 @@ public class kingdomState extends SavedData {
                     k.retinueScribe = NIL_UUID.equals(retinueScribe) ? null : retinueScribe;
                     k.retinueTreasurer = NIL_UUID.equals(retinueTreasurer) ? null : retinueTreasurer;
                     k.retinueGeneral = NIL_UUID.equals(retinueGeneral) ? null : retinueGeneral;
+                    k.heraldry = (heraldry == null) ? ItemStack.EMPTY : heraldry;
 
                     return k;
                 }));

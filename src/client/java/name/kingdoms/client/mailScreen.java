@@ -89,12 +89,16 @@ public final class mailScreen extends Screen {
     private int rowW, detailsInnerW;
 
     // dynamic panel geometry
+    private int panelTop;
     private int panelBottom;
     private int rowH = 20;
     private int visibleRows = 9;
 
-
     private int listX, listY, listH;
+
+    // details panel inner bounds (for drawing text responsively)
+    private int detailsTop;
+    private int detailsBottom;
 
     public mailScreen() {
         super(Component.literal("Diplomacy Mail"));
@@ -267,28 +271,47 @@ public final class mailScreen extends Screen {
 
     @Override
     protected void init() {
-       rightEdge = this.width - 10;
 
         // width: keep your existing behavior, but cap it so huge monitors don't stretch too far
-        int usableW = Math.min(this.width - 20, 820);
-        usableW = Math.max(540, usableW);
+       int usableW = (int)(this.width * 0.92);
+        usableW = Math.min(usableW, this.width - 20);
+        usableW = Math.max(360, usableW);
 
-        left = Math.max(10, (this.width - usableW) / 2);
-        top  = 18; // anchor near top; we’ll make height responsive instead of fixed-center
+        left = (this.width - usableW) / 2;
+        top  = 18;
+        rightEdge = left + usableW; // IMPORTANT: rightEdge must match usableW now
 
         // dynamic panel height based on screen
-        panelBottom = this.height - 24; // leaves room for hints / bottom UI
-        int panelTop = top + 15;
+        panelTop = top + 15;
+        panelBottom = this.height - 24; // full height panel
+
         int availableH = Math.max(120, panelBottom - panelTop);
 
-        // list gets as many rows as fit
+        // list fills the full panel height (not clamped down)
         visibleRows = Math.max(6, Math.min(18, availableH / rowH));
-        listH = visibleRows * rowH;
+        listH = availableH;
 
-        panelBottom = panelTop + listH; // clamp panel to exact rows
+        // list area uses full panel height
+        detailsTop = panelTop + 6;
+        detailsBottom = panelBottom - 6;
 
-        listW = Math.max(240, (int)(usableW * 0.55));
-        detailsW = Math.max(220, usableW - listW - 10);
+
+        // details inner bounds for text rendering
+        this.detailsTop = this.panelTop + 6;
+        this.detailsBottom = this.panelBottom - 6;
+
+
+
+        // Ensure the details panel always has enough width for compose controls.
+        int minDetailsW = 260;
+        int gap = 10;
+
+        detailsW = Math.max(minDetailsW, (int)(usableW * 0.36));
+        listW = usableW - detailsW - gap;
+
+        listW = Math.max(220, listW);
+        detailsW = usableW - listW - gap;
+
 
         listRight = left + listW;
         detailsLeft = listRight + 10;
@@ -297,8 +320,7 @@ public final class mailScreen extends Screen {
         detailsInnerW = detailsW - 20;
 
         listX = left + 8;
-        listY = top + 20;
-
+        listY = panelTop + 6;
 
         inboxTabBtn = Button.builder(Component.literal("Inbox"), b -> setTab(Tab.INBOX))
                 .bounds(left, top - 22, 80, 20).build();
@@ -338,7 +360,8 @@ public final class mailScreen extends Screen {
         buildRowButtons();
 
         int rx = detailsLeft + 10;
-        int ry = top + 30;
+        int ry = panelTop + 10;
+
 
         int btnW = Math.max(140, Math.min(210, detailsInnerW - 90));
         int boxW = Math.max(70, Math.min(110, detailsInnerW - btnW - 10));
@@ -975,8 +998,10 @@ public final class mailScreen extends Screen {
 
         int panelBottom = this.panelBottom;
 
-        g.fill(left, top + 15, listRight, panelBottom, 0x66000000);
-        g.fill(detailsLeft, top + 15, rightEdge, panelBottom, 0x66000000);
+        g.fill(left, panelTop, listRight, panelBottom, 0x66000000);
+        g.fill(detailsLeft, panelTop, rightEdge, panelBottom, 0x66000000);
+
+
 
         if (tab == Tab.INBOX) renderInboxDetails(g);
         else if (tab == Tab.COMPOSE) renderComposeDetails(g);
@@ -1155,43 +1180,51 @@ public final class mailScreen extends Screen {
             String part = text.substring(i, Math.min(text.length(), i + maxChars));
             g.drawString(this.font, part, dx, dy, 0xFFDDDDDD);
             dy += 12;
-            if (dy > top + 210) break;
+            if (dy > detailsBottom - 12) break;
         }
     }
 
 
     private void renderComposeDetails(GuiGraphics g) {
         int x = detailsLeft + 10;
-        int y = top + 18;
+        int y = detailsTop;
 
         var rec = getSelectedRecipient();
         g.drawString(font, "To: " + (rec == null ? "(none)" : rec.name()), x, y, 0xFFFFFFFF);
         y += 12;
 
-       if (!composeBlockMsg.isEmpty()) {
+        // Draw contract labels aligned to the actual edit boxes (responsive!)
+        if (composeKind == Letter.Kind.CONTRACT) {
+            int labelX = aAmtBox.getX() + aAmtBox.getWidth() + 6;
+            g.drawString(font, "A per trade", labelX, aAmtBox.getY() + 5, 0x888888);
+            g.drawString(font, "B per trade", labelX, bAmtBox.getY() + 5, 0x888888);
+            g.drawString(font, "Cap (A total)", labelX, maxAmtBox.getY() + 5, 0x888888);
+        }
+
+        // If blocked, draw it ABOVE the Send button so it never goes off-screen
+        if (!composeBlockMsg.isEmpty() && sendBtn != null && sendBtn.visible) {
             int msgX = detailsLeft + 10;
-            int msgY = top + 165; // below compose controls, above Send button
             int maxW = rightEdge - (detailsLeft + 20);
+
+            int msgY = sendBtn.getY() - 26; // 1 line above send button
+            if (msgY < detailsTop + 24) msgY = detailsTop + 24;
 
             drawWrapped(g, composeBlockMsg, msgX, msgY, maxW, 0xFFFF7777, 2);
         }
 
-
-        // Draw labels for the 3 amount boxes when CONTRACT
-        if (composeKind == Letter.Kind.CONTRACT) {
-            g.drawString(font, "A per trade", x + 190, top + 52, 0x888888);
-            g.drawString(font, "B per trade", x + 190, top + 74, 0x888888);
-            g.drawString(font, "Cap (A total)", x + 190, top + 96, 0x888888);
-        }
+        // Small helper text: clamp it inside the panel
+        int hintY = detailsBottom - 14;
+        if (hintY < y + 10) hintY = y + 10;
 
         if (composeKind == Letter.Kind.COMPLIMENT) {
-            g.drawString(font, "Compliment sends a canned message.", x, top + 155, 0xAAAAAA);
+            g.drawString(font, "Compliment sends a canned message.", x, hintY, 0xAAAAAA);
         } else if (composeKind == Letter.Kind.INSULT) {
-            g.drawString(font, "Insult sends a canned message.", x, top + 155, 0xAAAAAA);
+            g.drawString(font, "Insult sends a canned message.", x, hintY, 0xAAAAAA);
         } else if (composeKind == Letter.Kind.ULTIMATUM) {
-            g.drawString(font, "Ultimatum has no deadline (GDD).", x, top + 155, 0xAAAAAA);
+            g.drawString(font, "Ultimatum has no deadline (GDD).", x, hintY, 0xAAAAAA);
         }
     }
+
 
     // -------------------------
     // Formatting helpers

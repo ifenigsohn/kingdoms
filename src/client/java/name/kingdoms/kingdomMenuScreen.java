@@ -10,15 +10,19 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.item.BannerItem;
 import net.minecraft.world.item.ItemStack;
+
 
 public class kingdomMenuScreen extends Screen {
 
     private final BlockPos origin;
     private final boolean exists;
     private final String kingdomName;
+    private boolean hasBannerForHeraldry;
 
     private EditBox nameBox;
+    private Button heraldryBtn;
 
     public kingdomMenuScreen(BlockPos origin) {
         this(origin, false, "");
@@ -35,7 +39,7 @@ public class kingdomMenuScreen extends Screen {
     protected void init() {
         int cx = width / 2;
         int cy = height / 2;
-
+        hasBannerForHeraldry = playerHasBanner();
         boolean hasName = exists && !kingdomName.trim().isEmpty();
 
         if (hasName && !playerHasBorderWand()) {
@@ -84,6 +88,26 @@ public class kingdomMenuScreen extends Screen {
                         minecraft.setScreen(new DisbandConfirmScreen(this, origin));
                     }).bounds(cx - 60, cy + 20, 120, 20).build()
             );
+
+            heraldryBtn = Button.builder(Component.literal("Set Heraldry"), b -> {
+                        b.active = false;
+
+                        ItemStack banner = firstBannerStack();
+                        if (banner.isEmpty()) return;
+
+                        ClientPlayNetworking.send(new name.kingdoms.payload.setHeraldryPayload(banner));
+
+                        if (minecraft != null && minecraft.player != null) {
+                            minecraft.player.displayClientMessage(Component.literal("Custom banner set."), false);
+                        }
+                    })
+                    .bounds(cx - 70, cy - 10, 140, 20)
+                    .build();
+
+            heraldryBtn.active = hasBannerForHeraldry;
+            addRenderableWidget(heraldryBtn);
+
+
         }
 
         addRenderableWidget(
@@ -111,6 +135,15 @@ public class kingdomMenuScreen extends Screen {
     public void render(GuiGraphics gui, int mouseX, int mouseY, float delta) {
         gui.fill(0, 0, this.width, this.height, 0xAA000000);
 
+        boolean nowHasBanner = playerHasBanner();
+        if (nowHasBanner != hasBannerForHeraldry) {
+            hasBannerForHeraldry = nowHasBanner;
+            if (heraldryBtn != null) {
+                heraldryBtn.active = hasBannerForHeraldry;
+            }
+        }
+
+
         int cx = width / 2;
         int titleY = height / 2 - 70;
 
@@ -120,6 +153,14 @@ public class kingdomMenuScreen extends Screen {
             gui.drawCenteredString(font, Component.literal("Current Kingdom: " + kingdomName), cx, titleY, 0xFFFFFFFF);
         }
 
+        if (exists && !hasBannerForHeraldry) {
+            gui.drawCenteredString(font,
+                    Component.literal("Requires banner to set heraldry"),
+                    cx,
+                    height / 2 + 14,
+                    0xFFAAAAAA);
+        }
+
         super.render(gui, mouseX, mouseY, delta);
     }
 
@@ -127,6 +168,40 @@ public class kingdomMenuScreen extends Screen {
     public boolean isPauseScreen() {
         return false;
     }
+
+    private boolean playerHasBanner() {
+        if (minecraft == null || minecraft.player == null) return false;
+
+        var player = minecraft.player;
+        var inv = player.getInventory();
+
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            ItemStack s = inv.getItem(i);
+            if (!s.isEmpty() && s.getItem() instanceof BannerItem) return true;
+        }
+
+        ItemStack offhand = player.getOffhandItem();
+        return !offhand.isEmpty() && offhand.getItem() instanceof BannerItem;
+    }
+
+    /** Returns a 1-count copy of the first banner found in inventory/offhand, or EMPTY if none. */
+    private ItemStack firstBannerStack() {
+        if (minecraft == null || minecraft.player == null) return ItemStack.EMPTY;
+
+        var player = minecraft.player;
+        var inv = player.getInventory();
+
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            ItemStack s = inv.getItem(i);
+            if (!s.isEmpty() && s.getItem() instanceof BannerItem) return s.copyWithCount(1);
+        }
+
+        ItemStack offhand = player.getOffhandItem();
+        if (!offhand.isEmpty() && offhand.getItem() instanceof BannerItem) return offhand.copyWithCount(1);
+
+        return ItemStack.EMPTY;
+    }
+
 
     /**
      * Simple confirmation modal for disbanding the kingdom.

@@ -267,7 +267,7 @@ public final class AiDiplomacyTicker {
         var rng = server.overworld().getRandom();
         long now = nowTick;
 
-        
+        warState.tickAiWars(server, nowTick);
 
         // Collect AI kingdom ids from kingdom list (no aiState.getAll() needed)
         List<UUID> aiIds = new ArrayList<>();

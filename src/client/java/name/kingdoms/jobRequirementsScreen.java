@@ -30,7 +30,8 @@ public class jobRequirementsScreen extends Screen {
     // Remember the screen-space area of the REQUIRES list (so we only scroll when hovering it)
     private int reqAreaTop = 0;
     private int reqAreaBottom = 0;
-
+    private int reqAreaLeft = 0;
+    private int reqAreaRight = 0;
 
     // local UI state (we can flip instantly after clicking)
     private boolean enabled;
@@ -75,8 +76,41 @@ public class jobRequirementsScreen extends Screen {
 
         int cx = this.width / 2;
         int y = 18;
-        int left = Math.max(20, cx - 140);
+
+        int margin = Math.max(12, this.width / 40);    // ~2.5% of width, min 12px
+        int gap = Math.max(8,  this.width / 90);    // small proportional gap
+
+        int minLeftColW = 260;
+        int minStatusW  = 140;
+
+        // Desired status width
+        int desiredStatusW = net.minecraft.util.Mth.clamp(this.width / 4, 160, 260);
+
+        // Total usable width inside margins
+        int availW = this.width - (margin * 2);
+
+        // Pick a status width that leaves room for left column; if not possible, still draw at minStatusW
+        int maxStatusToFit = availW - gap - minLeftColW;
+        int statusW = desiredStatusW;
+
+        if (maxStatusToFit >= minStatusW) {
+            statusW = Math.min(statusW, maxStatusToFit);
+            statusW = Math.max(statusW, minStatusW);
+        } else {
+            statusW = minStatusW; // still draw it even if tight
+        }
+
+        int left = margin;
+        int rightX = this.width - margin - statusW;
+
+        // Left column bounds
+        int leftColLeft  = left;
+        int leftColRight = rightX - gap;
+        leftColRight = Math.max(leftColRight, leftColLeft + 120); // prevent negative/insane bounds
+        int leftColCenter = (leftColLeft + leftColRight) / 2;
+
         int bottomPad = 44;
+
 
 
         String jobId = payload.jobId();
@@ -93,7 +127,6 @@ public class jobRequirementsScreen extends Screen {
         }
 
         g.drawCenteredString(this.font, header, cx, y, enabled ? 0xFFFFFFFF : 0xFFFF8888);
-        y += 14;
 
         if (job != null) {
             y = drawCycleLine(g, cx, y, job);
@@ -119,15 +152,18 @@ public class jobRequirementsScreen extends Screen {
                 ? Collections.singletonList(new JobNote("Unknown job id (client registry missing).", 0xFFFF7777))
                 : buildJobNotes(job, enabled, inputs, required, have);
 
-        y = drawNotesSection(g, left, y, notes);
-        y += 12;
+        int statusTop = 44;
+        int statusH = Math.max(40, this.height - bottomPad - statusTop);
+        drawStatusPanel(g, rightX, statusTop, statusW, statusH, notes);
+
+
 
         // Now draw the Requirements header
-        g.drawCenteredString(this.font,
-                Component.literal("Requirements (within " + payload.radius() + " blocks)"),
-                cx, y, 0xFFA0A0A0);
-        y += 14;
+       g.drawCenteredString(this.font,
+        Component.literal("Requirements (within " + payload.radius() + " blocks)"),
+        leftColCenter, y, 0xFFA0A0A0);
 
+        int reqY = y + 14;
 
         if (required == null || required.isEmpty()) {
             g.drawCenteredString(this.font, Component.literal("No requirements."), cx, y, 0xFFFFFFFF);
@@ -140,8 +176,12 @@ public class jobRequirementsScreen extends Screen {
 
 
         // Define scrollable region
-        reqAreaTop = y;
+        reqAreaLeft  = leftColLeft;
+        reqAreaRight = leftColRight;
+        reqAreaTop   = reqY;
         reqAreaBottom = this.height - bottomPad;
+
+
 
         // How many lines fit
         int maxLines = Math.max(1, (reqAreaBottom - reqAreaTop) / 12);
@@ -176,9 +216,12 @@ public class jobRequirementsScreen extends Screen {
             int color = ok ? 0xFF55FF55 : 0xFFFF5555;
 
 
-            g.drawString(this.font, name.copy().append(Component.literal(suffix)), left, y, color, false);
-
-            y += 12;
+            Component lineComp = name.copy().append(Component.literal(suffix));
+            int lineW = this.font.width(lineComp);
+            int lineX = leftColCenter - (lineW / 2);
+            lineX = Math.max(leftColLeft, Math.min(lineX, leftColRight - lineW));
+            g.drawString(this.font, lineComp, lineX, reqY, color, false);
+            reqY += 12;
         }
 
         // Optional scroll hint
@@ -260,6 +303,39 @@ public class jobRequirementsScreen extends Screen {
         return y;
     }
 
+    private void drawStatusPanel(GuiGraphics g, int x, int y, int w, int h, List<JobNote> notes) {
+        // Background
+        g.fill(x, y, x + w, y + h, 0x66000000);
+        g.fill(x, y, x + w, y + 1, 0x99FFFFFF); // top border
+
+        int tx = x + 8;
+        int ty = y + 8;
+
+        g.drawString(this.font, Component.literal("Status"), tx, ty, 0xFFFFFFFF, false);
+        ty += 14;
+
+        // How many lines fit inside the panel
+        int maxLines = Math.max(1, (y + h - 8 - ty) / 12);
+
+        int line = 0;
+        for (JobNote n : notes) {
+            if (line >= maxLines) {
+                g.drawString(this.font, Component.literal("..."), tx, ty, 0xFFA0A0A0, false);
+                break;
+            }
+            String s = "• " + n.text;
+            int maxW = (x + w) - tx - 6;
+            if (this.font.width(s) > maxW) {
+                s = this.font.plainSubstrByWidth(s, maxW - this.font.width("...")) + "...";
+            }
+            g.drawString(this.font, Component.literal(s), tx, ty, n.color, false);
+
+            ty += 12;
+            line++;
+        }
+    }
+
+
 
     private static double ecoAmount(String name) {
         // If your eco sync payload uses ints, Java will auto-widen to double.
@@ -267,6 +343,7 @@ public class jobRequirementsScreen extends Screen {
 
         return switch (name) {
             case "Gold"    -> e.gold();
+            case "Food"    -> e.meat() + e.grain() + e.fish();
             case "Meat"    -> e.meat();
             case "Grain"   -> e.grain();
             case "Fish"    -> e.fish();
@@ -398,9 +475,11 @@ public class jobRequirementsScreen extends Screen {
     private static List<Line> buildInputs(jobDefinition j) {
         List<Line> out = new ArrayList<>();
         addIfNonZero(out, "Gold", j.inGold());
-        addIfNonZero(out, "Meat", j.inMeat());
-        addIfNonZero(out, "Grain", j.inGrain());
-        addIfNonZero(out, "Fish", j.inFish());
+        addIfNonZero(out, "Food", j.inFood());
+        // addIfNonZero(out, "Meat", j.inMeat());
+        // addIfNonZero(out, "Grain", j.inGrain());
+        // addIfNonZero(out, "Fish", j.inFish());
+
         addIfNonZero(out, "Wood", j.inWood());
         addIfNonZero(out, "Metal", j.inMetal());
         addIfNonZero(out, "Armor", j.inArmor());
@@ -470,7 +549,7 @@ public class jobRequirementsScreen extends Screen {
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double deltaX, double deltaY) {
         // Only scroll when mouse is over the REQUIRES list region
-        if (mouseY >= reqAreaTop && mouseY <= reqAreaBottom) {
+        if (mouseX >= reqAreaLeft && mouseX <= reqAreaRight && mouseY >= reqAreaTop && mouseY <= reqAreaBottom) {
             // Scroll direction: wheel up -> deltaY > 0
             if (deltaY > 0) reqScroll = Math.max(0, reqScroll - 1);
             else if (deltaY < 0) reqScroll = reqScroll + 1;

@@ -14,7 +14,9 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.*;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.scores.PlayerTeam;
 import net.minecraft.world.scores.Scoreboard;
@@ -35,6 +37,19 @@ public final class WarBattleManager {
     private static final int TARGET_REFRESH_TICKS = 5;
     private static final int FORMATION_REFRESH_TICKS = 10;
     private static final int HUD_SYNC_TICKS = 5; // 4x/sec
+    private static final int ROOT_DEPLOY = 50;
+    private static final int ALLY_DEPLOY = 20;
+
+    // --- teleport assist (anti-stuck) ---
+    private static final int TELEPORT_CHECK_TICKS = 10;      // check 2x/sec
+    private static final int STUCK_TICKS_TO_TELEPORT = 40;   // ~2 seconds if not moving
+    private static final double STUCK_MOVE_EPS = 0.08;       // how little movement counts as "stuck"
+    private static final double TELEPORT_DIST = 24.0;        // only teleport if far from goal
+    private static final int TELEPORT_RADIUS = 3;            // randomize near goal
+    private static final int TELEPORT_MARGIN = 3;            // keep inside zone edge
+
+
+
 
     // --- enemy advance (formation leader walks toward player) ---
     private static final double ENEMY_ADVANCE_STEP = 0.8;        // blocks per FORMATION_REFRESH_TICKS
@@ -74,7 +89,7 @@ public final class WarBattleManager {
     private static final Map<UUID, BattleInstance> ACTIVE = new HashMap<>();
 
     // commander uuid -> (battle, side)
-    private record CommanderCtx(BattleInstance battle, Side side) {}
+    private record CommanderCtx(BattleInstance battle, Side side, UUID commanderKingdomId) {}
     private static final Map<UUID, CommanderCtx> COMMANDER_INDEX = new HashMap<>();
 
     private static CommanderCtx findCommanderCtx(ServerPlayer player) {
@@ -85,6 +100,191 @@ public final class WarBattleManager {
     public static void init() {
         ServerTickEvents.END_SERVER_TICK.register(WarBattleManager::tick);
     }
+
+    private static int deployForKingdom(
+            UUID kingdomId,
+            UUID rootKingdomId,
+            int totalSoldiers
+    ) {
+        if (totalSoldiers <= 0) return 0;
+
+        int desired = kingdomId.equals(rootKingdomId)
+                ? ROOT_DEPLOY
+                : ALLY_DEPLOY;
+
+        return Math.min(desired, totalSoldiers);
+    }
+
+    private static boolean isAiKingdom(MinecraftServer server, UUID kingdomId) {
+        return aiKingdomState.get(server).getById(kingdomId) != null;
+    }
+
+    private static BlockPos spawnNear(ServerLevel level, BlockPos base, int radius) {
+        int x = base.getX() + level.random.nextInt(-radius, radius + 1);
+        int z = base.getZ() + level.random.nextInt(-radius, radius + 1);
+        int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+        return new BlockPos(x, y, z);
+    }
+
+    private static BlockPos clampSpawnNearGoal(BattleInstance battle, Vec3 goal) {
+        int gx = Mth.floor(goal.x);
+        int gz = Mth.floor(goal.z);
+
+        // jitter near goal
+        int x = gx + battle.level.random.nextInt(-TELEPORT_RADIUS, TELEPORT_RADIUS + 1);
+        int z = gz + battle.level.random.nextInt(-TELEPORT_RADIUS, TELEPORT_RADIUS + 1);
+
+        // clamp inside zone
+        x = clampWithMargin(x, battle.zone.minX(), battle.zone.maxX(), TELEPORT_MARGIN);
+        z = clampWithMargin(z, battle.zone.minZ(), battle.zone.maxZ(), TELEPORT_MARGIN);
+
+        int y = battle.level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+        return new BlockPos(x, y, z);
+    }
+
+    private static void teleportIfStuck(BattleInstance battle, UUID entId, Mob mob, Vec3 goal) {
+        if (mob == null || !mob.isAlive()) return;
+
+        // too close => don't teleport
+        double d2 = mob.position().distanceToSqr(goal);
+        if (d2 < TELEPORT_DIST * TELEPORT_DIST) {
+            battle.stuckTicks.put(entId, 0);
+            battle.lastPos.put(entId, mob.position());
+            return;
+        }
+
+        Vec3 prev = battle.lastPos.get(entId);
+        Vec3 now = mob.position();
+
+        boolean moved = (prev == null) || (now.distanceToSqr(prev) >= (STUCK_MOVE_EPS * STUCK_MOVE_EPS));
+
+        int stuck = battle.stuckTicks.getOrDefault(entId, 0);
+        stuck = moved ? 0 : (stuck + TELEPORT_CHECK_TICKS);
+
+        battle.stuckTicks.put(entId, stuck);
+        battle.lastPos.put(entId, now);
+
+        if (stuck < STUCK_TICKS_TO_TELEPORT) return;
+
+        // TELEPORT
+        BlockPos tp = clampSpawnNearGoal(battle, goal);
+
+        mob.getNavigation().stop();
+        mob.setDeltaMovement(Vec3.ZERO);
+        mob.setPos(tp.getX() + 0.5, tp.getY(), tp.getZ() + 0.5);
+        mob.hasImpulse = true;
+
+        battle.stuckTicks.put(entId, 0);
+        battle.lastPos.put(entId, mob.position());
+    }
+
+    private static Vec3 forwardToward(Vec3 from, Vec3 to) {
+        Vec3 d = to.subtract(from);
+        d = new Vec3(d.x, 0, d.z);
+        if (d.lengthSqr() < 1e-4) return new Vec3(1,0,0);
+        return d.normalize();
+    }
+
+    private static Vec3 friendMainFootLeaderPos(BattleInstance battle, ServerPlayer friendCommander) {
+        if (friendCommander == null) return Vec3.atCenterOf(battle.friendRally);
+
+        // Use the primary commander’s current orders (their perCommanderOrders)
+        var orders = battle.perCommanderOrders.get(friendCommander.getUUID());
+        if (orders != null && orders.footMode == BattleInstance.OrderMode.MOVE && orders.footMovePos != null) {
+            return Vec3.atCenterOf(orders.footMovePos);
+        }
+        return friendCommander.position();
+    }
+
+    private static Side sideForKingdom(BattleInstance battle, UUID kingdomId) {
+        if (battle.friendContribKingdoms.contains(kingdomId)) return Side.FRIEND;
+        if (battle.enemyContribKingdoms.contains(kingdomId)) return Side.ENEMY;
+        return null;
+    }
+        
+    private static void ensurePlayerContingentIfPresent(
+            MinecraftServer server,
+            BattleInstance battle,
+            ServerPlayer playerInZone
+    ) {
+        if (playerInZone == null || !playerInZone.isAlive()) return;
+
+        // must be inside battle zone
+        if (!battle.zone.contains(playerInZone.blockPosition())) return;
+
+        UUID kid = kingdomState.get(server).getKingdomIdFor(playerInZone.getUUID());
+        if (kid == null) return;
+
+        Side side = sideForKingdom(battle, kid);
+        if (side == null) return; // not a participant in this battle
+
+        // only rulers can spawn their contingent
+        var k = kingdomState.get(server).getKingdom(kid);
+        if (k == null) return;
+        if (!playerInZone.getUUID().equals(k.owner)) return;
+
+        // already spawned?
+        if (battle.spawnedPlayerContingents.contains(kid)) return;
+
+        // only spawn if this kingdom actually has troops
+        int total = computeTotalSoldiers(server, kid);
+        int deploy = deployForKingdom(kid, battle.friendRootKingdomId, total);
+        if (deploy <= 0) return;
+
+        // mark spawned BEFORE spawning (prevents double spawns if something re-enters fast)
+        battle.spawnedPlayerContingents.add(kid);
+
+        // ensure ticket pool exists for this kingdom
+        battle.ticketsByKingdom.putIfAbsent(kid, Math.max(0, total - deploy));
+
+        // register them as a commander context (so their orders work)
+        COMMANDER_INDEX.put(playerInZone.getUUID(), new CommanderCtx(battle, side, kid));
+        sendHudToCommander(playerInZone, battle, side);
+
+        // spawn facing direction: point toward opposing rally
+        Vec3 faceToward = (side == Side.FRIEND)
+                ? Vec3.atCenterOf(battle.enemyRally)
+                : Vec3.atCenterOf(battle.friendRally);
+
+        Vec3 fwd = forwardToward(playerInZone.position(), faceToward);
+
+        int arch = (int) Math.round(deploy * (side == Side.FRIEND ? FRIEND_ARCHER_RATIO : ENEMY_ARCHER_RATIO));
+        arch = Mth.clamp(arch, 0, deploy);
+        int foot = deploy - arch;
+
+        // spawn around player
+        BlockPos anchor = playerInZone.blockPosition();
+
+        ItemStack friendHeraldry = getHeraldryForKingdom(battle.level, battle.friendRootKingdomId);
+        ItemStack enemyHeraldry  = getHeraldryForKingdom(battle.level, battle.enemyRootKingdomId);
+
+        if (foot > 0) spawnContingentFormation(
+                battle.level,
+                battle,
+                kid,
+                side,
+                UnitRole.FOOTMAN,
+                anchor,
+                fwd,
+                +4.0,
+                foot,
+                (side == Side.FRIEND) ? enemyHeraldry : friendHeraldry
+        );
+
+        if (arch > 0) spawnContingentFormation(
+                battle.level,
+                battle,
+                kid,
+                side,
+                UnitRole.ARCHER,
+                anchor,
+                fwd,
+                -3.0,
+                arch,
+                (side == Side.FRIEND) ? enemyHeraldry : friendHeraldry
+        );
+    }
+
 
     // --------------------
     // Commanding / selection
@@ -105,7 +305,11 @@ public final class WarBattleManager {
         CommanderCtx ctx = findCommanderCtx(player);
         if (ctx == null) return -1;
 
-        var orders = (ctx.side == Side.FRIEND) ? ctx.battle.friendOrders : ctx.battle.enemyOrders;
+        var orders = ctx.battle.perCommanderOrders.computeIfAbsent(
+            player.getUUID(),
+            u -> new BattleInstance.SideOrders()
+        );
+
 
         orders.selected = switch (orders.selected) {
             case FOOTMEN -> CommandGroup.ARCHERS;
@@ -119,9 +323,14 @@ public final class WarBattleManager {
     public static int getCommandGroupOrdinal(ServerPlayer player) {
         CommanderCtx ctx = findCommanderCtx(player);
         if (ctx == null) return -1;
-        var orders = (ctx.side == Side.FRIEND) ? ctx.battle.friendOrders : ctx.battle.enemyOrders;
+
+        var orders = ctx.battle.perCommanderOrders.computeIfAbsent(
+                player.getUUID(),
+                u -> new BattleInstance.SideOrders()
+        );
         return orders.selected.ordinal();
     }
+
 
     // Your existing API used by WarCommandItem (right-click)
     public static boolean issueMoveOrder(ServerPlayer player, BlockPos clicked) {
@@ -150,7 +359,11 @@ public final class WarBattleManager {
         Vec3 lookFwd = new Vec3(lf.x, 0, lf.z);
         if (lookFwd.lengthSqr() > 1e-4) lookFwd = lookFwd.normalize();
 
-        var orders = (side == Side.FRIEND) ? b.friendOrders : b.enemyOrders;
+        var orders = b.perCommanderOrders.computeIfAbsent(
+                player.getUUID(),
+                u -> new BattleInstance.SideOrders()
+        );
+
 
         if (orders.selected == CommandGroup.FOOTMEN || orders.selected == CommandGroup.BOTH) {
             orders.footMovePos = grounded;
@@ -174,7 +387,11 @@ public final class WarBattleManager {
 
         Vec3 f = flatLook(player);
 
-        var orders = (ctx.side == Side.FRIEND) ? ctx.battle.friendOrders : ctx.battle.enemyOrders;
+        var orders = ctx.battle.perCommanderOrders.computeIfAbsent(
+                player.getUUID(),
+                u -> new BattleInstance.SideOrders()
+        );
+
 
         orders.footMode = BattleInstance.OrderMode.FOLLOW;
         orders.footMovePos = null;
@@ -199,6 +416,22 @@ public final class WarBattleManager {
     // --------------------
     private static final class BattleInstance {
 
+        final Map<UUID, SideOrders> perCommanderOrders = new HashMap<>();
+
+        // Kingdoms whose PLAYER contingent has already been spawned in this battle
+        final Set<UUID> spawnedPlayerContingents = new HashSet<>();
+
+        // Throttle "spawn on arrival" checks
+        long nextContingentCheckTick = 0;
+
+        // Used to auto-cleanup battles when nobody is around
+        int emptyZoneTicks = 0;
+
+        // Anti-stuck tracking (entity uuid -> last position / stuck counter)
+        final Map<UUID, Vec3> lastPos = new HashMap<>();
+        final Map<UUID, Integer> stuckTicks = new HashMap<>();
+
+
         private enum OrderMode { FOLLOW, MOVE }
 
         private static final class SideOrders {
@@ -213,10 +446,23 @@ public final class WarBattleManager {
             Vec3 archerStableForward = new Vec3(1, 0, 0);
         }
 
+        // AI kingdomId -> captain entity UUID
+        final Map<UUID, UUID> aiCaptainByKingdom = new HashMap<>();
+
+        // Tickets per contributing kingdom (AI + players if you want later)
+        // For now we’ll mainly use it for AI kingdoms.
+        final Map<UUID, Integer> ticketsByKingdom = new HashMap<>();
+
+
         final UUID battleId = UUID.randomUUID();
 
-        final UUID playerKingdomId;
-        final UUID enemyKingdomId;
+        final UUID friendRootKingdomId; // war-side root (the belligerent whose side we're on)
+        final UUID enemyRootKingdomId;  // opposing belligerent
+        final UUID commanderKingdomId;  // the player's own kingdom (for messaging/permissions/etc.)
+
+        final List<UUID> friendContribKingdoms; // includes root + allied kingdoms
+        final List<UUID> enemyContribKingdoms;  // includes root + allied kingdoms
+
 
         // commanders
         final UUID friendCommanderUuid;          // controls Side.FRIEND
@@ -252,14 +498,24 @@ public final class WarBattleManager {
         // Only used for AI-enemy battles:
         Vec3 enemyAdvancePos = null;
 
-        BattleInstance(UUID playerKingdomId, UUID enemyKingdomId,
-                    UUID friendCommanderUuid,
-                    UUID enemyCommanderUuid,
-                    ServerLevel level, BattleZone zone,
-                    int ticketsFriend, int ticketsEnemy,
-                    BlockPos friendRally, BlockPos enemyRally) {
-            this.playerKingdomId = playerKingdomId;
-            this.enemyKingdomId = enemyKingdomId;
+        BattleInstance(
+                UUID commanderKingdomId,
+                UUID friendRootKingdomId,
+                UUID enemyRootKingdomId,
+                List<UUID> friendContribKingdoms,
+                List<UUID> enemyContribKingdoms,
+                UUID friendCommanderUuid,
+                UUID enemyCommanderUuid,
+                ServerLevel level, BattleZone zone,
+                int ticketsFriend, int ticketsEnemy,
+                BlockPos friendRally, BlockPos enemyRally
+        ) {
+            this.commanderKingdomId = commanderKingdomId;
+            this.friendRootKingdomId = friendRootKingdomId;
+            this.enemyRootKingdomId = enemyRootKingdomId;
+            this.friendContribKingdoms = friendContribKingdoms;
+            this.enemyContribKingdoms = enemyContribKingdoms;
+
             this.friendCommanderUuid = friendCommanderUuid;
             this.enemyCommanderUuid = enemyCommanderUuid;
             this.level = level;
@@ -272,12 +528,14 @@ public final class WarBattleManager {
             this.enemyRally = enemyRally;
         }
 
+
         boolean isPvP() { return enemyCommanderUuid != null; }
     }
 
 
-    private record UnitMeta(Side side, boolean isKing, UnitRole role, int formationIndex) {}
-    private record PendingSpawn(long atTick, Side side, boolean isKing, UnitRole role) {}
+    private record UnitMeta(UUID sourceKingdomId, Side side, boolean isKing, UnitRole role, int formationIndex) {}
+    private record PendingSpawn(long atTick, UUID sourceKingdomId, Side side, boolean isKing, UnitRole role) {}
+
 
     // --------------------
     // Helpers
@@ -374,6 +632,37 @@ public final class WarBattleManager {
         }
         return null;
     }
+
+    private static boolean anyParticipantPlayerInZone(MinecraftServer server, BattleInstance battle) {
+        for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+            UUID kid = kingdomState.get(server).getKingdomIdFor(p.getUUID());
+            if (kid == null) continue;
+            if (sideForKingdom(battle, kid) == null) continue; // not involved
+            if (!battle.zone.contains(p.blockPosition())) continue;
+            return true;
+        }
+        return false;
+    }
+
+    private static void cleanupBattle(MinecraftServer server, BattleInstance battle, String msg) {
+        // clear HUD for any commander in this battle
+        for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+            CommanderCtx ctx = COMMANDER_INDEX.get(p.getUUID());
+            if (ctx != null && ctx.battle == battle) clearHud(p);
+        }
+
+        // remove commander mappings for this battle
+        COMMANDER_INDEX.entrySet().removeIf(e -> e.getValue().battle == battle);
+
+        // discard battle entities
+        for (UUID id : new ArrayList<>(battle.units.keySet())) {
+            Entity e = battle.level.getEntity(id);
+            if (e != null) e.discard();
+        }
+        battle.units.clear();
+    }
+
+
 
     private static String tryReadString(Object obj, String... names) {
         if (obj == null) return null;
@@ -525,10 +814,11 @@ public final class WarBattleManager {
         return max - 1;
     }
 
-    private static void trackUnit(BattleInstance b, SoldierEntity soldier, Side side, boolean isKing, UnitRole role) {
+    private static void trackUnit(BattleInstance b, SoldierEntity soldier, UUID sourceKingdomId, Side side, boolean isKing, UnitRole role) {
         int idx = isKing ? -1 : allocateFormationSlot(b, side, role);
-        b.units.put(soldier.getUUID(), new UnitMeta(side, isKing, role, idx));
+        b.units.put(soldier.getUUID(), new UnitMeta(sourceKingdomId, side, isKing, role, idx));
     }
+
 
     private static BlockPos clampToZone(BattleZone zone, int x, int z, int margin, int y) {
         int cx = clampWithMargin(x, zone.minX(), zone.maxX(), margin);
@@ -617,7 +907,8 @@ public final class WarBattleManager {
             double behindDist,
             int cols,
             int rows,
-            double spacing
+            double spacing,
+            UUID onlySourceKingdom
     ) {
         Vec3 f = new Vec3(leaderForward.x, 0, leaderForward.z);
         if (f.lengthSqr() < 1e-4) f = new Vec3(1, 0, 0);
@@ -632,6 +923,7 @@ public final class WarBattleManager {
         for (var e : battle.units.entrySet()) {
             UnitMeta meta = e.getValue();
             if (meta.side() != side || meta.isKing() || meta.role() != role) continue;
+            if (onlySourceKingdom != null && !onlySourceKingdom.equals(meta.sourceKingdomId())) continue;
 
             int slotIndex = meta.formationIndex();
             if (slotIndex < 0) continue;
@@ -716,20 +1008,40 @@ public final class WarBattleManager {
                     ? server.getPlayerList().getPlayer(battle.enemyCommanderUuid)
                     : null;
 
-            if (friendCommander == null || !friendCommander.isAlive()) {
-                if (friendCommander != null) clearHud(friendCommander);
-                if (enemyCommander != null) clearHud(enemyCommander);
-                finishBattle(server, battle, Side.ENEMY, "Battle ended: friendly commander died/disconnected.");
+            boolean anyoneInZone = anyParticipantPlayerInZone(server, battle);
+            if (!anyoneInZone) {
+                battle.emptyZoneTicks++;
+            } else {
+                battle.emptyZoneTicks = 0;
+            }
+
+            // If nobody involved has been in the zone for 10 seconds, cleanup
+            if (battle.emptyZoneTicks > 20 * 10) {
+                cleanupBattle(server, battle, "Battle cleaned up (no players in zone).");
                 it.remove();
                 continue;
             }
 
+            /*
             // PvP: if enemy commander dies/disconnects, friend wins immediately
             if (battle.enemyCommanderUuid != null && (enemyCommander == null || !enemyCommander.isAlive())) {
                 if (enemyCommander != null) clearHud(enemyCommander);
                 finishBattle(server, battle, Side.FRIEND, "Battle ended: enemy commander died/disconnected.");
                 it.remove();
                 continue;
+            }  */
+
+            // Throttle contingent checks: 2x per second
+            if (battle.tick >= battle.nextContingentCheckTick) {
+                battle.nextContingentCheckTick = battle.tick + 10;
+
+                // Only check players actually inside the zone AABB (fast rejection)
+                AABB box = battle.zone.toTallAabb();
+
+                for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+                    if (!p.getBoundingBox().intersects(box)) continue;
+                    ensurePlayerContingentIfPresent(server, battle, p);
+                }
             }
 
 
@@ -796,26 +1108,50 @@ public final class WarBattleManager {
             UUID playerKingdomId = findPlayersKingdomId(server, player);
             if (playerKingdomId == null) continue;
 
+            /* TESTING TESTING TESTING REMOVAL CODE 
             var ks = kingdomState.get(server);
             var pk = ks.getKingdom(playerKingdomId);
             if (pk != null && pk.owner != null && !pk.owner.equals(player.getUUID())) {
                 continue; // only ruler can trigger the battle start
-            }
+            } */
+
+            var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
 
             for (String key : ws.wars()) {
-                UUID enemyId = otherFromWarKey(key, playerKingdomId);
-                if (enemyId == null) continue;
+                int bar = key.indexOf('|');
+                if (bar < 0) continue;
 
-                var zoneOpt = ws.getZone(playerKingdomId, enemyId);
+                UUID a, b;
+                try {
+                    a = UUID.fromString(key.substring(0, bar));
+                    b = UUID.fromString(key.substring(bar + 1));
+                } catch (Exception ignored) {
+                    continue;
+                }
+
+                // Can this player's kingdom participate on either side?
+                boolean onA = playerKingdomId.equals(a) || alliance.isAllied(playerKingdomId, a);
+                boolean onB = playerKingdomId.equals(b) || alliance.isAllied(playerKingdomId, b);
+
+                if (!onA && !onB) continue;
+
+                // If allied to both, skip (ambiguous / weird)
+                if (onA && onB) continue;
+
+                UUID friendRoot = onA ? a : b;
+                UUID enemyRoot  = onA ? b : a;
+
+                var zoneOpt = ws.getZone(friendRoot, enemyRoot);
                 if (zoneOpt.isEmpty()) continue;
 
                 BattleZone zone = zoneOpt.get();
                 if (!zone.contains(player.blockPosition())) continue;
 
-                if (isBattleActiveForPair(playerKingdomId, enemyId)) continue;
+                if (isBattleActiveForPair(friendRoot, enemyRoot)) continue;
 
-                startBattle(server, player, playerKingdomId, enemyId, zone);
+                startBattle(server, player, playerKingdomId, friendRoot, enemyRoot, zone);
             }
+
         }
     }
 
@@ -837,31 +1173,59 @@ public final class WarBattleManager {
         return null;
     }
 
-    private static boolean isBattleActiveForPair(UUID a, UUID b) {
+    private static boolean isBattleActiveForPair(UUID friendRoot, UUID enemyRoot) {
         for (var bi : ACTIVE.values()) {
-            if ((bi.playerKingdomId.equals(a) && bi.enemyKingdomId.equals(b)) ||
-                (bi.playerKingdomId.equals(b) && bi.enemyKingdomId.equals(a))) return true;
+            if ((bi.friendRootKingdomId.equals(friendRoot) && bi.enemyRootKingdomId.equals(enemyRoot)) ||
+                (bi.friendRootKingdomId.equals(enemyRoot) && bi.enemyRootKingdomId.equals(friendRoot))) {
+                return true;
+            }
         }
         return false;
     }
 
-    private static void startBattle(MinecraftServer server, ServerPlayer player, UUID playerKingdomId, UUID enemyKingdomId, BattleZone zone) {
+    private static UUID onlineRulerUuid(MinecraftServer server, UUID kingdomId) {
+            var ks = kingdomState.get(server);
+            var k = ks.getKingdom(kingdomId);
+            if (k == null) return null;
+            ServerPlayer p = server.getPlayerList().getPlayer(k.owner);
+            return (p == null) ? null : k.owner;
+    }
+
+
+    private static void startBattle(MinecraftServer server, ServerPlayer player,
+                                UUID commanderKingdomId,
+                                UUID friendRootKingdomId,
+                                UUID enemyRootKingdomId,
+                                BattleZone zone) {
         ServerLevel level = server.overworld();
+
+        List<UUID> friendContrib = collectAllianceSide(server, friendRootKingdomId, enemyRootKingdomId);
+        List<UUID> enemyContrib  = collectAllianceSide(server, enemyRootKingdomId, friendRootKingdomId);
+
 
         var ks = kingdomState.get(server);
         var aiState = aiKingdomState.get(server);
+        ItemStack friendHeraldry = getHeraldryForKingdom(level, friendRootKingdomId);
+        ItemStack enemyHeraldry  = getHeraldryForKingdom(level, enemyRootKingdomId);
 
-        boolean enemyIsAi = (aiState.getById(enemyKingdomId) != null);
+
+        boolean enemyIsAi = (aiState.getById(enemyRootKingdomId) != null);
 
         // Friend commander = owner of the friend kingdom if present, else whoever triggered
         UUID friendCommander = player.getUUID();
-        var fk = ks.getKingdom(playerKingdomId);
-        if (fk != null && fk.owner != null) friendCommander = fk.owner;
+        var fk = ks.getKingdom(commanderKingdomId);
+        UUID owner = null;
+        try { owner = (UUID) fk.getClass().getField("owner").get(fk); } catch (Exception ignored) {}
+        if (owner == null) {
+            try { owner = (UUID) fk.getClass().getMethod("getOwner").invoke(fk); } catch (Exception ignored) {}
+        }
+        if (owner != null) friendCommander = owner;
+
 
         // Enemy commander if PvP (null = AI)
         UUID enemyCommander = null;
         if (!enemyIsAi) {
-            var ek = ks.getKingdom(enemyKingdomId);
+            var ek = ks.getKingdom(enemyRootKingdomId);
             if (ek != null && ek.owner != null) {
                 // require online for PvP battle creation (recommended)
                 ServerPlayer onlineEnemy = server.getPlayerList().getPlayer(ek.owner);
@@ -876,9 +1240,14 @@ public final class WarBattleManager {
             }
         }
 
+       
 
-        int friendTotal = computeTotalSoldiers(server, playerKingdomId);
-        int enemyTotal  = computeTotalSoldiers(server, enemyKingdomId);
+        int friendTotal = 0;
+        for (UUID id : friendContrib) friendTotal += computeTotalSoldiers(server, id);
+
+        int enemyTotal = 0;
+        for (UUID id : enemyContrib) enemyTotal += computeTotalSoldiers(server, id);
+
 
 
         int friendDeploy = Math.min(SOLDIERS_PER_SIDE, Math.max(0, friendTotal));
@@ -923,22 +1292,57 @@ public final class WarBattleManager {
         Vec3 friendForward = new Vec3(-enemyForward.x, 0, -enemyForward.z);
 
         var battle = new BattleInstance(
-                playerKingdomId, enemyKingdomId,
+                commanderKingdomId,
+                friendRootKingdomId,
+                enemyRootKingdomId,
+                friendContrib,
+                enemyContrib,
                 friendCommander,
-                enemyCommander, // null if AI
+                enemyCommander,
                 level, zone,
                 friendTickets, enemyTickets,
                 friendRally, enemyRally
         );
 
+       for (UUID kid : friendContrib) {
+            int total = computeTotalSoldiers(server, kid);
+            int deploy = deployForKingdom(kid, battle.friendRootKingdomId, total);
+            int tickets = Math.max(0, total - deploy);
+            battle.ticketsByKingdom.put(kid, tickets);
+        }
+
+        for (UUID kid : enemyContrib) {
+            int total = computeTotalSoldiers(server, kid);
+            int deploy = deployForKingdom(kid, battle.enemyRootKingdomId, total);
+            int tickets = Math.max(0, total - deploy);
+            battle.ticketsByKingdom.put(kid, tickets);
+        }
+
+
 
         battle.enemyAdvancePos = Vec3.atCenterOf(enemyRally);
         ACTIVE.put(battle.battleId, battle);
 
-        COMMANDER_INDEX.put(battle.friendCommanderUuid, new CommanderCtx(battle, Side.FRIEND));
-        if (battle.enemyCommanderUuid != null) {
-            COMMANDER_INDEX.put(battle.enemyCommanderUuid, new CommanderCtx(battle, Side.ENEMY));
+        // Root friend commander is still the “primary” commander for default UI/HUD
+        COMMANDER_INDEX.put(battle.friendCommanderUuid, new CommanderCtx(battle, Side.FRIEND, battle.commanderKingdomId));
+
+        // Also register allied player rulers as commanders (they command their own kingdom’s troops)
+        for (UUID kid : battle.friendContribKingdoms) {
+            UUID ruler = onlineRulerUuid(server, kid);
+            if (ruler != null) {
+                COMMANDER_INDEX.put(ruler, new CommanderCtx(battle, Side.FRIEND, kid));
+            }
         }
+
+        if (battle.enemyCommanderUuid != null) {
+            for (UUID kid : battle.enemyContribKingdoms) {
+                UUID ruler = onlineRulerUuid(server, kid);
+                if (ruler != null) {
+                    COMMANDER_INDEX.put(ruler, new CommanderCtx(battle, Side.ENEMY, kid));
+                }
+            }
+        }
+
 
         battle.friendOrders.footStableForward = friendForward;
         battle.friendOrders.archerStableForward = friendForward;
@@ -957,10 +1361,12 @@ public final class WarBattleManager {
         // --------------------
         // Captains / Kings
         // --------------------
-        RulerInfo friendRuler = resolveRulerInfo(server, playerKingdomId, Side.FRIEND, player);
-        RulerInfo enemyRuler  = resolveRulerInfo(server, enemyKingdomId, Side.ENEMY,  player);
+        RulerInfo friendRuler = resolveRulerInfo(server, friendRootKingdomId, Side.FRIEND, player);
+        RulerInfo enemyRuler  = resolveRulerInfo(server, enemyRootKingdomId, Side.ENEMY,  player);
 
-        boolean friendCommanderIsPlayer = (server.getPlayerList().getPlayer(friendCommander) != null);
+
+        //TEST REMOVE FOR REFACTOR
+        /*boolean friendCommanderIsPlayer = (server.getPlayerList().getPlayer(friendCommander) != null);
 
         if (!friendCommanderIsPlayer) {
             var friendCaptain = spawnSoldier(
@@ -968,12 +1374,14 @@ public final class WarBattleManager {
                     friendRally,
                     Side.FRIEND,
                     UnitRole.FOOTMAN,
-                    false,            // bannerman
-                    true,             // captain/king
+                    false,
+                    true,
                     friendRuler.skinId(),
-                    Component.literal(friendRuler.name())
+                    Component.literal(friendRuler.name()),
+                    friendHeraldry,
+                    enemyHeraldry
             );
-            if (friendCaptain != null) trackUnit(battle, friendCaptain, Side.FRIEND, true, UnitRole.FOOTMAN);
+            if (friendCaptain != null) trackUnit(battle, friendCaptain, friendRootKingdomId, Side.FRIEND, true, UnitRole.FOOTMAN);
         }
 
         // ENEMY king entity: always spawn (AI king, or PvP enemy "king" soldier if you want a visible king avatar)
@@ -982,24 +1390,127 @@ public final class WarBattleManager {
                 enemyRally,
                 Side.ENEMY,
                 UnitRole.FOOTMAN,
-                true,            // bannerman
-                true,             // captain/king
+                true,
+                true,
                 enemyRuler.skinId(),
-                Component.literal(enemyRuler.name())
-        );
+                Component.literal(enemyRuler.name()),
+                friendHeraldry,
+                enemyHeraldry
+        );*/
 
+        /* 
         if (enemyCaptain != null) {
             battle.enemyKingEntity = enemyCaptain.getUUID();
-            trackUnit(battle, enemyCaptain, Side.ENEMY, true, UnitRole.FOOTMAN);
+            trackUnit(battle, enemyCaptain, enemyRootKingdomId, Side.ENEMY, true, UnitRole.FOOTMAN);
+        }
+
+        */
+
+        // Spawn AI ally captains + their troops (FRIEND side)
+        for (UUID kid : battle.friendContribKingdoms) {
+            if (!isAiKingdom(server, kid)) continue;
+
+            int total = computeTotalSoldiers(server, kid);
+            int deploy = deployForKingdom(kid, battle.friendRootKingdomId, total);
+            if (deploy <= 0) continue;
+
+            // AI captain spawns near friend rally
+            BlockPos capPos = spawnNear(level, friendRally, 6);
+
+            String nm = "Ally Captain";
+            var ks0 = kingdomState.get(server);
+            var kk = ks0.getKingdom(kid);
+            if (kk != null && kk.name != null && !kk.name.isBlank()) nm = kk.name + " Captain";
+            else {
+                var ai = aiKingdomState.get(server).getById(kid);
+                if (ai != null) nm = tryReadString(ai, "name") + " Captain";
+            }
+
+            ItemStack capHeraldry = getHeraldryForKingdom(level, kid);
+
+            SoldierEntity captain = spawnSoldier(
+                    level,
+                    capPos,
+                    Side.FRIEND,
+                    UnitRole.FOOTMAN,
+                    true,   // bannerman for visibility
+                    true,   // captain
+                    0,
+                    Component.literal(nm),
+                    capHeraldry,
+                    enemyHeraldry
+            );
+
+            if (captain == null) continue;
+
+            battle.aiCaptainByKingdom.put(kid, captain.getUUID());
+            trackUnit(battle, captain, kid, Side.FRIEND, true, UnitRole.FOOTMAN);
+
+            // Spawn this AI kingdom’s troops around its captain
+            Vec3 capForward = forwardToward(captain.position(), Vec3.atCenterOf(enemyRally));
+            int arch = (int)Math.round(deploy * FRIEND_ARCHER_RATIO);
+            arch = Mth.clamp(arch, 0, deploy);
+            int foot = deploy - arch;
+
+            if (foot > 0) spawnContingentFormation(level, battle, kid, Side.FRIEND, UnitRole.FOOTMAN, captain.blockPosition(), capForward, +4.0, foot, enemyHeraldry);
+            if (arch > 0) spawnContingentFormation(level, battle, kid, Side.FRIEND, UnitRole.ARCHER,  captain.blockPosition(), capForward, -3.0, arch, enemyHeraldry);
+        }
+
+        for (UUID kid : battle.enemyContribKingdoms) {
+            if (!isAiKingdom(server, kid)) continue;
+
+            int total = computeTotalSoldiers(server, kid);
+            int deploy = deployForKingdom(kid, battle.friendRootKingdomId, total);
+            if (deploy <= 0) continue;
+
+            BlockPos capPos = spawnNear(level, enemyRally, 6);
+
+            String nm = "Enemy Captain";
+            var ks0 = kingdomState.get(server);
+            var kk = ks0.getKingdom(kid);
+            if (kk != null && kk.name != null && !kk.name.isBlank()) nm = kk.name + " Captain";
+            else {
+                var ai = aiKingdomState.get(server).getById(kid);
+                if (ai != null) nm = tryReadString(ai, "name") + " Captain";
+            }
+
+            ItemStack capHeraldry = getHeraldryForKingdom(level, kid);
+
+            SoldierEntity captain = spawnSoldier(
+                    level,
+                    capPos,
+                    Side.ENEMY,
+                    UnitRole.FOOTMAN,
+                    true,
+                    true,
+                    0,
+                    Component.literal(nm),
+                    friendHeraldry,
+                    capHeraldry
+            );
+
+            if (captain == null) continue;
+
+            battle.aiCaptainByKingdom.put(kid, captain.getUUID());
+            trackUnit(battle, captain, kid, Side.ENEMY, true, UnitRole.FOOTMAN);
+
+            Vec3 capForward = forwardToward(captain.position(), Vec3.atCenterOf(friendRally));
+            int arch = (int)Math.round(deploy * ENEMY_ARCHER_RATIO);
+            arch = Mth.clamp(arch, 0, deploy);
+            int foot = deploy - arch;
+
+            if (foot > 0) spawnContingentFormation(level, battle, kid, Side.ENEMY, UnitRole.FOOTMAN, captain.blockPosition(), capForward, +4.0, foot, friendHeraldry);
+            if (arch > 0) spawnContingentFormation(level, battle, kid, Side.ENEMY, UnitRole.ARCHER,  captain.blockPosition(), capForward, -3.0, arch, friendHeraldry);
         }
 
 
         // Spawn formations (1/10 are bannermen; banner color derived from side in SoldierEntity)
-        if (enemyFoot > 0) spawnFormation(level, battle, Side.ENEMY, UnitRole.FOOTMAN, enemyRally, enemyForward, +4.0, enemyFoot);
-        if (enemyArch > 0) spawnFormation(level, battle, Side.ENEMY, UnitRole.ARCHER,  enemyRally, enemyForward, -3.0, enemyArch);
+        //if (enemyFoot > 0) spawnFormation(level, battle, Side.ENEMY, UnitRole.FOOTMAN, enemyRally, enemyForward, +4.0, enemyFoot, friendHeraldry, enemyHeraldry);
+        //if (enemyArch > 0) spawnFormation(level, battle, Side.ENEMY, UnitRole.ARCHER,  enemyRally, enemyForward, -3.0, enemyArch, friendHeraldry, enemyHeraldry);
 
-        if (friendFoot > 0) spawnFormation(level, battle, Side.FRIEND, UnitRole.FOOTMAN, friendRally, friendForward, +4.0, friendFoot);
-        if (friendArch > 0) spawnFormation(level, battle, Side.FRIEND, UnitRole.ARCHER,  friendRally, friendForward, -3.0, friendArch);
+        //if (friendFoot > 0) spawnFormation(level, battle, Side.FRIEND, UnitRole.FOOTMAN, friendRally, friendForward, +4.0, friendFoot, friendHeraldry, enemyHeraldry);
+        //if (friendArch > 0) spawnFormation(level, battle, Side.FRIEND, UnitRole.ARCHER,  friendRally, friendForward, -3.0, friendArch, friendHeraldry, enemyHeraldry);
+
 
         player.displayClientMessage(Component.literal(
                 "Battle started! Friend total=" + friendTotal + " (deploy " + friendDeploy + ", tickets " + friendTickets + ")"
@@ -1030,11 +1541,11 @@ public final class WarBattleManager {
             if (ent instanceof LivingEntity le && le.isAlive()) continue;
 
             it.remove();
-            onUnitDeath(battle, meta.side(), meta.isKing(), meta.role());
+            onUnitDeath(battle, meta.sourceKingdomId(), meta.side(), meta.isKing(), meta.role());
         }
     }
 
-    private static void onUnitDeath(BattleInstance battle, Side side, boolean isKing, UnitRole role) {
+    private static void onUnitDeath(BattleInstance battle, UUID sourceKingdomId, Side side, boolean isKing, UnitRole role) {
         float extraRateHit;
         if (side == Side.FRIEND) {
             battle.friendDeathTicks.addLast(battle.tick);
@@ -1050,11 +1561,11 @@ public final class WarBattleManager {
 
         if (isKing) return;
 
-        if (battle.enemyCommanderUuid == null && side == Side.ENEMY) {
+        if (side == Side.ENEMY) {
             var server = battle.level.getServer();
-            if (server != null) {
+            if (server != null && sourceKingdomId != null) {
                 var aiState = aiKingdomState.get(server);
-                var ai = aiState.getById(battle.enemyKingdomId);
+                var ai = aiState.getById(sourceKingdomId);
                 if (ai != null) {
                     ai.aliveSoldiers = Math.max(0, ai.aliveSoldiers - 1);
                     aiState.setDirty();
@@ -1062,17 +1573,24 @@ public final class WarBattleManager {
             }
         }
 
-        if (side == Side.FRIEND) {
-            if (battle.ticketsFriend > 0) {
-                battle.ticketsFriend--;
-                battle.pending.addLast(new PendingSpawn(battle.tick + RESPAWN_DELAY_TICKS, side, false, role));
-            }
-        } else {
-            if (battle.ticketsEnemy > 0) {
-                battle.ticketsEnemy--;
-                battle.pending.addLast(new PendingSpawn(battle.tick + RESPAWN_DELAY_TICKS, side, false, role));
-            }
+        Integer t = battle.ticketsByKingdom.get(sourceKingdomId);
+        if (t != null && t > 0) {
+            battle.ticketsByKingdom.put(sourceKingdomId, t - 1);
+
+            // keep side totals in sync (used by HUD + end condition)
+            if (side == Side.FRIEND) battle.ticketsFriend = Math.max(0, battle.ticketsFriend - 1);
+            else battle.ticketsEnemy = Math.max(0, battle.ticketsEnemy - 1);
+
+            battle.pending.addLast(new PendingSpawn(
+                    battle.tick + RESPAWN_DELAY_TICKS,
+                    sourceKingdomId,
+                    side,
+                    false,
+                    role
+            ));
         }
+
+
     }
 
     private static void sendHud(ServerPlayer player, boolean active, BattleInstance b) {
@@ -1106,6 +1624,12 @@ public final class WarBattleManager {
     // Respawning
     // --------------------
     private static void processRespawns(BattleInstance battle) {
+
+        ItemStack friendHeraldry = getHeraldryForKingdom(battle.level, battle.friendRootKingdomId);
+        ItemStack enemyHeraldry  = getHeraldryForKingdom(battle.level, battle.enemyRootKingdomId);
+
+
+
         while (!battle.pending.isEmpty() && battle.pending.peekFirst().atTick() <= battle.tick) {
             var ps = battle.pending.removeFirst();
             if (ps.isKing()) continue;
@@ -1114,20 +1638,43 @@ public final class WarBattleManager {
 
             boolean bannerman = (battle.level.random.nextInt(10) == 0);
 
-            var mob = spawnSoldier(
+            UUID sourceKingdom = ps.sourceKingdomId();
+
+            if (sourceKingdom == null) sourceKingdom =
+                    (ps.side() == Side.FRIEND) ? battle.friendRootKingdomId : battle.enemyRootKingdomId;
+
+            ItemStack srcHeraldry = getHeraldryForKingdom(battle.level, sourceKingdom);
+
+            BlockPos spawnBase = rally;
+
+            UUID capId = battle.aiCaptainByKingdom.get(sourceKingdom);
+            if (capId != null) {
+                Entity cap = battle.level.getEntity(capId);
+                if (cap != null) spawnBase = cap.blockPosition();
+            }
+
+            BlockPos spawnPos = spawnNear(battle.level, spawnBase, 4);
+
+
+           var mob = spawnSoldier(
                     battle.level,
-                    rally,
+                    spawnPos,
                     ps.side(),
                     ps.role(),
                     bannerman,
-                    false,      // captain
-                    0,          // skinId for normal troops
-                    Component.literal(ps.side() == Side.ENEMY ? "Enemy Soldier" : "Friendly Soldier")
+                    false,
+                    0,
+                    Component.literal(ps.side() == Side.ENEMY ? "Enemy Soldier" : "Friendly Soldier"),
+                    // give unit heraldry on its own side
+                    (ps.side() == Side.FRIEND) ? srcHeraldry : friendHeraldry,
+                    (ps.side() == Side.ENEMY)  ? srcHeraldry : enemyHeraldry
             );
 
             if (mob != null) {
-                trackUnit(battle, mob, ps.side(), false, ps.role());
+                trackUnit(battle, mob, sourceKingdom, ps.side(), false, ps.role());
             }
+
+
         }
     }
 
@@ -1141,64 +1688,157 @@ public final class WarBattleManager {
                 ? server.getPlayerList().getPlayer(battle.enemyCommanderUuid)
                 : null;
 
-        // FRIEND side always exists
-        applySideFormation(battle, Side.FRIEND, friendCommander, battle.friendOrders);
+        // ---- compute shared anchors once ----
+        Vec3 mainFriendLeader = centerOfSideRole(
+                battle, Side.FRIEND, UnitRole.FOOTMAN,
+                (friendCommander != null ? friendCommander.position() : Vec3.atCenterOf(battle.friendRally))
+        );
 
-        // ENEMY side: PvP uses enemy commander orders; AI keeps your existing advance anchor logic
-        if (battle.enemyCommanderUuid != null) {
-            applySideFormation(battle, Side.ENEMY, enemyCommander, battle.enemyOrders);
-        } else {
-            // AI ENEMY behavior:
-            if (friendCommander != null) {
+        Vec3 enemyFocus = (battle.enemyAdvancePos != null) ? battle.enemyAdvancePos : Vec3.atCenterOf(battle.enemyRally);
 
-                // 1) Figure out where the FRIEND footmen actually are (fallback: commander position)
-                Vec3 friendFootCenter = centerOfSideRole(
-                        battle,
-                        Side.FRIEND,
-                        UnitRole.FOOTMAN,
-                        friendCommander.position()
-                );
+        // Apply formation for EVERY spawned player contingent (both sides)
+        for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+            CommanderCtx ctx = COMMANDER_INDEX.get(p.getUUID());
+            if (ctx == null) continue;
+            if (ctx.battle != battle) continue;
 
-                // 2) Move enemy footmen leader toward that point (not toward the player directly)
-                if (battle.enemyAdvancePos == null) {
-                    battle.enemyAdvancePos = Vec3.atCenterOf(battle.enemyRally);
+            // Only if this kingdom’s contingent has actually spawned
+            if (!battle.spawnedPlayerContingents.contains(ctx.commanderKingdomId)) continue;
+
+            BattleInstance.SideOrders orders =
+                    battle.perCommanderOrders.computeIfAbsent(p.getUUID(), u -> new BattleInstance.SideOrders());
+
+            applySideFormation(battle, ctx.side, p, ctx.commanderKingdomId, orders);
+        }
+
+        /*
+        // ---- 1) FRIEND player commander formation (their kingdom only) ----
+        UUID fKid = null;
+        if (friendCommander != null) {
+            CommanderCtx fctx = COMMANDER_INDEX.get(friendCommander.getUUID());
+            if (fctx != null) fKid = fctx.commanderKingdomId;
+        }
+
+        BattleInstance.SideOrders fOrders =
+                (friendCommander != null)
+                        ? battle.perCommanderOrders.computeIfAbsent(friendCommander.getUUID(), u -> new BattleInstance.SideOrders())
+                        : battle.friendOrders;
+
+        applySideFormation(battle, Side.FRIEND, friendCommander, fKid, fOrders);
+        */
+
+        // ---- 2) FRIEND AI captains move + maintain their own contingent formation ----
+        for (UUID kid : battle.friendContribKingdoms) {
+            UUID capId = battle.aiCaptainByKingdom.get(kid);
+            if (capId == null) continue;
+
+            Entity ent = battle.level.getEntity(capId);
+            if (!(ent instanceof Mob cap) || !cap.isAlive()) continue;
+
+            cap.getNavigation().moveTo(mainFriendLeader.x, mainFriendLeader.y, mainFriendLeader.z, 1.25);
+            teleportIfStuck(battle, cap.getUUID(), cap, mainFriendLeader);
+
+
+            Vec3 capPos = cap.position();
+            Vec3 fwd = forwardToward(capPos, enemyFocus);
+
+            applyRectFormation(battle, Side.FRIEND, UnitRole.FOOTMAN,
+                    capPos, fwd, 3.0, FOOT_COLS, FOOT_ROWS, 1.1, kid);
+
+            applyRectFormation(battle, Side.FRIEND, UnitRole.ARCHER,
+                    capPos, fwd, 8.0, ARCH_COLS, ARCH_ROWS, 1.2, kid);
+        }
+        
+        // ---- 3) ENEMY AI advance anchor (always) ----
+        // We do NOT do special PvP enemy formation here anymore, because player formations
+        // are handled by the "Apply formation for EVERY spawned player contingent" loop above.
+        if (friendCommander != null) {
+
+            Vec3 friendFootCenter = centerOfSideRole(
+                    battle, Side.FRIEND, UnitRole.FOOTMAN, friendCommander.position()
+            );
+
+            if (battle.enemyAdvancePos == null) battle.enemyAdvancePos = Vec3.atCenterOf(battle.enemyRally);
+
+            battle.enemyAdvancePos = stepTowardInZone(
+                    battle,
+                    battle.enemyAdvancePos,
+                    friendFootCenter,
+                    ENEMY_ADVANCE_STEP,
+                    ENEMY_ADVANCE_MARGIN
+            );
+
+            Vec3 enemyFootLeaderPos = battle.enemyAdvancePos;
+
+            Vec3 eFwd = friendFootCenter.subtract(enemyFootLeaderPos);
+            eFwd = new Vec3(eFwd.x, 0, eFwd.z);
+            if (eFwd.lengthSqr() < 1e-4) eFwd = new Vec3(1, 0, 0);
+            eFwd = eFwd.normalize();
+
+            applyRectFormation(battle, Side.ENEMY, UnitRole.FOOTMAN,
+                    enemyFootLeaderPos, eFwd, 3.0, FOOT_COLS, FOOT_ROWS, 1.1, null);
+
+            applyRectFormation(battle, Side.ENEMY, UnitRole.ARCHER,
+                    enemyFootLeaderPos, eFwd, 10.0, ARCH_COLS, ARCH_ROWS, 1.2, null);
+        }
+
+
+        // ---- 4) ENEMY AI captains move + maintain their own contingent formation ----
+        Vec3 friendFocus = mainFriendLeader;
+        Vec3 enemyTarget = mainFriendLeader;
+
+        for (UUID kid : battle.enemyContribKingdoms) {
+            UUID capId = battle.aiCaptainByKingdom.get(kid);
+            if (capId == null) continue;
+
+            Entity ent = battle.level.getEntity(capId);
+            if (!(ent instanceof Mob cap) || !cap.isAlive()) continue;
+
+            cap.getNavigation().moveTo(enemyTarget.x, enemyTarget.y, enemyTarget.z, 1.25);
+            teleportIfStuck(battle, cap.getUUID(), cap, enemyTarget);
+
+            Vec3 capPos = cap.position();
+            Vec3 fwd = forwardToward(capPos, friendFocus);
+
+            applyRectFormation(battle, Side.ENEMY, UnitRole.FOOTMAN,
+                    capPos, fwd, 3.0, FOOT_COLS, FOOT_ROWS, 1.1, kid);
+
+            applyRectFormation(battle, Side.ENEMY, UnitRole.ARCHER,
+                    capPos, fwd, 8.0, ARCH_COLS, ARCH_ROWS, 1.2, kid);
+        }
+
+        // Optional extra safety: if any soldier is extremely far from its formation slot and not moving, teleport it.
+        // (Your SoldierEntity already does this, so you can skip this if it causes jitter.)
+        if (battle.tick % TELEPORT_CHECK_TICKS == 0) {
+            for (var e : battle.units.entrySet()) {
+                UUID id = e.getKey();
+                UnitMeta meta = e.getValue();
+                if (meta.isKing()) continue; // captains already handled above
+
+                Entity ent = battle.level.getEntity(id);
+                if (!(ent instanceof Mob mob) || !mob.isAlive()) continue;
+
+                // Only apply to AI-controlled units (optional):
+                // if you want ALL units, remove this if-block.
+                boolean isAI = isAiKingdom(server, meta.sourceKingdomId());
+                if (!isAI) continue;
+
+                // Use current formation target if this is SoldierEntity, otherwise skip.
+                if (ent instanceof SoldierEntity se) {
+                    // If you don't have a getter, skip this section — captains are the main win.
+                    // (Most setups don't expose formation target publicly.)
                 }
-
-                battle.enemyAdvancePos = stepTowardInZone(
-                        battle,
-                        battle.enemyAdvancePos,
-                        friendFootCenter,
-                        ENEMY_ADVANCE_STEP,      // same tuning knob you already had
-                        ENEMY_ADVANCE_MARGIN
-                );
-
-                Vec3 enemyFootLeaderPos = battle.enemyAdvancePos;
-
-                // 3) Forward direction = from enemy leader toward friend foot center
-                Vec3 eFwd = friendFootCenter.subtract(enemyFootLeaderPos);
-                eFwd = new Vec3(eFwd.x, 0, eFwd.z);
-                if (eFwd.lengthSqr() < 1e-4) eFwd = new Vec3(1, 0, 0);
-                eFwd = eFwd.normalize();
-
-                // 4) Enemy FOOTMEN formation: advances toward friendly FOOTMEN
-                applyRectFormation(battle, Side.ENEMY, UnitRole.FOOTMAN,
-                        enemyFootLeaderPos, eFwd,
-                        3.0, FOOT_COLS, FOOT_ROWS, 1.1);
-
-                // 5) Enemy ARCHERS: stay behind enemy footmen so they can shoot
-                // (just increase behindDist; tune 8–12 depending on how wide your formations are)
-                applyRectFormation(battle, Side.ENEMY, UnitRole.ARCHER,
-                        enemyFootLeaderPos, eFwd,
-                        10.0, ARCH_COLS, ARCH_ROWS, 1.2);
-
-                // 6) Enemy KING follows the footmen leader (previously excluded from formations)
-                moveEnemyKingWithFootmen(battle, enemyFootLeaderPos);
             }
         }
 
+
     }
 
-    private static void applySideFormation(BattleInstance battle, Side side, ServerPlayer commander, BattleInstance.SideOrders orders) {
+
+   private static void applySideFormation(BattleInstance battle, Side side, ServerPlayer commander,
+                                       UUID commanderKingdomId,
+                                       BattleInstance.SideOrders orders){
+
         if (commander == null || !commander.isAlive()) return;
 
         // update stable forward while FOLLOW and moving
@@ -1223,8 +1863,8 @@ public final class WarBattleManager {
                 : commander.position();
         Vec3 archForward = orders.archerStableForward;
 
-        applyRectFormation(battle, side, UnitRole.FOOTMAN, footLeaderPos, footForward, 3.0, FOOT_COLS, FOOT_ROWS, 1.1);
-        applyRectFormation(battle, side, UnitRole.ARCHER,  archLeaderPos, archForward, 7.0, ARCH_COLS, ARCH_ROWS, 1.2);
+        applyRectFormation(battle, side, UnitRole.FOOTMAN, footLeaderPos, footForward, 3.0, FOOT_COLS, FOOT_ROWS, 1.1, commanderKingdomId);
+        applyRectFormation(battle, side, UnitRole.ARCHER,  archLeaderPos, archForward, 7.0, ARCH_COLS, ARCH_ROWS, 1.5, commanderKingdomId);
     }
 
 
@@ -1340,7 +1980,7 @@ public final class WarBattleManager {
             Vec3 leaderFwd = (meta.role() == UnitRole.ARCHER) ? archForwardF   : footForwardF;
             double behind  = (meta.role() == UnitRole.ARCHER) ? 7.0 : 3.0;
             int cols       = (meta.role() == UnitRole.ARCHER) ? ARCH_COLS : FOOT_COLS;
-            double spacing = (meta.role() == UnitRole.ARCHER) ? 1.2 : 1.1;
+            double spacing = (meta.role() == UnitRole.ARCHER) ? 1.5 : 1.1;
 
             Vec3 slot = slotPosFor(battle, leaderPos, leaderFwd, behind, cols, spacing, meta.formationIndex());
             if (mob.position().distanceToSqr(slot) > reform2) {
@@ -1388,7 +2028,7 @@ public final class WarBattleManager {
             Vec3 leaderFwd = (meta.role() == UnitRole.ARCHER) ? archForwardE   : footForwardE;
             double behind  = (meta.role() == UnitRole.ARCHER) ? 7.0 : 3.0;
             int cols       = (meta.role() == UnitRole.ARCHER) ? ARCH_COLS : FOOT_COLS;
-            double spacing = (meta.role() == UnitRole.ARCHER) ? 1.2 : 1.1;
+            double spacing = (meta.role() == UnitRole.ARCHER) ? 1.5 : 1.1;
 
             Vec3 slot = slotPosFor(battle, leaderPos, leaderFwd, behind, cols, spacing, meta.formationIndex());
             if (mob.position().distanceToSqr(slot) > reform2) {
@@ -1415,8 +2055,23 @@ public final class WarBattleManager {
     // --------------------
     // Spawning helpers (CUSTOM SOLDIER)
     // --------------------
+
+    private static ItemStack getHeraldryForKingdom(ServerLevel level, UUID kingdomId) {
+        var srv = level.getServer();
+        if (srv == null) return ItemStack.EMPTY;
+
+        var ks = kingdomState.get(srv);
+        var k = ks.getKingdom(kingdomId);
+        if (k != null && k.heraldry != null && !k.heraldry.isEmpty()) {
+            return k.heraldry.copyWithCount(1);
+        }
+        return ItemStack.EMPTY;
+    }
+
     private static void spawnFormation(ServerLevel level, BattleInstance battle, Side side, UnitRole role,
-                                       BlockPos anchorPos, Vec3 forward, double forwardOffset, int count) {
+                                   BlockPos anchorPos, Vec3 forward, double forwardOffset, int count,
+                                   ItemStack friendHeraldry, ItemStack enemyHeraldry) {
+
         Vec3 anchor = new Vec3(anchorPos.getX() + 0.5, anchorPos.getY(), anchorPos.getZ() + 0.5);
         Vec3 f = new Vec3(forward.x, 0, forward.z).normalize();
         Vec3 r = new Vec3(-f.z, 0, f.x);
@@ -1440,22 +2095,92 @@ public final class WarBattleManager {
 
             boolean bannerman = (level.random.nextInt(10) == 0);
 
-            var mob = spawnSoldier(
+            UUID sourceKingdom =
+                    (side == Side.FRIEND)
+                            ? pickContributor(level, battle.friendContribKingdoms)
+                            : pickContributor(level, battle.enemyContribKingdoms);
+
+            if (sourceKingdom == null) sourceKingdom =
+                    (side == Side.FRIEND) ? battle.friendRootKingdomId : battle.enemyRootKingdomId;
+
+            ItemStack srcHeraldry = getHeraldryForKingdom(level, sourceKingdom);
+
+            SoldierEntity mob = spawnSoldier(
                     level,
                     bp,
                     side,
                     role,
                     bannerman,
-                    false, // captain
-                    0,     // skinId for normal troops
-                    Component.literal(side == Side.ENEMY ? "Enemy Soldier" : "Friendly Soldier")
+                    false,
+                    0,
+                    Component.literal(side == Side.ENEMY ? "Enemy Soldier" : "Friendly Soldier"),
+                    (side == Side.FRIEND) ? srcHeraldry : friendHeraldry,
+                    (side == Side.ENEMY)  ? srcHeraldry : enemyHeraldry
             );
 
             if (mob != null) {
-                trackUnit(battle, mob, side, false, role);
+                trackUnit(battle, mob, sourceKingdom, side, false, role);
+            }
+
+
+
+        }
+    }
+
+    private static void spawnContingentFormation(
+            ServerLevel level,
+            BattleInstance battle,
+            UUID sourceKingdomId,
+            Side side,
+            UnitRole role,
+            BlockPos anchorPos,
+            Vec3 forward,
+            double forwardOffset,
+            int count,
+            ItemStack opposingHeraldry
+    ) {
+        ItemStack srcHeraldry = getHeraldryForKingdom(level, sourceKingdomId);
+
+        Vec3 anchor = new Vec3(anchorPos.getX() + 0.5, anchorPos.getY(), anchorPos.getZ() + 0.5);
+        Vec3 f = new Vec3(forward.x, 0, forward.z);
+        if (f.lengthSqr() < 1e-4) f = new Vec3(1,0,0);
+        f = f.normalize();
+        Vec3 r = new Vec3(-f.z, 0, f.x);
+
+        int width = 6;
+        double spacing = 1.6;
+
+        for (int i = 0; i < count; i++) {
+            int col = i % width;
+            int row = i / width;
+
+            double xOff = (col - (width - 1) * 0.5) * spacing;
+            double zOff = row * spacing;
+
+            Vec3 pos = anchor.add(f.scale(forwardOffset)).add(r.scale(xOff)).add(f.scale(zOff));
+            BlockPos bp = new BlockPos(Mth.floor(pos.x), anchorPos.getY(), Mth.floor(pos.z));
+
+            boolean bannerman = (level.random.nextInt(10) == 0);
+
+            SoldierEntity mob = spawnSoldier(
+                    level,
+                    bp,
+                    side,
+                    role,
+                    bannerman,
+                    false,
+                    0,
+                    Component.literal(side == Side.ENEMY ? "Enemy Soldier" : "Friendly Soldier"),
+                    (side == Side.FRIEND) ? srcHeraldry : opposingHeraldry,
+                    (side == Side.ENEMY)  ? srcHeraldry : opposingHeraldry
+            );
+
+            if (mob != null) {
+                trackUnit(battle, mob, sourceKingdomId, side, false, role);
             }
         }
     }
+
 
     @SuppressWarnings({"rawtypes","unchecked"})
     private static SoldierEntity spawnSoldier(
@@ -1466,7 +2191,9 @@ public final class WarBattleManager {
             boolean bannerman,
             boolean captain,
             int skinId,
-            Component name
+            Component name,
+            ItemStack friendHeraldry,
+            ItemStack enemyHeraldry
     ) {
         Entity ent = ((EntityType) modEntities.SOLDIER).create(
                 level,
@@ -1492,6 +2219,14 @@ public final class WarBattleManager {
         soldier.setBannerman(bannerman);
         soldier.setCaptain(captain);
         soldier.setSkinId(skinId);
+
+        if (side == Side.FRIEND && friendHeraldry != null && !friendHeraldry.isEmpty()) {
+            soldier.setHeraldry(friendHeraldry);
+        }
+        if (side == Side.ENEMY && enemyHeraldry != null && !enemyHeraldry.isEmpty()) {
+            soldier.setHeraldry(enemyHeraldry);
+        }
+
 
         soldier.setCustomName(name);
         if (captain) soldier.setCustomNameVisible(true);
@@ -1532,18 +2267,30 @@ public final class WarBattleManager {
         boolean playerWon = (winner == Side.FRIEND);
 
         WarState ws = WarState.get(server);
-        ws.makePeace(battle.playerKingdomId, battle.enemyKingdomId);
+        ws.makePeaceWithAllies(server, battle.friendRootKingdomId, battle.enemyRootKingdomId);
+
+
+       
+
+
+
 
         String enemyName = null;
         var ks = kingdomState.get(server);
-        var ek = ks.getKingdom(battle.enemyKingdomId);
+        var ek = ks.getKingdom(battle.enemyRootKingdomId);
         if (ek != null && ek.name != null && !ek.name.isBlank()) {
             enemyName = ek.name;
         } else {
-            var ai = aiKingdomState.get(server).getById(battle.enemyKingdomId);
-            if (ai != null) enemyName = ai.name;
+            var ai = aiKingdomState.get(server).getById(battle.enemyRootKingdomId);
+            if (ai != null) {
+                // your AiKingdom seems to sometimes expose 'name' but if not, be defensive:
+                try { enemyName = ai.name; } catch (Exception ignored) {}
+                if (enemyName == null || enemyName.isBlank()) {
+                    try { enemyName = (String) ai.getClass().getField("name").get(ai); } catch (Exception ignored) {}
+                }
+            }
         }
-        if (enemyName == null) enemyName = "the enemy";
+
 
         var friendCommander = server.getPlayerList().getPlayer(battle.friendCommanderUuid);
         var enemyCommander = (battle.enemyCommanderUuid != null)
@@ -1593,4 +2340,32 @@ public final class WarBattleManager {
     private static UUID findPlayersKingdomId(MinecraftServer server, ServerPlayer player) {
         return kingdomState.get(server).getKingdomIdFor(player.getUUID());
     }
+
+    private static List<UUID> collectAllianceSide(MinecraftServer server, UUID root, UUID enemyRoot) {
+        var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
+
+        HashSet<UUID> side = new HashSet<>();
+        ArrayDeque<UUID> q = new ArrayDeque<>();
+        side.add(root);
+        q.add(root);
+
+        while (!q.isEmpty()) {
+            UUID cur = q.removeFirst();
+            for (UUID ally : alliance.alliesOf(cur)) {
+                if (ally == null) continue;
+                if (ally.equals(enemyRoot)) continue;
+                if (alliance.isAllied(ally, enemyRoot)) continue; // don't drag in people allied to enemy root
+                if (side.add(ally)) q.addLast(ally);
+            }
+        }
+
+        return new ArrayList<>(side);
+    }
+
+    private static UUID pickContributor(ServerLevel level, List<UUID> contribs) {
+        if (contribs == null || contribs.isEmpty()) return null;
+        return contribs.get(level.random.nextInt(contribs.size()));
+    }
+
+
 }
