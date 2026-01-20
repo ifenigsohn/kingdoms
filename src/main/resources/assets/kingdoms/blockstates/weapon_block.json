@@ -1,7 +1,5 @@
 {
   "variants": {
-    "": {
-      "model": "kingdoms:block/weapon_block"
-    }
+    "": { "model": "kingdoms:block/blacksmith"}
   }
 }

@@ -143,7 +143,7 @@ public class modBlock {
     public static final Block weapon_block = register(
             "weapon_block",
             props -> new jobBlock(jobDefinition.WEAPON_JOB, props),
-            BlockBehaviour.Properties.of().strength(1.5F, 6.0F).sound(SoundType.GRASS),
+            BlockBehaviour.Properties.of().strength(1.5F, 6.0F).sound(SoundType.GRASS).noOcclusion(),
             true
     );
 
