@@ -21,7 +21,7 @@ public final class RoadAStar {
     private static final int SEARCH_PADDING = 96; // tune (64..192)
 
     // Penalize turns so road doesn't "stair-step" in XZ.
-    private static final double TURN_PENALTY = 2.5;
+    private static final double TURN_PENALTY = 6.0;
 
     // Strongly prefer flat over climbing/descending
     private static final double GRADE_PENALTY = 12.0;
@@ -45,7 +45,9 @@ public final class RoadAStar {
         HashMap<NodeKey, NodeRec> best = new HashMap<>(8192);
 
         // start lastDy=0, stepRun=0
-        NodeRec sRec = new NodeRec(startK, start.getY(), null, 0.0, 0, 0);
+        int startY = surfaceY(level, start.getX(), start.getZ());
+        NodeRec sRec = new NodeRec(startK, startY, null, 0.0, 0, 0);
+
         sRec.f = heuristic(start.getX(), start.getZ(), goal.getX(), goal.getZ());
         best.put(startK, sRec);
         open.add(new Node(startK, sRec.f));
@@ -76,6 +78,7 @@ public final class RoadAStar {
 
         return fallbackLine(level, regionKey, start, goal);
     }
+    
 
     private static void step(ServerLevel level,
                              long regionKey,
@@ -87,7 +90,12 @@ public final class RoadAStar {
                              int minX, int maxX, int minZ, int maxZ) {
 
         if (nx < minX || nx > maxX || nz < minZ || nz > maxZ) return;
-        if (!level.hasChunk(nx >> 4, nz >> 4)) return;
+        
+        try {
+            level.getChunk(nx >> 4, nz >> 4);
+        } catch (Exception ex) {
+            return;
+        }
 
         boolean isGoal = (nx == goal.getX() && nz == goal.getZ());
         if (!isGoal && isFootprintBlocked(level, regionKey, nx, nz, FOOTPRINT_MARGIN)) return;
@@ -112,6 +120,22 @@ public final class RoadAStar {
             int ndz = nz - cur.k.z;
             if (pdx != ndx || pdz != ndz) g2 += TURN_PENALTY;
         }
+
+        // extra anti-zigzag: penalize alternating axis steps (E/N/E/N...)
+        if (cur.prev != null) {
+            int pdx = cur.k.x - cur.prev.k.x;
+            int pdz = cur.k.z - cur.prev.k.z;
+            int ndx = nx - cur.k.x;
+            int ndz = nz - cur.k.z;
+
+            boolean prevAxisX = (pdx != 0);
+            boolean nextAxisX = (ndx != 0);
+
+            if (prevAxisX != nextAxisX) {
+                g2 += 30;
+            }
+        }
+
 
         // ---- smoothness penalties using lastDy/stepRun ----
         int newStepRun = (dy != 0) ? (cur.stepRun + 1) : 0;
@@ -145,8 +169,10 @@ public final class RoadAStar {
 
         BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos(x, y, z);
 
+        boolean steppedDownThroughRoad = false;
+
         // Walk DOWN if we landed on our own road materials (prevents A* feedback),
-        // but IMPORTANT: once we step off the road, the surface is one ABOVE that.
+        // but ONLY add +1 if we actually stepped down.
         while (p.getY() > level.getMinY() + 1) {
             BlockState bs = level.getBlockState(p);
 
@@ -158,12 +184,14 @@ public final class RoadAStar {
 
             if (!isRoad) break;
 
+            steppedDownThroughRoad = true;
             p.move(0, -1, 0);
         }
 
-        // ✅ FIX: we stopped on the block BELOW the road, so return +1
-        return Math.min(level.getMaxY() - 1, p.getY() + 1);
+        int out = steppedDownThroughRoad ? (p.getY() + 1) : p.getY();
+        return Math.min(level.getMaxY() - 1, out);
     }
+
 
     private static boolean isWaterAtOrBelow(ServerLevel level, int x, int y, int z) {
         var p = new BlockPos.MutableBlockPos(x, y, z);
@@ -173,7 +201,7 @@ public final class RoadAStar {
     }
 
     private static double heuristic(int x, int z, int gx, int gz) {
-        return Math.abs(gx - x) + Math.abs(gz - z);
+       return 1.0 * (Math.abs(gx - x) + Math.abs(gz - z));
     }
 
     private static List<BlockPos> reconstruct(NodeRec end) {

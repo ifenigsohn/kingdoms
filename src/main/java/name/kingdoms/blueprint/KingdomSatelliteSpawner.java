@@ -75,6 +75,28 @@ public final class KingdomSatelliteSpawner {
             long buildingKey
     ) {}
 
+    /**
+     * Used by BlueprintPlacerEngine to delay road generation until this region
+     * has no pending satellite work.
+     */
+    public static boolean hasPending(long regionKey) {
+        // active (already-enqueued) satellite placements still running
+        if (KingdomGenGate.isBusy(regionKey)) return true;
+
+        // pending drip-feed placements
+        for (SatJob sj : SAT_QUEUE) {
+            if (sj.regionKey() == regionKey) return true;
+        }
+
+        // pending delayed planning
+        for (PlanJob pj : PLAN_QUEUE) {
+            if (pj.regionKey() == regionKey) return true;
+        }
+
+        return false;
+    }
+
+
     public static void enqueuePlanAfterDelay(
             ServerLevel level,
             BlockPos castleOrigin,
@@ -86,6 +108,8 @@ public final class KingdomSatelliteSpawner {
             RandomSource rng,
             int delayTicks
     ) {
+
+        KingdomGenGate.beginOne(regionKey);
         PLAN_QUEUE.addLast(new PlanJob(level, castleOrigin, castleBp, modId, regionKey, size, blueprintIds, rng, delayTicks));
     }
 
@@ -134,6 +158,10 @@ public final class KingdomSatelliteSpawner {
                         } catch (Exception ex) {
                             LOGGER.warn("[Kingdoms] Satellite planning failed for region={} origin={}",
                                     pj.regionKey(), pj.castleOrigin(), ex);
+                        } finally {
+                            // IMPORTANT: release the plan token (satellite jobs will keep the gate busy)
+                            KingdomGenGate.oneSatelliteFinished(pj.regionKey());
+                            
                         }
                     }
                 }
@@ -156,8 +184,6 @@ public final class KingdomSatelliteSpawner {
 
                     Blueprint bp = Blueprint.load(lvl.getServer(), modId, satBpId);
 
-                    // Start "in-flight" gate only after we successfully loaded bp
-                    KingdomGenGate.beginOne();
 
                     Runnable onSatSuccess = () -> {
                         try {
@@ -181,7 +207,8 @@ public final class KingdomSatelliteSpawner {
                         } finally {
                             // IMPORTANT: activity ends when the blueprint is finished/failed
                             RegionActivityState.get(lvl).end(rrk);
-                            KingdomGenGate.oneSatelliteFinished();
+                            KingdomGenGate.oneSatelliteFinished(rrk);
+                             BlueprintPlacerEngine.requestRoadStart(lvl, rrk);
                         }
                     };
 
@@ -190,7 +217,8 @@ public final class KingdomSatelliteSpawner {
                             // nothing
                         } finally {
                             RegionActivityState.get(lvl).end(rrk);
-                            KingdomGenGate.oneSatelliteFinished();
+                            KingdomGenGate.oneSatelliteFinished(rrk);
+                             BlueprintPlacerEngine.requestRoadStart(lvl, rrk);
                         }
                     };
 
@@ -304,6 +332,8 @@ public final class KingdomSatelliteSpawner {
                     long buildingKey = mixKey(regionKey, planned, origin);
 
                     // Queue for drip-feed tick
+
+                    KingdomGenGate.beginOne(regionKey);
                     SAT_QUEUE.addLast(new SatJob(level, modId, regionKey, origin, bpId, buildingKey));
                    
                     chosenCenters.add(origin);

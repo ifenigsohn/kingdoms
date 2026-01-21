@@ -490,7 +490,20 @@ public final class BlueprintPlacerEngine {
         return Math.max(level.getMinY() + 1, y);
     }
 
+    public static void requestRoadStart(ServerLevel level, long regionKey) {
+        if (level == null) return;
+        maybeStartRoads(level, regionKey); // call your existing method
+    }
+
+
     private static void maybeStartRoads(ServerLevel level, long regionKey) {
+        
+        // Only generate roads after satellite generation for THIS region is fully done.
+        if (KingdomSatelliteSpawner.hasPending(regionKey)) {
+            return;
+        }
+
+
         if (RegionActivityState.get(level).getActive(regionKey) > 0) {
             return;
         }

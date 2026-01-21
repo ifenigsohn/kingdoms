@@ -357,7 +357,8 @@ public final class worldGenBluePrintAutoSpawner {
 
     private static void placeSome(MinecraftServer server, ServerLevel level) {
 
-        
+        if (KingdomGenGate.hasActiveRegion()) return;
+
         if (BlueprintPlacerEngine.getQueueSize() >= MAX_BP_QUEUE) return;
 
         if (pendingQueue.isEmpty()) return;
@@ -387,11 +388,16 @@ public final class worldGenBluePrintAutoSpawner {
                 continue;
             }
 
-            // Already queued/in-flight? keep it pending (try later)
             if (KingdomsSpawnState.get(level).isQueued(regionKey)) {
-                pendingQueue.addLast(regionKey);
-                continue;
+                // If nothing is actually in-flight for this key, clear the stale queued flag.
+                if (!BlueprintPlacerEngine.isInFlight(regionKey)) {
+                    KingdomsSpawnState.get(level).clearQueued(regionKey);
+                } else {
+                    pendingQueue.addLast(regionKey);
+                    continue;
+                }
             }
+
 
             int x = e.plannedX();
             int z = e.plannedZ();
@@ -483,6 +489,13 @@ public final class worldGenBluePrintAutoSpawner {
 
             try {
                 Blueprint bp = Blueprint.load(server, MOD_ID, e.bpId());
+
+                
+                if (!KingdomGenGate.tryBeginRegion(regionKey)) {
+                    pendingQueue.addLast(regionKey);
+                    return;
+                }
+
                 
                 reserve(regionKey, x, z);
                 // mark queued before enqueue
@@ -499,6 +512,8 @@ public final class worldGenBluePrintAutoSpawner {
                         regionKey, // jobKey (castle job is unique per region)
                         () -> {
                             // SUCCESS
+                            
+
                             KingdomsSpawnState.get(level).markSpawned(regionKey);
                             KingdomsSpawnState.get(level).clearQueued(regionKey);
 
@@ -529,6 +544,8 @@ public final class worldGenBluePrintAutoSpawner {
                             );
                         },
                         () -> {
+                            KingdomGenGate.endRegion(regionKey);
+                            
                             // FAIL: release queued flag so this region can be tried again
                             KingdomsSpawnState.get(level).clearQueued(regionKey);
 
