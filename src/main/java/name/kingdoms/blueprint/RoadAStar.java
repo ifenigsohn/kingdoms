@@ -132,7 +132,7 @@ public final class RoadAStar {
             boolean nextAxisX = (ndx != 0);
 
             if (prevAxisX != nextAxisX) {
-                g2 += 30;
+                g2 += 150;
             }
         }
 

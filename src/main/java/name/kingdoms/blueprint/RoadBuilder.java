@@ -229,7 +229,7 @@ public final class RoadBuilder {
                 BlockPos prev = (pathIndex > 0) ? path.get(pathIndex - 1) : null;
                 BlockPos next = (pathIndex + 1 < path.size()) ? path.get(pathIndex + 1) : null;
 
-                int placed = placeAt(prev, cur, next);
+                int placed = placeAt(prev, cur, next, pathIndex);
                 ops += placed;
                 blocksPlacedTotal += placed;
 
@@ -349,7 +349,8 @@ public final class RoadBuilder {
         // Build logic
         // ============================================================
 
-        private int placeAt(BlockPos prev, BlockPos cur, BlockPos next) {
+        private int placeAt(BlockPos prev, BlockPos cur, BlockPos next, int stepIndex) {
+
             int ops = 0;
 
             int y = cur.getY();
@@ -427,7 +428,7 @@ public final class RoadBuilder {
                     int sx = stairLower.getX() + spx * w;
                     int sz = stairLower.getZ() + spz * w;
 
-                    if (rx == sx && rz == sz && y == stairLower.getY()) {
+                    if (rx == sx && rz == sz && y == stairLower.getY() + 1) {
                         continue;
                     }
                 }
@@ -445,6 +446,8 @@ public final class RoadBuilder {
                         cutDownTo(rx, rz, y);
                         fillUpTo(rx, rz, y - 1);
                     }
+
+                     clearRoadVolume(rx, y, rz);
                 }
 
                 // support / pillars
@@ -458,6 +461,12 @@ public final class RoadBuilder {
                 set(rx, y, rz, surface);
                 ops++;
             }
+
+            // ---- Lamp posts (every 10 blocks, one side) ----
+            if (!isBridge) {
+                ops += tryPlaceLampPost(cur, fwd, y, stepIndex);
+            }
+
 
            
 
@@ -522,6 +531,61 @@ public final class RoadBuilder {
 
             return ops;
         }
+
+        private int tryPlaceLampPost(BlockPos cur, Direction fwd, int roadY, int stepIndex) {
+            // every 10 blocks
+            if (stepIndex <= 0 || (stepIndex % 10) != 0) return 0;
+
+            // alternate sides every 10 so it doesn't look like a picket fence
+            int side = (((stepIndex / 10) & 1) == 0) ? (HALF_WIDTH + 1) : -(HALF_WIDTH + 1);
+
+            int[] perp = perpXZ(fwd);
+            int px = perp[0], pz = perp[1];
+
+            int x = cur.getX() + px * side;
+            int z = cur.getZ() + pz * side;
+            int y = roadY;
+
+            // don't place inside blueprint footprint margins
+            if (isFootprintBlocked(x, z)) return 0;
+
+            // must NOT be "over path blocks" / road blocks
+            scratch.set(x, y, z);
+            BlockState ground = level.getBlockState(scratch);
+            boolean groundIsRoad =
+                    ground.is(Blocks.DIRT_PATH) ||
+                    ground.is(Blocks.SPRUCE_PLANKS) ||
+                    (ground.getBlock() instanceof StairBlock);
+
+            if (groundIsRoad) return 0;
+
+            // must not be waterlogged / fluid tile
+            if (!ground.getFluidState().isEmpty()) return 0;
+
+            // no floating posts: require solid support directly below
+            scratch.set(x, y - 1, z);
+            BlockState below = level.getBlockState(scratch);
+            if (below.isAir() || !below.getFluidState().isEmpty()) return 0;
+
+            // clear vertical space for the post + lantern
+            // (only clears "soft" blocks; won't bulldoze buildings)
+            clearSoft(x, y + 1, z);
+            clearSoft(x, y + 2, z);
+            clearSoft(x, y + 3, z);
+
+            // only place if the spaces are now air (so we don't replace e.g. stone walls)
+            if (!isAir(x, y + 1, z)) return 0;
+            if (!isAir(x, y + 2, z)) return 0;
+            if (!isAir(x, y + 3, z)) return 0;
+
+            // place: 2 fences + lantern
+            set(x, y + 1, z, Blocks.SPRUCE_FENCE.defaultBlockState());
+            set(x, y + 2, z, Blocks.SPRUCE_FENCE.defaultBlockState());
+            set(x, y + 3, z, Blocks.LANTERN.defaultBlockState());
+
+            return 3;
+        }
+
 
         private void cutDownToPad(int x, int z, int padY) {
             int surf = surfaceY(x, z);
@@ -669,6 +733,7 @@ public final class RoadBuilder {
                         bs.is(Blocks.SPRUCE_PLANKS) ||
                         bs.is(Blocks.SPRUCE_FENCE) ||
                         bs.is(Blocks.SPRUCE_LOG) ||
+                        bs.is(Blocks.LANTERN) ||
                         (bs.getBlock() instanceof StairBlock);
 
                 if (!isRoad) break;
