@@ -1,13 +1,16 @@
 package name.kingdoms.blueprint;
-
 import com.mojang.logging.LogUtils;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
-
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
-
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
@@ -16,24 +19,19 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LeavesBlock;
-import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.Heightmap;
-
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 import net.minecraft.tags.BlockTags;
 import org.slf4j.Logger;
-
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.util.*;
-
 import net.minecraft.server.level.TicketType;
-import net.minecraft.world.level.ChunkPos;
 
 
 /**
@@ -129,6 +127,17 @@ public final class BlueprintPlacerEngine {
         if (DEBUG) LOGGER.info("[Kingdoms][BPDBG] " + msg);
     }
 
+    public static void resetRuntime() {
+        clearAll(true);      // releases forced chunk tickets for tasks in queues
+        IN_FLIGHT.clear();
+
+        // Reset ChunkForcer reflection cache (CRITICAL for new worlds)
+        ChunkForcer.resetRuntime();
+
+        aliveTicks = 0;
+    }
+
+
     // === PERFORMANCE ===
     // Heavy lane budgets (grading + placement)
     public static int BLOCKS_PER_TICK = 300;
@@ -206,12 +215,19 @@ public final class BlueprintPlacerEngine {
         ServerTickEvents.END_SERVER_TICK.register(BlueprintPlacerEngine::tick);
 
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
-            clearAll(true);
-            IN_FLIGHT.clear();
-            LOGGER.info("[Kingdoms] Cleared blueprint task queues on server stop");
+            // On shutdown, do NOT touch chunk tickets / chunk source via reflection.
+            // Integrated server saving can deadlock/stall if we invoke ticket methods here.
+            clearAll(false);          // just drop queues
+            IN_FLIGHT.clear();        // clear dedupe
+            aliveTicks = 0;
+            ChunkForcer.resetRuntime();
+
+            LOGGER.info("[Kingdoms] Cleared blueprint task queues on server stop (no ticket release)");
         });
 
+
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+            resetRuntime();
             primeInFlightFromPersisted(server);
             rebuildRegionActivityFromPersisted(server);
             ServerLevel overworld = server.overworld();
@@ -403,10 +419,33 @@ public final class BlueprintPlacerEngine {
         );
     }
 
+        private static boolean isWorldgenJob(ServerLevel level, long jobKey) {
+            // We don't assume a contains() exists; we check snapshot()
+            WorldgenBlueprintQueueState q = WorldgenBlueprintQueueState.get(level);
+            for (WorldgenBlueprintQueueState.Entry e : q.snapshot()) {
+                if (e.regionKey == jobKey) return true; // matches your usage: e.regionKey
+            }
+            return false;
+        }
+
+        private static boolean isWorldgenTask(Task t) {
+            if (t == null) return false;
+            if (t.claimedJobKey == Long.MIN_VALUE) return false;
+            return isWorldgenJob(t.level, t.claimedJobKey);
+        }
+
+
     private static void tick(MinecraftServer server) {
         if ((aliveTicks++ % 200) == 0) {
             LOGGER.info("[BPQ] ALIVE preflight={} heavy={} total={}", PREFLIGHT.size(), HEAVY.size(), getQueueSize());
         }
+
+            ServerLevel overworld = server.overworld();
+            boolean worldgenEnabled = true;
+            if (overworld != null) {
+                worldgenEnabled = WorldgenToggleState.get(overworld).isEnabled();
+            }
+
 
         if (PREFLIGHT.isEmpty() && HEAVY.isEmpty()) return;
 
@@ -421,6 +460,15 @@ public final class BlueprintPlacerEngine {
 
             Task t = PREFLIGHT.poll();
             if (t == null) break;
+
+            // If worldgen is disabled, keep worldgen tasks queued but don't run them.
+            if (!worldgenEnabled && isWorldgenTask(t)) {
+                PREFLIGHT.add(t);
+                advanced++;
+                continue;
+            }
+
+
 
             try {
                 Task.PreflightResult r = t.stepPreflight(server, PREFLIGHT_BUDGET_PER_TASK, preflightDeadline);
@@ -447,6 +495,33 @@ public final class BlueprintPlacerEngine {
 
         Task task = HEAVY.peek();
         if (task == null) return;
+
+        // If worldgen is disabled, skip any worldgen-heavy tasks.
+        if (!worldgenEnabled) {
+            int n = HEAVY.size();
+            boolean foundNonWorldgen = false;
+
+            for (int i = 0; i < n; i++) {
+                Task top = HEAVY.peek();
+                if (top == null) break;
+
+                if (!isWorldgenTask(top)) {
+                    foundNonWorldgen = true;
+                    break;
+                }
+
+                // rotate
+                HEAVY.add(HEAVY.poll());
+            }
+
+            if (!foundNonWorldgen) {
+                return; // all heavy tasks are worldgen => pause everything
+            }
+
+            task = HEAVY.peek();
+            if (task == null) return;
+        }
+
 
         final long heavyDeadline = System.nanoTime() + MAX_NANOS_PER_TICK;
 
@@ -544,6 +619,14 @@ public final class BlueprintPlacerEngine {
      * Uses built-in TicketType.FORCED (loads + simulates + persists) on 1.21.x.
      */
     private static final class ChunkForcer {
+
+        static void resetRuntime() {
+            lookedUp = false;
+            ADD = null;
+            REMOVE = null;
+            warned = false;
+        }
+
         private static boolean lookedUp = false;
         private static Method ADD = null;
         private static Method REMOVE = null;
@@ -871,6 +954,11 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
         private int preflightTicks = 0;
         private Phase lastLoggedPhase = null;
         private int lastLoggedServerTick = -1;
+
+        // === Dropped item cleanup ===
+        private static final int ITEM_CLEAR_PLAYER_RADIUS = 64;     // don't delete drops near players
+        private static final int ITEM_CLEAR_MAX_PER_TASK   = 2000;   // safety cap
+        private boolean itemsCleared = false;
         
 
 
@@ -946,8 +1034,6 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
             return level.getChunkSource().getChunk(cX, cZ, ChunkStatus.SURFACE, false) != null;
 
         }
-
-
 
 
 
@@ -1957,6 +2043,70 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
                         break;
                     }
                 }
+            }
+
+            return false;
+        }
+
+        private void clearDroppedItemsAfterBuild(MinecraftServer server) {
+            if (itemsCleared) return;
+            itemsCleared = true;
+
+            // Make sure bounds exist
+            if (!prepInitialized) initBoundsOnly();
+
+            // Skip if any players are nearby (safety)
+            double cx = (prepMinX + prepMaxX) * 0.5;
+            double cz = (prepMinZ + prepMaxZ) * 0.5;
+
+            for (Player p : level.players()) {
+                if (p.distanceToSqr(cx, p.getY(), cz) <= (double)(ITEM_CLEAR_PLAYER_RADIUS * ITEM_CLEAR_PLAYER_RADIUS)) {
+                    return;
+                }
+            }
+
+            AABB box = new AABB(
+                    prepMinX, level.getMinY(), prepMinZ,
+                    prepMaxX + 1, level.getMaxY(), prepMaxZ + 1
+            );
+
+            int removed = 0;
+            List<ItemEntity> drops = level.getEntitiesOfClass(ItemEntity.class, box, e -> e != null && e.isAlive());
+            for (ItemEntity it : drops) {
+                if (removed >= ITEM_CLEAR_MAX_PER_TASK) break;
+
+                ItemStack stack = it.getItem();
+                if (stack.isEmpty()) continue;
+
+                if (isJunkDrop(stack)) {
+                    it.discard(); // deletes the entity
+                    removed++;
+                }
+            }
+
+            if (DEBUG) {
+                dbg("ITEM_CLEANUP bp=" + bp.id + " removed=" + removed + " bounds=("
+                        + prepMinX + "," + prepMinZ + ")->(" + prepMaxX + "," + prepMaxZ + ")");
+            }
+        }
+
+        private boolean isJunkDrop(ItemStack stack) {
+            // Common “worldgen trash” items
+           
+            if (stack.is(Items.LEAF_LITTER)) return true;
+            if (stack.is(Items.WILDFLOWERS)) return true;
+
+            // Seeds
+            if (stack.is(Items.WHEAT_SEEDS)) return true;
+            if (stack.is(Items.BEETROOT_SEEDS)) return true;
+            if (stack.is(Items.MELON_SEEDS)) return true;
+            if (stack.is(Items.PUMPKIN_SEEDS)) return true;
+
+            // Saplings
+            if (stack.is(Items.OAK_SAPLING) || stack.is(Items.SPRUCE_SAPLING) || stack.is(Items.BIRCH_SAPLING) ||
+                stack.is(Items.JUNGLE_SAPLING) || stack.is(Items.ACACIA_SAPLING) || stack.is(Items.DARK_OAK_SAPLING) ||
+                stack.is(Items.MANGROVE_PROPAGULE) || stack.is(Items.CHERRY_SAPLING) || stack.is(Items.BAMBOO)) {
+                return true;
             }
 
             return false;

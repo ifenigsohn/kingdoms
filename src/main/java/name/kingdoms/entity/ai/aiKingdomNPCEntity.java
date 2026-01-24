@@ -20,8 +20,6 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.goal.*;
 import net.minecraft.world.entity.ai.goal.target.HurtByTargetGoal;
 import net.minecraft.world.entity.ai.goal.target.NearestAttackableTargetGoal;
-import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
-import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.entity.ai.targeting.TargetingConditions;
 import net.minecraft.world.entity.monster.Creeper;
 import net.minecraft.world.entity.monster.Monster;
@@ -73,6 +71,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     private static final int NOON_TELEPORT_RADIUS = 48;
     private static final int NOON_TELEPORT_COOLDOWN_TICKS = 20 * 60;
     private int noonTeleportCooldown = 0;
+    private int combatEquipLinger = 0;
 
     private int panicTicks = 0;
 
@@ -92,12 +91,12 @@ public class aiKingdomNPCEntity extends PathfinderMob {
                 .add(Attributes.ATTACK_DAMAGE, 4.0D);   
     }
 
+
     @Override
-    protected PathNavigation createNavigation(Level level) {
-        GroundPathNavigation nav = new GroundPathNavigation(this, level);
-        nav.setCanOpenDoors(true);
-        return nav;
+    protected net.minecraft.world.entity.ai.navigation.PathNavigation createNavigation(Level level) {
+        return new name.kingdoms.entity.TrapdoorBlockingGroundNavigation(this, level);
     }
+
 
     @Override
     protected void registerGoals() {
@@ -209,6 +208,8 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     }
 
     private void refreshNametag() {
+        this.setCustomNameVisible(false);
+
         String type = getAiTypeId();
         String job = titleForType(type);
 
@@ -216,7 +217,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         if (nm == null || nm.isBlank()) nm = "Aelfric";
 
         this.setCustomName(Component.literal(nm + " [" + job + "]"));
-        this.setCustomNameVisible(true);
+        this.setCustomNameVisible(false);
     }
 
     // Spawner binding API
@@ -319,6 +320,18 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     public void tick() {
         super.tick();
         if (!(this.level() instanceof ServerLevel level)) return;
+
+        if (isCombatant() && !this.isSleeping()) {
+            boolean fightingNow = this.getTarget() != null && this.getTarget().isAlive();
+            if (fightingNow) combatEquipLinger = 40; // 2 seconds
+            else if (combatEquipLinger > 0) combatEquipLinger--;
+
+            setCombatSword(fightingNow || combatEquipLinger > 0);
+        } else {
+            combatEquipLinger = 0;
+            setCombatSword(false);
+        }
+
 
         // Despawn if spawner destroyed (accept ANY kingdom spawner type)
         if (this.hasSpawnerPos()) {

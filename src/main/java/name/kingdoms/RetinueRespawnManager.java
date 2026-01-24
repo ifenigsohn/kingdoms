@@ -34,6 +34,14 @@ public final class RetinueRespawnManager {
     private record Key(UUID owner, String jobId) {}
     private static final Map<Key, Long> RESPAWN_AT = new HashMap<>();
 
+    // Owner-side retinue maintenance
+    private static final int RECALL_CHECK_EVERY_TICKS = 20; // once per second
+    private static final int RECALL_DISTANCE = 70;          // same as HARD_TELEPORT_RADIUS in entity
+    private static final int MISSING_GRACE_TICKS = 20 * 10; // 10s missing -> respawn near owner
+
+    // If a slot (owner+job) is missing (not found/loaded), track since when
+    private static final Map<Key, Long> MISSING_SINCE = new HashMap<>();
+
     private RetinueRespawnManager() {}
 
     /** Call once AFTER entity types registered. */
@@ -106,7 +114,7 @@ public final class RetinueRespawnManager {
 
         for (Spec spec : specs.values()) {
             if (isBlocked(owner, spec.jobId(), now)) continue;
-            if (hasAliveRetinue(sl, owner, spec.jobId())) continue;
+            if (hasAliveRetinue(sl, player, spec.jobId())) continue;
             spawnOne(sl, player, spec);
         }
     }
@@ -120,7 +128,9 @@ public final class RetinueRespawnManager {
         rememberOwned(owner, jobId, skinId, displayName);
 
         long runAt = level.getGameTime() + RESPAWN_TICKS;
-        RESPAWN_AT.put(new Key(owner, jobId), runAt);
+        String keyJob = jobId.trim().toLowerCase(Locale.ROOT);
+        RESPAWN_AT.put(new Key(owner, keyJob), runAt);
+
 
         ServerPlayer sp = level.getServer().getPlayerList().getPlayer(owner);
         if (sp != null && ModEffects.RESPAWNING != null) {
@@ -136,7 +146,7 @@ public final class RetinueRespawnManager {
     // ------------------------------------------------------------
     private static void tick(MinecraftServer server) {
         if (WORKER_TYPE == null) return;
-        if (RESPAWN_AT.isEmpty()) return;
+        if ((server.getTickCount() % RECALL_CHECK_EVERY_TICKS) != 0) return;
 
         // We need to process per-online-owner, per-dimension timebase (use owner’s current level time)
         for (ServerPlayer ownerPlayer : server.getPlayerList().getPlayers()) {
@@ -157,7 +167,7 @@ public final class RetinueRespawnManager {
 
                 Spec spec = getSpec(owner, k.jobId());
                 if (spec != null) {
-                    if (!hasAliveRetinue(sl, owner, spec.jobId())) {
+                    if (!hasAliveRetinue(sl, ownerPlayer, spec.jobId())) {
                         spawnOne(sl, ownerPlayer, spec);
                     }
                 }
@@ -172,8 +182,75 @@ public final class RetinueRespawnManager {
             } else {
                 try { ownerPlayer.removeEffect(ModEffects.RESPAWNING); } catch (Throwable ignored) {}
             }
+
+           ensureRetinueNearOwner(sl, ownerPlayer);
+
+
         }
     }
+
+    private static void ensureRetinueNearOwner(ServerLevel sl, ServerPlayer ownerPlayer) {
+        UUID owner = ownerPlayer.getUUID();
+        Map<String, Spec> specs = OWNED.get(owner);
+        if (specs == null || specs.isEmpty()) return;
+
+        long now = sl.getGameTime();
+
+        for (Spec spec : specs.values()) {
+            String jobId = spec.jobId();
+
+            // If this slot is currently blocked by a death timer, don't "replace" it early,
+            // but we *can* still teleport if it's found loaded.
+            boolean blocked = isBlocked(owner, jobId, now);
+
+            // Try to find an ALIVE retinue entity for this slot (LOADED ones only)
+            kingdomWorkerEntity ent = findLoadedRetinue(sl, owner, jobId, ownerPlayer);
+
+            if (ent != null) {
+                // Found it loaded -> clear missing timer
+                MISSING_SINCE.remove(new Key(owner, jobId));
+
+                // If far away -> teleport near owner (NO speed gating)
+                double d2 = ent.distanceToSqr(ownerPlayer);
+                if (d2 > (RECALL_DISTANCE * RECALL_DISTANCE)) {
+                    ent.getNavigation().stop();
+                    ent.teleportTo(ownerPlayer.getX() + 1.5, ownerPlayer.getY(), ownerPlayer.getZ() + 1.5);
+                }
+                continue;
+            }
+
+            // Not found (probably unloaded / different dimension / stuck) -> start missing timer
+            Key key = new Key(owner, jobId);
+            long since = MISSING_SINCE.getOrDefault(key, -1L);
+            if (since < 0) {
+                MISSING_SINCE.put(key, now);
+                continue;
+            }
+
+            // If missing too long, and not blocked, spawn replacement near owner
+            if (!blocked && (now - since) >= MISSING_GRACE_TICKS) {
+                spawnOne(sl, ownerPlayer, spec);
+                MISSING_SINCE.remove(key);
+            }
+        }
+    }
+
+    private static kingdomWorkerEntity findLoadedRetinue(ServerLevel sl, UUID owner, String jobId, ServerPlayer ownerPlayer) {
+        // Only searches LOADED entities near the player.
+        // If the retinue is outside sim distance, it won’t be found (that’s why we respawn after grace).
+        var list = sl.getEntitiesOfClass(
+                kingdomWorkerEntity.class,
+                ownerPlayer.getBoundingBox().inflate(256), // keep this small-ish for performance
+                w -> w.isRetinue()
+                        && owner.equals(w.getOwnerUUID())
+                        && jobId.equals(w.getJobId())
+                        && w.isAlive()
+        );
+
+        return list.isEmpty() ? null : list.get(0);
+    }
+
+
 
     // ------------------------------------------------------------
     // Spawn helpers
@@ -220,19 +297,18 @@ public final class RetinueRespawnManager {
         }
     }
 
-    private static boolean hasAliveRetinue(ServerLevel level, UUID owner, String jobId) {
+    private static boolean hasAliveRetinue(ServerLevel level, ServerPlayer ownerPlayer, String jobId) {
+        UUID owner = ownerPlayer.getUUID();
         return !level.getEntitiesOfClass(
                 kingdomWorkerEntity.class,
-                new net.minecraft.world.phys.AABB(
-                        ownerPosX(level, owner) - 256, -64, ownerPosZ(level, owner) - 256,
-                        ownerPosX(level, owner) + 256, 320, ownerPosZ(level, owner) + 256
-                ),
+                ownerPlayer.getBoundingBox().inflate(256),
                 w -> w.isRetinue()
                         && owner.equals(w.getOwnerUUID())
                         && jobId.equals(w.getJobId())
                         && w.isAlive()
         ).isEmpty();
     }
+
 
     // Cheap fallback; we only use this AABB builder above for “near owner”.
     private static double ownerPosX(ServerLevel level, UUID owner) {

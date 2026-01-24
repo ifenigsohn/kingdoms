@@ -1,5 +1,5 @@
 package name.kingdoms.client;
-
+import name.kingdoms.entity.SoldierSkins;
 import name.kingdoms.Kingdoms;
 import name.kingdoms.entity.SoldierEntity;
 
@@ -20,11 +20,6 @@ public final class SoldierRenderer extends HumanoidMobRenderer<
         HumanoidModel<SoldierRenderer.SoldierRenderState>
         > {
 
-    private static final ResourceLocation TEX_FRIEND =
-            ResourceLocation.fromNamespaceAndPath(Kingdoms.MOD_ID, "textures/entity/soldier.png");
-
-    private static final ResourceLocation TEX_ENEMY =
-            ResourceLocation.fromNamespaceAndPath(Kingdoms.MOD_ID, "textures/entity/soldier_enemy.png");
 
     public SoldierRenderer(EntityRendererProvider.Context ctx) {
         // Player model layer usually plays nicer with humanoid poses than Zombie
@@ -34,6 +29,7 @@ public final class SoldierRenderer extends HumanoidMobRenderer<
     public static final class SoldierRenderState extends HumanoidRenderState {
         public boolean enemy;
         public boolean bannerman;
+        public int skinId;
     }
 
     @Override
@@ -47,6 +43,7 @@ public final class SoldierRenderer extends HumanoidMobRenderer<
 
         state.enemy = (entity.getSide() == SoldierEntity.Side.ENEMY);
         state.bannerman = entity.isBannerman();
+        state.skinId = entity.getSkinId();
 
         // ------------------------------------------------------------
         // IMPORTANT: drive melee swing animation
@@ -68,12 +65,16 @@ public final class SoldierRenderer extends HumanoidMobRenderer<
             // For swords/normal items, ITEM pose is fine.
             // The actual swing comes from attackTime above.
             state.rightArmPose = ArmPose.ITEM;
-            state.leftArmPose  = ArmPose.EMPTY;
+            state.rightArmPose = ArmPose.ITEM;
+            state.leftArmPose  = entity.getOffhandItem().isEmpty() ? ArmPose.EMPTY : ArmPose.ITEM;
+
         }
     }
 
     @Override
     public ResourceLocation getTextureLocation(SoldierRenderState state) {
-        return state.enemy ? TEX_ENEMY : TEX_FRIEND;
+        return SoldierSkins.tex(state.skinId);
     }
+
+
 }

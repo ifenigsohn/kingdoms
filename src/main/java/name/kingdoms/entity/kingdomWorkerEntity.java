@@ -40,10 +40,9 @@ import net.minecraft.world.level.storage.ValueOutput;
 import net.minecraft.world.phys.Vec3;
 
 import org.jetbrains.annotations.Nullable;
-import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
-import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.entity.ai.targeting.TargetingConditions;
 import net.minecraft.world.entity.animal.horse.Horse;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Creeper;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.EntitySpawnReason;
@@ -104,6 +103,8 @@ public class kingdomWorkerEntity extends PathfinderMob {
     private static final EntityDataAccessor<String> RETINUE_BASE_NAME =
         SynchedEntityData.defineId(kingdomWorkerEntity.class, EntityDataSerializers.STRING);
 
+    private static final EntityDataAccessor<String> KINGDOM_UUID =
+        SynchedEntityData.defineId(kingdomWorkerEntity.class, EntityDataSerializers.STRING);
 
     private static final EntityDataAccessor<Integer> SKIN_ID =
             SynchedEntityData.defineId(kingdomWorkerEntity.class, EntityDataSerializers.INT);
@@ -135,6 +136,7 @@ public class kingdomWorkerEntity extends PathfinderMob {
     private int noonTeleportCooldown = 0;
 
     private int panicTicks = 0;
+    private long lastTaxDay = -1;
 
     // -----------------------
     // Retinue horse mount state
@@ -156,12 +158,19 @@ public class kingdomWorkerEntity extends PathfinderMob {
                 .add(Attributes.ATTACK_DAMAGE, 3.0D);
     }
 
-    @Override
-    protected PathNavigation createNavigation(Level level) {
-        GroundPathNavigation nav = new GroundPathNavigation(this, level);
-        nav.setCanOpenDoors(true);
-        return nav;
+    private void dropStack(ServerLevel sl, ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return;
+        ItemEntity it = new ItemEntity(sl, this.getX(), this.getY() + 0.5, this.getZ(), stack);
+        it.setPickUpDelay(10);
+        sl.addFreshEntity(it);
     }
+
+
+    @Override
+    protected net.minecraft.world.entity.ai.navigation.PathNavigation createNavigation(Level level) {
+        return new name.kingdoms.entity.TrapdoorBlockingGroundNavigation(this, level);
+    }
+
 
     @Override
     protected void registerGoals() {
@@ -279,8 +288,23 @@ public class kingdomWorkerEntity extends PathfinderMob {
         builder.define(OWNER_UUID, "");
         builder.define(IS_RETINUE, false);
         builder.define(RETINUE_BASE_NAME, "");
+        builder.define(KINGDOM_UUID, "");
+
 
     }
+
+    @Nullable
+    public UUID getKingdomUUID() {
+        String s = this.entityData.get(KINGDOM_UUID);
+        if (s == null || s.isBlank()) return null;
+        try { return UUID.fromString(s); } catch (IllegalArgumentException e) { return null; }
+    }
+
+    public void setKingdomUUID(@Nullable UUID id) {
+        this.entityData.set(KINGDOM_UUID, id == null ? "" : id.toString());
+    }
+
+    
 
     public String getRetinueBaseName() { return this.entityData.get(RETINUE_BASE_NAME); }
 
@@ -304,47 +328,99 @@ public class kingdomWorkerEntity extends PathfinderMob {
         if (this.level().isClientSide()) return InteractionResult.SUCCESS;
         if (!(this.level() instanceof ServerLevel sl)) return InteractionResult.CONSUME;
         if (!(player instanceof ServerPlayer sp)) return InteractionResult.CONSUME;
+        if (hand != InteractionHand.MAIN_HAND) return InteractionResult.PASS;
 
-        // Only retinue responds
-        if (!this.isRetinue()) return InteractionResult.PASS;
+        // -------------------------
+        // RETINUE: existing behavior
+        // -------------------------
+        if (this.isRetinue()) {
+            UUID ownerId = this.getOwnerUUID();
+            if (ownerId == null || !ownerId.equals(sp.getUUID())) {
+                sp.sendSystemMessage(Component.literal("They ignore you."));
+                return InteractionResult.CONSUME;
+            }
 
-        // Only the owner can use them
-        UUID ownerId = this.getOwnerUUID();
-        if (ownerId == null || !ownerId.equals(sp.getUUID())) {
-            sp.sendSystemMessage(Component.literal("They ignore you."));
-            return InteractionResult.CONSUME;
+            var ks = kingdomState.get(sl.getServer());
+            var k = ks.getPlayerKingdom(sp.getUUID());
+            if (k == null) {
+                sp.sendSystemMessage(Component.literal("Not connected to a kingdom."));
+                return InteractionResult.CONSUME;
+            }
+
+            String job = this.getJobId();
+
+            if ("treasurer".equals(job)) {
+                kingdomsClientProxy.openTreasury(sp, k.terminalPos);
+                return InteractionResult.CONSUME;
+            }
+
+            if ("general".equals(job)) {
+                name.kingdoms.network.networkInit.sendWarOverviewTo(sp);
+                return InteractionResult.CONSUME;
+            }
+
+            if ("scribe".equals(job)) {
+                kingdomsClientProxy.openMail(sp, this.getId(), this.getUUID());
+                return InteractionResult.CONSUME;
+            }
+
+            return InteractionResult.PASS;
         }
 
-        // Must have a kingdom
+        
+
+        // -------------------------
+        // NON-RETINUE: TAX COLLECTION
+        // -------------------------
+        UUID workerKingdomId = this.getKingdomUUID();
+        if (workerKingdomId == null) {
+            var ks2 = kingdomState.get(sl.getServer());
+            var at = ks2.getKingdomAt(sl, this.blockPosition()); // uses claims grid
+            if (at != null) {
+                workerKingdomId = at.id;
+                this.setKingdomUUID(workerKingdomId); // heal the entity
+            } else {
+                sp.sendSystemMessage(Component.literal("This worker is not assigned to a kingdom."));
+                return InteractionResult.CONSUME;
+            }
+        }
+
         var ks = kingdomState.get(sl.getServer());
-        var k = ks.getPlayerKingdom(sp.getUUID());
-        if (k == null) {
-            sp.sendSystemMessage(Component.literal("Not connected to a kingdom."));
+        var kingdom = ks.getKingdom(workerKingdomId);
+        if (kingdom == null) {
+            sp.sendSystemMessage(Component.literal("This worker's kingdom no longer exists."));
             return InteractionResult.CONSUME;
         }
 
+        // Only the KING can collect (owner)
+        if (!sp.getUUID().equals(kingdom.owner)) {
+            return InteractionResult.PASS;
+        }
+
+        long today = sl.getDayTime() / 24000L;
+
+        // If we've already collected today, they can't pay again.
+        if (lastTaxDay == today) {
+            sp.sendSystemMessage(name.kingdoms.KingdomTaxTables.rollNoPayLine(this.getRandom()));
+            return InteractionResult.CONSUME;
+        }
+
+        // Otherwise, they can pay now.
         String job = this.getJobId();
+        ItemStack tax = name.kingdoms.KingdomTaxTables.rollTax(job, this.getRandom());
 
-        // Treasurer -> open treasury
-        if ("treasurer".equals(job)) {
-            kingdomsClientProxy.openTreasury(sp, k.terminalPos);
-            return InteractionResult.CONSUME;
-        }
+        boolean added = sp.getInventory().add(tax.copy());
+        if (!added) dropStack(sl, tax.copy());
 
-        if ("general".equals(job)) {
-            name.kingdoms.network.networkInit.sendWarOverviewTo(sp);
-            return InteractionResult.CONSUME;
-        }
+        lastTaxDay = today;
 
+        sp.sendSystemMessage(name.kingdoms.KingdomTaxTables.rollPayLine(this.getRandom(), tax));
+        return InteractionResult.CONSUME;
 
-        // Scribe -> open mail
-        if ("scribe".equals(job)) {
-            kingdomsClientProxy.openMail(sp, this.getId(), this.getUUID());
-            return InteractionResult.CONSUME;
-        }
-
-        return InteractionResult.PASS;
     }
+
+
+    
 
     // -----------------------
     // Job / skin
@@ -700,6 +776,10 @@ public class kingdomWorkerEntity extends PathfinderMob {
         if (homePos != null) out.putLong("HomePos", homePos.asLong());
         if (assignedBedPos != null) out.putLong("BedPos", assignedBedPos.asLong());
 
+        out.putLong("LastTaxDay", lastTaxDay);
+        String kid = this.entityData.get(KINGDOM_UUID);
+        if (kid != null && !kid.isBlank()) out.putString("KingdomUUID", kid);
+
 
         // retinue fields
         out.putBoolean("IsRetinue", isRetinue());
@@ -728,6 +808,10 @@ public class kingdomWorkerEntity extends PathfinderMob {
         this.entityData.set(IS_RETINUE, in.getBooleanOr("IsRetinue", false));
         this.entityData.set(OWNER_UUID, in.getString("OwnerUUID").orElse(""));
         this.entityData.set(RETINUE_BASE_NAME, in.getString("RetinueBaseName").orElse(""));
+
+        lastTaxDay = in.getLong("LastTaxDay").orElse((long) -1);
+            this.entityData.set(KINGDOM_UUID, in.getString("KingdomUUID").orElse(""));
+
 
 
         // horse

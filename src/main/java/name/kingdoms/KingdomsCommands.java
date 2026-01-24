@@ -20,7 +20,7 @@ import name.kingdoms.diplomacy.AiDiplomacyTicker;
 import name.kingdoms.diplomacy.Letter;
 import name.kingdoms.diplomacy.ResourceType;
 
-
+import name.kingdoms.blueprint.WorldgenToggleState;
 import name.kingdoms.diplomacy.AiDiplomacyEvent;
 import name.kingdoms.diplomacy.AiDiplomacyEventState;
 import name.kingdoms.diplomacy.AiEconomyMutator;
@@ -95,6 +95,21 @@ public final class KingdomsCommands {
                 .then(Commands.literal("listai")
                         .executes(ctx -> listAi(ctx.getSource()))
                 )
+                .then(Commands.literal("worldgen")
+                        .then(Commands.literal("status")
+                                .executes(ctx -> worldgenStatus(ctx.getSource()))
+                        )
+                        .then(Commands.literal("on")
+                                .executes(ctx -> worldgenSet(ctx.getSource(), true))
+                        )
+                        .then(Commands.literal("off")
+                                .executes(ctx -> worldgenSet(ctx.getSource(), false))
+                        )
+                        .then(Commands.literal("toggle")
+                                .executes(ctx -> worldgenToggle(ctx.getSource()))
+                        )
+                )
+
                 .then(Commands.literal("tpai")
                         .then(Commands.argument("name", StringArgumentType.greedyString())
                                 .executes(ctx -> tpAi(ctx.getSource(),
@@ -903,6 +918,42 @@ public final class KingdomsCommands {
         private static String fmt2(double v) {
         return String.format(Locale.US, "%.2f", v);
         }
+
+        private static int worldgenStatus(CommandSourceStack src) {
+                ServerLevel overworld = src.getServer().overworld();
+                if (overworld == null) {
+                src.sendFailure(Component.literal("No overworld loaded."));
+                return 0;
+                }
+                boolean en = WorldgenToggleState.get(overworld).isEnabled();
+                src.sendSuccess(() -> Component.literal("Kingdoms worldgen is " + (en ? "ON" : "OFF")), false);
+                return 1;
+        }
+
+    private static int worldgenSet(CommandSourceStack src, boolean enabled) {
+        ServerLevel overworld = src.getServer().overworld();
+        if (overworld == null) {
+            src.sendFailure(Component.literal("No overworld loaded."));
+            return 0;
+        }
+        WorldgenToggleState.get(overworld).setEnabled(enabled);
+        src.sendSuccess(() -> Component.literal("Kingdoms worldgen set to " + (enabled ? "ON" : "OFF")), true);
+        return 1;
+    }
+
+    private static int worldgenToggle(CommandSourceStack src) {
+        ServerLevel overworld = src.getServer().overworld();
+        if (overworld == null) {
+            src.sendFailure(Component.literal("No overworld loaded."));
+            return 0;
+        }
+        WorldgenToggleState st = WorldgenToggleState.get(overworld);
+        boolean now = !st.isEnabled();
+        st.setEnabled(now);
+        src.sendSuccess(() -> Component.literal("Kingdoms worldgen toggled to " + (now ? "ON" : "OFF")), true);
+        return 1;
+    }
+
 
         
 

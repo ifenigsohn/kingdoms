@@ -30,7 +30,6 @@ import name.kingdoms.payload.mailSendResultS2CPayload;
 import name.kingdoms.payload.openKingdomMenuPayload;
 import name.kingdoms.payload.opendiplomacyS2CPayload;
 import net.minecraft.network.chat.Component;
-import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;

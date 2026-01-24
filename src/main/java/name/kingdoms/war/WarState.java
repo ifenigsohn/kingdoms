@@ -28,6 +28,8 @@ public final class WarState extends SavedData {
 
     // battle zone per war pair (key is same min|max)
     private final Map<String, BattleZone> zones = new HashMap<>();
+    
+    private final Map<String, String> pairToRoot = new HashMap<>();
 
     // Simulated war state for AI vs AI (morale per side)
     private final Map<String, AiWarSim> aiSim = new HashMap<>();
@@ -74,7 +76,8 @@ public final class WarState extends SavedData {
 
         for (int z = zone.minZ(); z <= zone.maxZ(); z += step) {
             for (int x = zone.minX(); x <= zone.maxX(); x += step) {
-                if (ks.getKingdomAt(level, new BlockPos(x, 0, z)) != null) return true;
+                if (ks.getKingdomAtFast(level, x, z) != null) return true;
+
             }
         }
 
@@ -351,87 +354,117 @@ public final class WarState extends SavedData {
     // War lifecycle
     // -----------------------------
 
-   /** Preferred: declares war AND ensures a zone exists immediately. */
-    public void declareWar(MinecraftServer server, UUID a, UUID b) {
+   public void declareWar(MinecraftServer server, UUID a, UUID b) {
+        if (a == null || b == null) return;
+        if (a.equals(b)) return;
+
+        // Root belligerents are the initial declaration pair.
+        declareWarInternal(server, a, b, a, b);
+    }
+
+    /**
+     * Internal declaration that preserves a single ROOT war for the whole coalition.
+     * Every allied pair-link maps back to the same rootKey, and zones are stored once per rootKey.
+     */
+    private void declareWarInternal(MinecraftServer server, UUID a, UUID b, UUID rootA, UUID rootB) {
         if (a == null || b == null) return;
         if (a.equals(b)) return;
 
         var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
 
-        // -----------------------------
         // RULE 1: Allies cannot declare war on each other
-        // -----------------------------
         if (alliance.isAllied(a, b)) {
-            Kingdoms.LOGGER.warn(
-                    "[War] Blocked war declaration between allies: {} <-> {}", a, b
-            );
+            Kingdoms.LOGGER.warn("[War] Blocked war declaration between allies: {} <-> {}", a, b);
             return;
         }
 
-        // Normalize key (unordered pair)
-        String k = key(a, b);
+        // Normalize keys
+        String pairKey = key(a, b);
+        String rootKey = key(rootA, rootB);
 
-        // -----------------------------
-        // Prevent duplicate wars
-        // -----------------------------
-        if (!wars.add(k)) {
-            return; // already at war
+        // Prevent duplicate pair-links
+        if (!wars.add(pairKey)) {
+            // Still ensure the mapping exists (migration / weird edges)
+            pairToRoot.putIfAbsent(pairKey, rootKey);
+            return;
         }
 
-        Kingdoms.LOGGER.info("[War] declareWar a={} b={} key={}", a, b, k);
+        pairToRoot.put(pairKey, rootKey);
 
-        // -----------------------------
-        // Ensure battle zone exists
-        // -----------------------------
-        zones.computeIfAbsent(k, kk -> computeZone(server, a, b));
+        Kingdoms.LOGGER.info("[War] declareWar link a={} b={} pairKey={} rootKey={}", a, b, pairKey, rootKey);
+
+        // Ensure a single battle zone exists for the ROOT war only
+        zones.computeIfAbsent(rootKey, kk -> computeZone(server, rootA, rootB));
 
         setDirty();
 
-        // -----------------------------
-        // RULE 2: Allies auto-join wars
-        // -----------------------------
-        // A's allies fight B (unless allied with B)
+        // RULE 2: Allies auto-join wars (but they map back to the same root war)
         for (UUID allyA : alliance.alliesOf(a)) {
             if (!allyA.equals(b) && !alliance.isAllied(allyA, b)) {
-                declareWar(server, allyA, b);
+                declareWarInternal(server, allyA, b, rootA, rootB);
             }
         }
 
-        // B's allies fight A (unless allied with A)
         for (UUID allyB : alliance.alliesOf(b)) {
             if (!allyB.equals(a) && !alliance.isAllied(allyB, a)) {
-                declareWar(server, allyB, a);
+                declareWarInternal(server, allyB, a, rootA, rootB);
             }
         }
     }
+
 
 
 
     public void makePeace(UUID a, UUID b) {
-        String k = key(a, b);
-        wars.remove(k);
-        zones.remove(k);
-        aiSim.remove(k);
-        setDirty();
+        String pairKey = key(a, b);
+        String rootKey = pairToRoot.getOrDefault(pairKey, pairKey);
+
+        boolean changed = false;
+
+        Iterator<String> it = wars.iterator();
+        while (it.hasNext()) {
+            String wk = it.next();
+            String rk = pairToRoot.getOrDefault(wk, wk);
+            if (rk.equals(rootKey)) {
+                it.remove();
+                pairToRoot.remove(wk);
+                changed = true;
+
+                // clear AI sim for this pair-link
+                changed |= (aiSim.remove(wk) != null);
+            }
+        }
+
+        changed |= (zones.remove(rootKey) != null);
+
+        if (changed) setDirty();
     }
+
 
     // -----------------------------
     // Zone API
     // -----------------------------
 
     public Optional<BattleZone> getZone(UUID a, UUID b) {
-        return Optional.ofNullable(zones.get(key(a, b)));
+        String pairKey = key(a, b);
+        String rootKey = pairToRoot.getOrDefault(pairKey, pairKey);
+        return Optional.ofNullable(zones.get(rootKey));
     }
+
 
     public void setZone(UUID a, UUID b, BattleZone zone) {
-        zones.put(key(a, b), zone);
+        String rootKey = pairToRoot.getOrDefault(key(a, b), key(a, b));
+        zones.put(rootKey, zone);
         setDirty();
     }
 
+
     public void clearZone(UUID a, UUID b) {
-        zones.remove(key(a, b));
+        String rootKey = pairToRoot.getOrDefault(key(a, b), key(a, b));
+        zones.remove(rootKey);
         setDirty();
     }
+
 
     //AI TICKER
 
@@ -614,27 +647,43 @@ public final class WarState extends SavedData {
         var out = new ArrayList<ZoneView>();
 
         boolean changed = false;
+        HashSet<String> seenRoot = new HashSet<>();
 
-        for (String warKey : wars) {
-            int bar = warKey.indexOf('|');
+        for (String pairKey : wars) {
+            int bar = pairKey.indexOf('|');
             if (bar <= 0) continue;
 
-            String a = warKey.substring(0, bar);
-            String b = warKey.substring(bar + 1);
+            String aStr = pairKey.substring(0, bar);
+            String bStr = pairKey.substring(bar + 1);
 
-            if (!a.equals(me) && !b.equals(me)) continue;
+            // Only include wars where this kingdom is involved (directly; pair-links include allies already)
+            if (!aStr.equals(me) && !bStr.equals(me)) continue;
 
-            UUID enemyId;
+            String rootKey = pairToRoot.getOrDefault(pairKey, pairKey);
+            if (!seenRoot.add(rootKey)) continue; // only one entry per real war
+
+            int rbar = rootKey.indexOf('|');
+            if (rbar <= 0) continue;
+
+            UUID rootA, rootB;
             try {
-                enemyId = UUID.fromString(a.equals(me) ? b : a);
+                rootA = UUID.fromString(rootKey.substring(0, rbar));
+                rootB = UUID.fromString(rootKey.substring(rbar + 1));
             } catch (Exception ex) {
                 continue;
             }
 
-            BattleZone z = zones.get(warKey);
+            // enemyId for display: pick the root that isn't "us" if we are one,
+            // otherwise pick one root arbitrarily (UI can show both roots if desired).
+            UUID enemyId;
+            if (kingdomId.equals(rootA)) enemyId = rootB;
+            else if (kingdomId.equals(rootB)) enemyId = rootA;
+            else enemyId = rootA; // player is an ally, not a root; UI can treat enemyId as "the war target"
+
+            BattleZone z = zones.get(rootKey);
             if (z == null) {
-                z = computeZone(server, kingdomId, enemyId);
-                zones.put(warKey, z);
+                z = computeZone(server, rootA, rootB);
+                zones.put(rootKey, z);
                 changed = true;
             }
 
@@ -644,6 +693,7 @@ public final class WarState extends SavedData {
         if (changed) setDirty();
         return out;
     }
+
 
     // -----------------------------
     // Zone generation
@@ -848,19 +898,25 @@ public final class WarState extends SavedData {
     private static final Codec<Map<String, AiWarSim>> AI_SIM_MAP_CODEC =
             Codec.unboundedMap(Codec.STRING, AI_SIM_CODEC);
 
+    private static final Codec<Map<String, String>> PAIR_TO_ROOT_CODEC =
+        Codec.unboundedMap(Codec.STRING, Codec.STRING);
+
 
     private static final Codec<WarState> CODEC =
         RecordCodecBuilder.create(inst -> inst.group(
                 WARS_CODEC.optionalFieldOf("wars", Set.of()).forGetter(s -> s.wars),
                 ZONES_CODEC.optionalFieldOf("zones", Map.of()).forGetter(s -> s.zones),
+                PAIR_TO_ROOT_CODEC.optionalFieldOf("pairToRoot", Map.of()).forGetter(s -> s.pairToRoot),
                 AI_SIM_MAP_CODEC.optionalFieldOf("aiSim", Map.of()).forGetter(s -> s.aiSim)
-        ).apply(inst, (loadedWars, loadedZones, loadedAiSim) -> {
+        ).apply(inst, (loadedWars, loadedZones, loadedPairToRoot, loadedAiSim) -> {
             WarState s = new WarState();
             s.wars.addAll(loadedWars);
             s.zones.putAll(loadedZones);
+            s.pairToRoot.putAll(loadedPairToRoot);
             s.aiSim.putAll(loadedAiSim);
             return s;
         }));
+
 
 
     private static final SavedDataType<WarState> TYPE =
@@ -882,6 +938,19 @@ public final class WarState extends SavedData {
         String sb = b.toString();
         return (sa.compareTo(sb) <= 0) ? (sa + "|" + sb) : (sb + "|" + sa);
     }
+
+    /** Returns the canonical ROOT war key for the pair (a,b). Defaults to the pair key itself. */
+    public String getRootKey(UUID a, UUID b) {
+        String k = key(a, b);
+        return pairToRoot.getOrDefault(k, k);
+    }
+
+    /** Returns the canonical ROOT war key for an already-stored pair-link key. */
+    public String getRootKeyFromPairKey(String pairKey) {
+        if (pairKey == null) return "";
+        return pairToRoot.getOrDefault(pairKey, pairKey);
+    }
+
 
 
        public void makePeaceWithAllies(MinecraftServer server, UUID a, UUID b) {

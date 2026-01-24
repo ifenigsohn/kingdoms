@@ -207,7 +207,7 @@ public class jobBlockEntity extends BlockEntity {
             be.setCountedActive(serverLevel, ks, kingdom, false);
 
             // keep worker around idle
-            be.ensureWorker(serverLevel, pos, false);
+            be.ensureWorker(serverLevel, pos, kingdom, false);
 
             // angry villager on worker while disabled
             if ((serverLevel.getGameTime() % 40L) == 0L) {
@@ -266,7 +266,8 @@ public class jobBlockEntity extends BlockEntity {
         }
 
         // Now that requirements are met, ensure worker exists
-        be.ensureWorker(serverLevel, pos, true);
+        be.ensureWorker(serverLevel, pos, kingdom, true);
+
 
         boolean canWorkNow = be.job.canWork(serverLevel, kingdom);
 
@@ -369,7 +370,8 @@ public class jobBlockEntity extends BlockEntity {
        WORKER MANAGEMENT
      ----------------------------- */
 
-    private void ensureWorker(ServerLevel level, BlockPos jobPos, boolean enabled) {
+    private void ensureWorker(ServerLevel level, BlockPos jobPos, kingdomState.Kingdom kingdom, boolean enabled) {
+
         kingdomWorkerEntity worker = getWorkerIfAlive(level);
 
         if (worker == null) {
@@ -397,6 +399,7 @@ public class jobBlockEntity extends BlockEntity {
             worker.setHomePos(jobPos);
             worker.setJobId(job.getId());
             worker.setSkinId(level.random.nextInt(SKIN_COUNT));
+            worker.setKingdomUUID(kingdom.id);
 
             String base = randomName(level, level.random);
             worker.setCustomName(makeWorkerName(base, job.getId(), enabled));
@@ -410,6 +413,7 @@ public class jobBlockEntity extends BlockEntity {
         } else {
             worker.setHomePos(jobPos);
             worker.setJobId(job.getId());
+            worker.setKingdomUUID(kingdom.id);
 
             if (worker.hasCustomName()) {
                 String existing = worker.getCustomName().getString();

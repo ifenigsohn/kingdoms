@@ -1,7 +1,6 @@
 package name.kingdoms.diplomacy;
 
 import name.kingdoms.aiKingdomState;
-import name.kingdoms.aiKingdomState.AiKingdom;
 import net.minecraft.util.RandomSource;
 
 import java.util.EnumMap;

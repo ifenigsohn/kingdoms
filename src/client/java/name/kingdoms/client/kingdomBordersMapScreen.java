@@ -19,11 +19,9 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponentType;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.item.component.ResolvableProfile;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -80,6 +78,8 @@ public class kingdomBordersMapScreen extends Screen {
     // Draw coarseness on screen
     private int drawStepPx = 5;
 
+    private static final int FOG_DRAW = 0xFF0B0F14;
+
     // -------------------------
     // Closest-to-farthest scan state (ring walker)
     // -------------------------
@@ -110,19 +110,51 @@ public class kingdomBordersMapScreen extends Screen {
         ClientPlayNetworking.send(new warZonesRequestPayload());
     }
 
+    private boolean resolveSurfaceBlock(ClientLevel level, int wx, int wz, int surfaceY) {
+        int y = surfaceY - 1;
+        int minY = level.getMinY();
+
+        // Start at surface block
+        tmpPos.set(wx, y, wz);
+        BlockState s = level.getBlockState(tmpPos);
+
+        // Walk down a bit if we hit air/none
+        for (int step = 0; step < 12; step++) {
+            if (y <= minY) return false;
+
+            MapColor mc = s.getMapColor(level, tmpPos);
+            boolean bad =
+                    s.isAir()
+                    || s.is(Blocks.CAVE_AIR)
+                    || s.is(Blocks.VOID_AIR)
+                    || mc == null
+                    || mc == MapColor.NONE
+                    || mc.col == 0;
+
+            if (!bad) return true;
+
+            y--;
+            tmpPos.set(wx, y, wz);
+            s = level.getBlockState(tmpPos);
+        }
+
+        return false;
+    }
+
+
     // ------------------------------------
     // World key + disk IO
     // ------------------------------------
     private static String computeWorldKey(Minecraft mc, ClientLevel level) {
         String dim = level.dimension().location().toString();
 
-        // Multiplayer: separate by server IP
-        if (mc.getCurrentServer() != null) {
+        // Multiplayer: separate by server IP (only once it exists)
+        if (mc.getCurrentServer() != null && mc.getCurrentServer().ip != null && !mc.getCurrentServer().ip.isBlank()) {
             String ip = mc.getCurrentServer().ip;
             return ("mp_" + ip + "_" + dim).toLowerCase(Locale.ROOT);
         }
 
-        // Singleplayer: separate by save folder so new worlds don't reuse the cache
+        // Singleplayer: separate by save folder (only once integrated server exists)
         try {
             MinecraftServer srv = mc.getSingleplayerServer();
             if (srv != null) {
@@ -132,9 +164,10 @@ public class kingdomBordersMapScreen extends Screen {
             }
         } catch (Throwable ignored) {}
 
-        // Fallback (should be rare)
-        return ("sp_unknown_" + dim).toLowerCase(Locale.ROOT);
+        // IMPORTANT: don't fallback to a shared key
+        return null;
     }
+
 
     private static String sanitizeFileName(String s) {
         return s.replaceAll("[^a-z0-9._-]+", "_");
@@ -238,10 +271,35 @@ public class kingdomBordersMapScreen extends Screen {
 
         String keyNow = computeWorldKey(mc, level);
 
-        // Switch cache when changing worlds/servers/dimensions
+        // If the world isn't identifiable yet, do NOT reuse disk cache.
+        if (keyNow == null) {
+            // Keep a fresh temporary cache for this session
+            if (terrainCache == null) {
+                terrainCache = new NativeImage(CACHE_W, CACHE_H, false);
+                fillFog();
+                cacheInit = false;
+                cacheDirty = false;
+                dirtyWrites = 0;
+
+                // reset reveal scan so it fills near player first
+                scanR = 0;
+                scanEdge = 0;
+                scanT = 0;
+            }
+
+            // Still set a center so drawing isn't weird
+            if (!cacheInit) {
+                cacheCenterX = px;
+                cacheCenterZ = pz;
+                cacheInit = true;
+            }
+
+            return;
+        }
+
+        // Normal per-world behavior once key exists
         if (worldKey == null || !worldKey.equals(keyNow)) {
             saveCache(mc);
-
             worldKey = keyNow;
             loadCacheIfExists(mc, worldKey);
         }
@@ -252,15 +310,14 @@ public class kingdomBordersMapScreen extends Screen {
             cacheInit = false;
         }
 
-        // Initialize center once per world cache
         if (!cacheInit) {
             cacheCenterX = px;
             cacheCenterZ = pz;
             cacheInit = true;
-
             cacheDirty = true;
         }
     }
+
 
     @Override
     public void removed() {
@@ -494,11 +551,16 @@ public class kingdomBordersMapScreen extends Screen {
             int y = fastSurfaceY(level, wx, wz);
             if (y <= level.getMinY()) continue;
 
-            tmpPos.set(wx, y - 1, wz);
+            // Resolve a real “top block” (avoid AIR / MapColor.NONE -> black speckles)
+            if (!resolveSurfaceBlock(level, wx, wz, y)) continue;
+
             BlockState s = level.getBlockState(tmpPos);
+
+            // Note: we pass y (heightmap surface) for shading, but color is based on tmpPos/s
             int color = colorForMap(level, tmpPos, s, y);
 
             terrainCache.setPixel(tx, tz, color);
+
 
             cacheDirty = true;
             dirtyWrites++;
@@ -599,15 +661,42 @@ public class kingdomBordersMapScreen extends Screen {
                 int tz = worldToCacheZ(worldZ);
                 if (tx < 0 || tx >= CACHE_W || tz < 0 || tz >= CACHE_H) continue;
 
-                int color = terrainCache.getPixel(tx, tz);
-                if (color == FOG) continue;
+                int color = sampleCacheWithFallback(tx, tz);
 
                 int x2 = Math.min(right, sx + drawStepPx);
                 int y2 = Math.min(bottom, sy + drawStepPx);
+
+                // draw fog instead of skipping
+                if (color == FOG) {
+                    g.fill(sx, sy, x2, y2, FOG_DRAW);
+                    continue;
+                }
+
                 g.fill(sx, sy, x2, y2, color);
+
             }
         }
     }
+
+    private int sampleCacheWithFallback(int tx, int tz) {
+        int c = terrainCache.getPixel(tx, tz);
+        if (c != FOG) return c;
+
+        // Look for nearest explored pixel in a small radius
+        for (int r = 1; r <= 2; r++) {
+            for (int dz = -r; dz <= r; dz++) {
+                for (int dx = -r; dx <= r; dx++) {
+                    int xx = tx + dx;
+                    int zz = tz + dz;
+                    if (xx < 0 || xx >= CACHE_W || zz < 0 || zz >= CACHE_H) continue;
+                    int cc = terrainCache.getPixel(xx, zz);
+                    if (cc != FOG) return cc;
+                }
+            }
+        }
+        return FOG; // still unknown
+    }
+
 
     // ------------------------------------
     // Better terrain coloring (biome tints + map color + slight height shading)
@@ -623,8 +712,12 @@ public class kingdomBordersMapScreen extends Screen {
         } else {
             // 2) Vanilla map-color fallback (covers loads of blocks)
             MapColor mc = s.getMapColor(level, pos);
-            if (mc != null) argb = 0xFF000000 | (mc.col & 0xFFFFFF);
-            else argb = colorForCheap(s);
+            if (mc != null && mc != MapColor.NONE && mc.col != 0) {
+                argb = 0xFF000000 | (mc.col & 0xFFFFFF);
+            } else {
+                argb = colorForCheap(s);
+            }
+
         }
 
         // Subtle height shading so hills read better

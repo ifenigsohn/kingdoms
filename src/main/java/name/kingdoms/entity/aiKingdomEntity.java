@@ -29,8 +29,6 @@ import net.minecraft.world.entity.SpawnGroupData;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.goal.*;
-import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
-import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ServerLevelAccessor;
@@ -226,11 +224,10 @@ public class aiKingdomEntity extends PathfinderMob {
 
     // --- Navigation ---
     @Override
-    protected PathNavigation createNavigation(Level level) {
-        GroundPathNavigation nav = new GroundPathNavigation(this, level);
-        nav.setCanOpenDoors(true);
-        return nav;
+    protected net.minecraft.world.entity.ai.navigation.PathNavigation createNavigation(Level level) {
+        return new name.kingdoms.entity.TrapdoorBlockingGroundNavigation(this, level);
     }
+
 
     // --- AI goals ---
     @Override
@@ -271,6 +268,7 @@ public class aiKingdomEntity extends PathfinderMob {
     public void setKingName(String name) {
         this.entityData.set(KING_NAME, (name == null || name.isBlank()) ? "Aelfric" : name);
         this.setCustomName(Component.literal("King " + getKingName()));
+        this.setCustomNameVisible(true); 
     }
 
     public int getSkinId() { return this.entityData.get(SKIN_ID); }
@@ -324,6 +322,7 @@ public class aiKingdomEntity extends PathfinderMob {
 
         if (this.homePos == null) this.homePos = this.blockPosition();
         this.setCustomName(Component.literal("King " + getKingName()));
+        this.setCustomNameVisible(true);
     }
 
     @Override
@@ -384,6 +383,7 @@ public class aiKingdomEntity extends PathfinderMob {
                 this.entityData.set(KING_NAME, namePool.randomMedieval(sl.getServer(), sl.random));
             }
             this.setCustomName(Component.literal("King " + getKingName()));
+            this.setCustomNameVisible(true);
         }
 
         return data;
@@ -554,7 +554,8 @@ public class aiKingdomEntity extends PathfinderMob {
 
         // restore nametag
         this.setCustomName(Component.literal("King " + getKingName()));
-
+        this.setCustomNameVisible(true);
+        
         // greetedEver
         greetedEver.clear();
         int gcount = in.getInt("GreetedCount").orElse(0);
@@ -576,6 +577,8 @@ public class aiKingdomEntity extends PathfinderMob {
             catch (IllegalArgumentException ignored) {}
         }
     }
+
+    
 
     @Nullable
     public UUID getKingdomUUID() {

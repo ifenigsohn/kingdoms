@@ -4,6 +4,7 @@ import name.kingdoms.entity.ai.aiKingdomNPCEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.RandomSource;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.level.Level;
@@ -32,15 +33,16 @@ public class AIkingdomNPCSpawnerBlock extends Block implements IKingdomSpawnerBl
         this.checkTicks = Math.max(1, checkTicks);
     }
 
-    @Override
+   @Override
     public void onPlace(BlockState state, Level level, BlockPos pos, BlockState oldState, boolean movedByPiston) {
         super.onPlace(state, level, pos, oldState, movedByPiston);
         if (!(level instanceof ServerLevel sl)) return;
         if (oldState.is(state.getBlock())) return;
 
-        ensureOne(sl, pos);
-        sl.scheduleTick(pos, this, checkTicks);
+        // Don't spawn immediately during structure paste; do it next tick
+        sl.scheduleTick(pos, this, 1);
     }
+
 
     @Override
     public void tick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
@@ -52,18 +54,27 @@ public class AIkingdomNPCSpawnerBlock extends Block implements IKingdomSpawnerBl
     }
 
     private void ensureOne(ServerLevel sl, BlockPos pos) {
-        // ✅ COUNT the correct class: aiKingdomNPCEntity
-        int count = sl.getEntitiesOfClass(
+        var list = sl.getEntitiesOfClass(
                 aiKingdomNPCEntity.class,
                 new AABB(pos).inflate(checkRadius),
                 e -> e.hasSpawnerPos() && e.getSpawnerPos().equals(pos)
-        ).size();
+        );
 
-        // We only ever want ONE
-        if (count >= 1) return;
+        // If we somehow got duplicates, keep exactly one.
+        if (list.size() > 1) {
+            // Deterministic: keep the one with the smallest entity id (oldest-ish)
+            list.sort(java.util.Comparator.comparingInt(Entity::getId));
+            for (int i = 1; i < list.size(); i++) {
+                list.get(i).discard();
+            }
+            return; // after cleanup, do NOT spawn
+        }
+
+        if (list.size() == 1) return;
 
         spawnOne(sl, pos);
     }
+
 
     private void spawnOne(ServerLevel sl, BlockPos pos) {
         aiKingdomNPCEntity npc = Kingdoms.AI_KINGDOM_NPC_ENTITY_TYPE.create(sl, EntitySpawnReason.SPAWN_ITEM_USE);

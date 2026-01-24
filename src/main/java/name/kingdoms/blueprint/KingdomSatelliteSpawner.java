@@ -56,7 +56,8 @@ public final class KingdomSatelliteSpawner {
             KingdomSize size,
             List<String> blueprintIds,
             RandomSource rng,
-            int delayTicks
+            int delayTicks,
+            ClampRect clamp
     ) {}
 
 
@@ -106,12 +107,36 @@ public final class KingdomSatelliteSpawner {
             KingdomSize size,
             List<String> blueprintIds,
             RandomSource rng,
-            int delayTicks
+            int delayTicks,
+            int borderMinX, int borderMaxX,
+            int borderMinZ, int borderMaxZ
     ) {
-
         KingdomGenGate.beginOne(regionKey);
-        PLAN_QUEUE.addLast(new PlanJob(level, castleOrigin, castleBp, modId, regionKey, size, blueprintIds, rng, delayTicks));
+        PLAN_QUEUE.addLast(new PlanJob(
+                level, castleOrigin, castleBp, modId, regionKey, size, blueprintIds, rng, delayTicks,
+                new ClampRect(borderMinX, borderMaxX, borderMinZ, borderMaxZ)
+        ));
     }
+
+    private record ClampRect(int minX, int maxX, int minZ, int maxZ) {
+        boolean containsXZ(int x, int z) {
+            return x >= minX && x <= maxX && z >= minZ && z <= maxZ;
+        }
+
+        boolean containsFootprint(int ox, int oz, int sx, int sz) {
+            int x2 = ox + sx - 1;
+            int z2 = oz + sz - 1;
+            return ox >= minX && x2 <= maxX && oz >= minZ && z2 <= maxZ;
+        }
+
+        int maxChebyshevRadiusFrom(BlockPos p) {
+            int dx = Math.min(p.getX() - minX, maxX - p.getX());
+            int dz = Math.min(p.getZ() - minZ, maxZ - p.getZ());
+            return Math.max(0, Math.min(dx, dz));
+        }
+
+    }
+
 
     /**
      * MUST be called once during mod init (similar to RoadBuilder.init()).
@@ -139,7 +164,8 @@ public final class KingdomSatelliteSpawner {
                                 pj.size(),
                                 pj.blueprintIds(),
                                 pj.rng(),
-                                pj.delayTicks() - 1
+                                pj.delayTicks() - 1,
+                                pj.clamp()
                         ));
                     } else {
                         // delay complete: run planning now
@@ -153,7 +179,8 @@ public final class KingdomSatelliteSpawner {
                                     pj.regionKey(),
                                     pj.size(),
                                     pj.blueprintIds(),
-                                    pj.rng()
+                                    pj.rng(),
+                                    pj.clamp()
                             );
                         } catch (Exception ex) {
                             LOGGER.warn("[Kingdoms] Satellite planning failed for region={} origin={}",
@@ -255,7 +282,8 @@ public final class KingdomSatelliteSpawner {
             long regionKey,
             KingdomSize size,
             List<String> blueprintIds,
-            RandomSource rng
+            RandomSource rng,
+            ClampRect clamp
     ) {
 
         int target = pickBuildingCount(size, rng);
@@ -281,6 +309,16 @@ public final class KingdomSatelliteSpawner {
         }
         // ---------------------------------------------------------------------
 
+        int maxR = maxRadiusForSize(size);
+
+        // Further clamp radius so we never even sample outside the border box
+        if (clamp != null) {
+            // How far can we go from castle while still being inside borders?
+            // subtract a little margin so centers don't hug the edge too hard
+            int borderR = Math.max(1, clamp.maxChebyshevRadiusFrom(castleOrigin) - 8);
+            maxR = Math.min(maxR, borderR);
+        }
+
         int fx = footprintX(castleBp);
         int fz = footprintZ(castleBp);
 
@@ -295,7 +333,7 @@ public final class KingdomSatelliteSpawner {
         for (Pass pass : Pass.values()) {
             if (planned >= target) break;
 
-            ArrayList<Candidate> candidates = generateCandidates(level, castleOrigin, size, rng, pass, CANDIDATES_PER_PASS);
+            ArrayList<Candidate> candidates = generateCandidates(level, castleOrigin, maxR, rng, pass, CANDIDATES_PER_PASS, clamp);
             candidates.sort(Comparator.comparingInt(c -> c.score));
 
             for (Candidate c : candidates) {
@@ -325,6 +363,11 @@ public final class KingdomSatelliteSpawner {
                     int ox = c.pos.getX() - (sx / 2);
                     int oz = c.pos.getZ() - (sz / 2);
 
+                    // HARD CLAMP: footprint must fit inside kingdom border
+                    if (clamp != null && !clamp.containsFootprint(ox, oz, sx, sz)) {
+                        continue;
+                    }
+
                     int y = surfaceY(level, ox, oz);
                     BlockPos origin = new BlockPos(ox, y, oz);
 
@@ -336,7 +379,7 @@ public final class KingdomSatelliteSpawner {
                     KingdomGenGate.beginOne(regionKey);
                     SAT_QUEUE.addLast(new SatJob(level, modId, regionKey, origin, bpId, buildingKey));
                    
-                    chosenCenters.add(origin);
+                    chosenCenters.add(c.pos);
                     planned++;
 
                 } catch (Exception ex) {
@@ -415,10 +458,11 @@ public final class KingdomSatelliteSpawner {
     private static ArrayList<Candidate> generateCandidates(
             ServerLevel level,
             BlockPos castle,
-            KingdomSize size,
+            int maxR,
             RandomSource rng,
             Pass pass,
-            int count
+            int count,
+            ClampRect clamp
     ) {
         ArrayList<Candidate> out = new ArrayList<>(count);
         int sea = level.getSeaLevel();
@@ -426,12 +470,16 @@ public final class KingdomSatelliteSpawner {
         for (int i = 0; i < count; i++) {
             double t = rng.nextDouble();
             double minR = Math.max(20, MIN_DIST_FROM_CASTLE);
-            int maxR = Math.max(maxRadiusForSize(size), (int)minR + 1);
-            double r = minR + t * (maxR - minR);
+            int maxRLocal = Math.max(maxR, (int)minR + 1);
+            double r = minR + t * (maxRLocal - minR);
             double ang = rng.nextDouble() * Math.PI * 2.0;
 
             int x = castle.getX() + (int)Math.round(Math.cos(ang) * r);
             int z = castle.getZ() + (int)Math.round(Math.sin(ang) * r);
+
+            if (clamp != null && !clamp.containsXZ(x, z)) {
+                continue; // center must be inside border
+            }
 
             int y = surfaceY(level, x, z);
 

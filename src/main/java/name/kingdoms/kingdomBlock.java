@@ -1,7 +1,5 @@
 package name.kingdoms;
 
-import name.kingdoms.network.networkInit;
-import name.kingdoms.payload.kingdomInfoSyncPayload;
 import name.kingdoms.payload.openKingdomMenuPayload;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.BlockPos;

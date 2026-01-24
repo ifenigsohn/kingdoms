@@ -18,7 +18,6 @@ import name.kingdoms.payload.OpenTreasuryS2CPayload;
 import name.kingdoms.payload.aiTradeInfoS2CPayload;
 import name.kingdoms.payload.aiTradeQueryC2SPayload;
 import name.kingdoms.payload.bordersRequestPayload;
-import name.kingdoms.payload.bordersSyncPayload;
 import name.kingdoms.payload.createKingdomResultPayload;
 import name.kingdoms.payload.diplomacyFreezeC2SPayload;
 import name.kingdoms.payload.disbandKingdomPayload;
@@ -35,6 +34,7 @@ import name.kingdoms.payload.openKingdomMenuPayload;
 import name.kingdoms.payload.requestBorderWandPayload;
 import name.kingdoms.payload.royalGuardToggleC2SPayload;
 import name.kingdoms.payload.setHeraldryPayload;
+import name.kingdoms.payload.soldierSkinSelectC2SPayload;
 import name.kingdoms.payload.toggleJobEnabledPayload;
 import name.kingdoms.payload.treasuryBuyJobPayload;
 import name.kingdoms.payload.treasuryOpenPayload;
@@ -104,6 +104,7 @@ public final class networkInit {
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.mailPolicyRequestC2SPayload.TYPE,name.kingdoms.payload.mailPolicyRequestC2SPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(royalGuardToggleC2SPayload.TYPE, royalGuardToggleC2SPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(setHeraldryPayload.TYPE, setHeraldryPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(soldierSkinSelectC2SPayload.TYPE,soldierSkinSelectC2SPayload.STREAM_CODEC);
 
 
         // ----- S2C -----
@@ -1591,7 +1592,7 @@ public final class networkInit {
                 var pk = ks.getPlayerKingdom(player.getUUID());
                 if (pk == null) {
                     ServerPlayNetworking.send(player, new name.kingdoms.payload.warOverviewSyncS2CPayload(
-                            0, 0, 0.0, java.util.List.of(), java.util.List.of()
+                            0, 0, 0.0,0, java.util.List.of(), java.util.List.of()
                     ));
                     return;
                 }
@@ -1605,6 +1606,7 @@ public final class networkInit {
                 int yourMax = Math.max(0, garrisons * 50);
                 int yourAlive = yourMax; // until player losses tracked
                 double potions = pk.potions;
+                int soldierSkinId = pk.soldierSkinId;
 
                 java.util.ArrayList<name.kingdoms.payload.warOverviewSyncS2CPayload.Entry> allies = new java.util.ArrayList<>();
                 for (var allyId : alliance.alliesOf(pk.id)) {
@@ -1617,10 +1619,31 @@ public final class networkInit {
                 }
 
                 ServerPlayNetworking.send(player, new name.kingdoms.payload.warOverviewSyncS2CPayload(
-                        yourAlive, yourMax, potions, allies, enemies
+                        yourAlive, yourMax, potions, soldierSkinId, allies, enemies
                 ));
             });
         });
+
+        ServerPlayNetworking.registerGlobalReceiver(soldierSkinSelectC2SPayload.TYPE, (payload, ctx) -> {
+            ctx.server().execute(() -> {
+                var server = ctx.server();
+                var player = ctx.player();
+
+                var ks = name.kingdoms.kingdomState.get(server);
+                var pk = ks.getPlayerKingdom(player.getUUID());
+                if (pk == null) return;
+
+                int clamped = net.minecraft.util.Mth.clamp(
+                        payload.soldierSkinId(),
+                        0,
+                        name.kingdoms.entity.SoldierSkins.MAX_SKIN_ID
+                );
+
+                pk.soldierSkinId = clamped;
+                ks.markDirty();
+            });
+        });
+
 
 
     }
@@ -1868,7 +1891,8 @@ public final class networkInit {
         int yourMax = Math.max(0, garrisons * 50);
         int yourAlive = yourMax;
 
-        double potions = pk.potions; // adjust if different
+        double potions = pk.potions;
+        int soldierSkinId = pk.soldierSkinId;
 
         var allies = new java.util.ArrayList<name.kingdoms.payload.warOverviewSyncS2CPayload.Entry>();
         for (java.util.UUID allyId : alliance.alliesOf(pk.id)) {
@@ -1882,7 +1906,7 @@ public final class networkInit {
 
         ServerPlayNetworking.send(player, new name.kingdoms.payload.warOverviewSyncS2CPayload(
                 yourAlive, yourMax,
-                potions,
+                potions, soldierSkinId,
                 allies,
                 enemies
         ));

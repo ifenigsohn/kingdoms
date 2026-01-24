@@ -4,7 +4,7 @@ import name.kingdoms.aiKingdomState;
 import name.kingdoms.entity.SoldierEntity;
 import name.kingdoms.entity.modEntities;
 import name.kingdoms.kingdomState;
-
+import name.kingdoms.entity.SoldierSkins;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.BlockPos;
@@ -1108,38 +1108,38 @@ public final class WarBattleManager {
             UUID playerKingdomId = findPlayersKingdomId(server, player);
             if (playerKingdomId == null) continue;
 
-            /* TESTING TESTING TESTING REMOVAL CODE 
-            var ks = kingdomState.get(server);
-            var pk = ks.getKingdom(playerKingdomId);
-            if (pk != null && pk.owner != null && !pk.owner.equals(player.getUUID())) {
-                continue; // only ruler can trigger the battle start
-            } */
+            // Don’t allow a player to start multiple battles at once
+            if (COMMANDER_INDEX.containsKey(player.getUUID())) continue;
 
             var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
 
-            for (String key : ws.wars()) {
-                int bar = key.indexOf('|');
+            // Many pair-links can point to the same ROOT war (coalition). Only consider each root once.
+            HashSet<String> seenRootKeys = new HashSet<>();
+
+            for (String pairKey : ws.wars()) {
+                String rootKey = ws.getRootKeyFromPairKey(pairKey);
+                if (!seenRootKeys.add(rootKey)) continue;
+
+                int bar = rootKey.indexOf('|');
                 if (bar < 0) continue;
 
-                UUID a, b;
+                UUID rootA, rootB;
                 try {
-                    a = UUID.fromString(key.substring(0, bar));
-                    b = UUID.fromString(key.substring(bar + 1));
+                    rootA = UUID.fromString(rootKey.substring(0, bar));
+                    rootB = UUID.fromString(rootKey.substring(bar + 1));
                 } catch (Exception ignored) {
                     continue;
                 }
 
-                // Can this player's kingdom participate on either side?
-                boolean onA = playerKingdomId.equals(a) || alliance.isAllied(playerKingdomId, a);
-                boolean onB = playerKingdomId.equals(b) || alliance.isAllied(playerKingdomId, b);
+                // Player can participate if they are a root OR allied to a root.
+                boolean onA = playerKingdomId.equals(rootA) || alliance.isAllied(playerKingdomId, rootA);
+                boolean onB = playerKingdomId.equals(rootB) || alliance.isAllied(playerKingdomId, rootB);
 
                 if (!onA && !onB) continue;
+                if (onA && onB) continue; // shouldn’t happen often; prevents ambiguity
 
-                // If allied to both, skip (ambiguous / weird)
-                if (onA && onB) continue;
-
-                UUID friendRoot = onA ? a : b;
-                UUID enemyRoot  = onA ? b : a;
+                UUID friendRoot = onA ? rootA : rootB;
+                UUID enemyRoot  = onA ? rootB : rootA;
 
                 var zoneOpt = ws.getZone(friendRoot, enemyRoot);
                 if (zoneOpt.isEmpty()) continue;
@@ -1151,9 +1151,9 @@ public final class WarBattleManager {
 
                 startBattle(server, player, playerKingdomId, friendRoot, enemyRoot, zone);
             }
-
         }
     }
+
 
     /** Parses "u1|u2" and returns the OTHER uuid if self matches either side, else null. */
     private static UUID otherFromWarKey(String key, UUID self) {
@@ -1435,7 +1435,7 @@ public final class WarBattleManager {
                     UnitRole.FOOTMAN,
                     true,   // bannerman for visibility
                     true,   // captain
-                    0,
+                    getSoldierSkinForKingdom(level, kid),
                     Component.literal(nm),
                     capHeraldry,
                     enemyHeraldry
@@ -1483,7 +1483,7 @@ public final class WarBattleManager {
                     UnitRole.FOOTMAN,
                     true,
                     true,
-                    0,
+                    getSoldierSkinForKingdom(level, kid),
                     Component.literal(nm),
                     friendHeraldry,
                     capHeraldry
@@ -1663,7 +1663,7 @@ public final class WarBattleManager {
                     ps.role(),
                     bannerman,
                     false,
-                    0,
+                    getSoldierSkinForKingdom(battle.level, sourceKingdom),
                     Component.literal(ps.side() == Side.ENEMY ? "Enemy Soldier" : "Friendly Soldier"),
                     // give unit heraldry on its own side
                     (ps.side() == Side.FRIEND) ? srcHeraldry : friendHeraldry,
@@ -2068,6 +2068,33 @@ public final class WarBattleManager {
         return ItemStack.EMPTY;
     }
 
+    private static int getSoldierSkinForKingdom(ServerLevel level, UUID kingdomId) {
+        if (kingdomId == null) return 0;
+
+        var srv = level.getServer();
+        if (srv == null) return 0;
+
+        // Player or AI kingdom stored in kingdomState (players definitely; AI sometimes if you mirror it there)
+        var ks = kingdomState.get(srv);
+        var k = ks.getKingdom(kingdomId);
+        if (k != null) {
+            return SoldierSkins.clamp(k.soldierSkinId);
+        }
+
+        // AI fallback: from aiKingdomState
+        var ai = aiKingdomState.get(srv).getById(kingdomId);
+        if (ai != null) {
+            try {
+                return SoldierSkins.clamp(ai.soldierSkinId);
+            } catch (Throwable ignored) {
+                return 0;
+            }
+        }
+
+        return 0;
+    }
+
+
     private static void spawnFormation(ServerLevel level, BattleInstance battle, Side side, UnitRole role,
                                    BlockPos anchorPos, Vec3 forward, double forwardOffset, int count,
                                    ItemStack friendHeraldry, ItemStack enemyHeraldry) {
@@ -2094,7 +2121,7 @@ public final class WarBattleManager {
             BlockPos bp = new BlockPos(Mth.floor(pos.x), anchorPos.getY(), Mth.floor(pos.z));
 
             boolean bannerman = (level.random.nextInt(10) == 0);
-
+            
             UUID sourceKingdom =
                     (side == Side.FRIEND)
                             ? pickContributor(level, battle.friendContribKingdoms)
@@ -2104,6 +2131,7 @@ public final class WarBattleManager {
                     (side == Side.FRIEND) ? battle.friendRootKingdomId : battle.enemyRootKingdomId;
 
             ItemStack srcHeraldry = getHeraldryForKingdom(level, sourceKingdom);
+            int skinId = getSoldierSkinForKingdom(level, sourceKingdom);
 
             SoldierEntity mob = spawnSoldier(
                     level,
@@ -2112,7 +2140,7 @@ public final class WarBattleManager {
                     role,
                     bannerman,
                     false,
-                    0,
+                    skinId,
                     Component.literal(side == Side.ENEMY ? "Enemy Soldier" : "Friendly Soldier"),
                     (side == Side.FRIEND) ? srcHeraldry : friendHeraldry,
                     (side == Side.ENEMY)  ? srcHeraldry : enemyHeraldry
@@ -2140,6 +2168,8 @@ public final class WarBattleManager {
             ItemStack opposingHeraldry
     ) {
         ItemStack srcHeraldry = getHeraldryForKingdom(level, sourceKingdomId);
+        int skinId = getSoldierSkinForKingdom(level, sourceKingdomId);
+
 
         Vec3 anchor = new Vec3(anchorPos.getX() + 0.5, anchorPos.getY(), anchorPos.getZ() + 0.5);
         Vec3 f = new Vec3(forward.x, 0, forward.z);
@@ -2169,7 +2199,7 @@ public final class WarBattleManager {
                     role,
                     bannerman,
                     false,
-                    0,
+                    skinId,
                     Component.literal(side == Side.ENEMY ? "Enemy Soldier" : "Friendly Soldier"),
                     (side == Side.FRIEND) ? srcHeraldry : opposingHeraldry,
                     (side == Side.ENEMY)  ? srcHeraldry : opposingHeraldry

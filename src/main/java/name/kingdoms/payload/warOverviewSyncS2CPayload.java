@@ -12,6 +12,7 @@ import java.util.UUID;
 public record warOverviewSyncS2CPayload(
         int yourAlive, int yourMax,
         double potions,
+         int soldierSkinId, 
         List<Entry> allies,
         List<Entry> enemies
 ) implements CustomPacketPayload {
@@ -30,6 +31,8 @@ public record warOverviewSyncS2CPayload(
                     int yourAlive = buf.readInt();
                     int yourMax = buf.readInt();
                     double potions = buf.readDouble();
+                    int soldierSkinId = buf.readInt();
+
 
                     int aN = buf.readVarInt();
                     List<Entry> allies = new ArrayList<>(aN);
@@ -51,7 +54,8 @@ public record warOverviewSyncS2CPayload(
                         enemies.add(new Entry(id, name, alive, max));
                     }
 
-                    return new warOverviewSyncS2CPayload(yourAlive, yourMax, potions, allies, enemies);
+                    return new warOverviewSyncS2CPayload(yourAlive, yourMax, potions, soldierSkinId, allies, enemies);
+
                 }
 
                 @Override
@@ -59,6 +63,7 @@ public record warOverviewSyncS2CPayload(
                     buf.writeInt(value.yourAlive());
                     buf.writeInt(value.yourMax());
                     buf.writeDouble(value.potions());
+                    buf.writeInt(value.soldierSkinId());
 
                     buf.writeVarInt(value.allies().size());
                     for (Entry e : value.allies()) {

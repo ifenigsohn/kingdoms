@@ -12,6 +12,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 import name.kingdoms.blueprint.KingdomSatelliteSpawner.KingdomSize;
+import name.kingdoms.entity.SoldierSkins;
 import name.kingdoms.blueprint.KingdomSatelliteSpawner;
 import java.util.HashMap;
 import java.util.Map;
@@ -30,6 +31,9 @@ public class aiKingdomState extends SavedData {
 
     private static final Codec<BlockPos> BLOCKPOS_CODEC =
             Codec.LONG.xmap(BlockPos::of, BlockPos::asLong);
+
+    
+    
 
     /** Convenience wrapper like kingdomState has. */
     public void markDirty() { setDirty(); }
@@ -84,16 +88,30 @@ public class aiKingdomState extends SavedData {
     // =========================
 
     public AiKingdom getOrCreateForKing(ServerLevel level, aiKingdomEntity king) {
-        UUID id = king.getUUID();
-        AiKingdom existing = kingdoms.get(id);
-        if (existing != null) return existing;
+        UUID kingUuid = king.getUUID();
 
         RandomSource r = level.random;
 
         String name = "King " + king.getKingName();
-        BlockPos origin = king.getHomePos() != null ? king.getHomePos() : king.blockPosition();
+        BlockPos origin = (king.getHomePos() != null) ? king.getHomePos() : king.blockPosition();
 
-        AiKingdom k = new AiKingdom(id, id, name, origin);
+        // IMPORTANT: If this king is standing inside an already-claimed kingdom border,
+        // reuse that kingdom ID instead of creating a second kingdom keyed to the king UUID.
+        kingdomState ks = kingdomState.get(level.getServer());
+        kingdomState.Kingdom existingAtPos = ks.getKingdomAt(level, origin);
+
+        UUID kingdomId = (existingAtPos != null) ? existingAtPos.id : kingUuid;
+
+        // Now look up AI kingdom by KINGDOM ID (not king UUID)
+        AiKingdom existing = kingdoms.get(kingdomId);
+        if (existing != null) {
+        // keep the king UUID synced
+        return existing;
+        }
+
+        // Create AI kingdom keyed to kingdomId, with kingUuid stored inside it
+        AiKingdom k = new AiKingdom(kingdomId, kingUuid, name, origin);
+
         k.personality = KingdomPersonality.random(r);
 
 
@@ -123,21 +141,30 @@ public class aiKingdomState extends SavedData {
         k.aliveSoldiers = rangeInt(r, minAlive, k.maxSoldiers);
 
         // Link AI -> kingdomState border/claim system
-        kingdomState ks = kingdomState.get(level.getServer());
         kingdomState.Kingdom kk = ks.ensureAiKingdom(k.id, k.kingUuid, k.name, k.origin);
 
         // --- AI heraldry (only set if missing) ---
         if (kk.heraldry == null || kk.heraldry.isEmpty()) {
         kk.heraldry = AiHeraldryPool.randomBanner(level.registryAccess(), level.random).copyWithCount(1);
 }
+        // If worldgen already assigned a border/claims, don't re-claim.
+        // Just sync AI border from kingdomState.
+        if (kk.hasBorder) {
+        k.hasBorder = true;
+        k.borderMinX = kk.borderMinX;
+        k.borderMaxX = kk.borderMaxX;
+        k.borderMinZ = kk.borderMinZ;
+        k.borderMaxZ = kk.borderMaxZ;
+        } else {
         kk.hasBorder = true;
         kk.borderMinX = k.borderMinX;
         kk.borderMaxX = k.borderMaxX;
         kk.borderMinZ = k.borderMinZ;
         kk.borderMaxZ = k.borderMaxZ;
-        ks.claimRect(level, k.id, k.borderMinX, k.borderMaxX, k.borderMinZ, k.borderMaxZ);
+        ks.claimRect(level, kk.id, k.borderMinX, k.borderMaxX, k.borderMinZ, k.borderMaxZ);
+        ks.setDirty();
+        }
 
-        ks.setDirty(); 
 
         // economy (
         k.gold    = range(r, 200, 2000);
@@ -157,7 +184,12 @@ public class aiKingdomState extends SavedData {
         k.security  = Mth.clamp(rangeInt(r, 0, 1), 0, 100);
 
         k.skinId = king.getSkinId();
-        kingdoms.put(id, k);
+        k.soldierSkinId = SoldierSkins.random(level.random);
+
+        kk.soldierSkinId = k.soldierSkinId;
+        ks.markDirty();
+
+        kingdoms.put(kingdomId, k);
         setDirty();
         return k;
 
@@ -419,6 +451,8 @@ public class aiKingdomState extends SavedData {
         public final BlockPos origin;
         public KingdomPersonality personality = KingdomPersonality.DEFAULT;
         public int skinId = 0;
+        public int soldierSkinId = 0;
+
 
         // army pool
         public int maxSoldiers;   // 50..300 (by size)
@@ -452,7 +486,7 @@ public class aiKingdomState extends SavedData {
                         KingdomPersonality.CODEC.optionalFieldOf("personality", KingdomPersonality.DEFAULT)
                             .forGetter(k -> k.personality),
                         Codec.INT.optionalFieldOf("skinId", 0).forGetter(k -> k.skinId),
-
+                        Codec.INT.optionalFieldOf("soldierSkinId", 0).forGetter(k -> k.soldierSkinId),
 
                         
                         EconomyData.CODEC.optionalFieldOf("eco", EconomyData.ZERO)
@@ -468,12 +502,13 @@ public class aiKingdomState extends SavedData {
                         Codec.INT.optionalFieldOf("maxSoldiers", -1).forGetter(k -> k.maxSoldiers),
                         Codec.INT.optionalFieldOf("aliveSoldiers", -1).forGetter(k -> k.aliveSoldiers),
 
+                        
 
                         BorderData.CODEC.optionalFieldOf("border", BorderData.NONE).forGetter(
                                 k -> new BorderData(k.hasBorder, k.borderMinX, k.borderMaxX, k.borderMinZ, k.borderMaxZ)
                         )
                 ).apply(inst, (id, kingUuid, name, origin, personality,
-                        skinId,
+                        skinId, soldierSkinId,
                         eco, happiness, security, size, maxSoldiers, aliveSoldiers, border) -> {
 
                         AiKingdom k = new AiKingdom(id, kingUuid, name, origin);
@@ -481,7 +516,7 @@ public class aiKingdomState extends SavedData {
                         k.size = size;
 
                        k.skinId = Mth.clamp(skinId, 0, kingSkinPoolState.MAX_SKIN_ID);
-
+                       k.soldierSkinId = Mth.clamp(soldierSkinId, 0, SoldierSkins.MAX_SKIN_ID); 
 
                         int ms = (maxSoldiers <= 0) ? defaultMaxSoldiersForSize(size) : Mth.clamp(maxSoldiers, 50, 300);
                         int as = (aliveSoldiers < 0) ? ms : Mth.clamp(aliveSoldiers, 0, ms);

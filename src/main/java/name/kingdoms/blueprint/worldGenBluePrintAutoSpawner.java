@@ -1,6 +1,7 @@
 package name.kingdoms.blueprint;
 
 import com.mojang.logging.LogUtils;
+
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.core.BlockPos;
@@ -12,9 +13,11 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.levelgen.Heightmap;
 import org.slf4j.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Deterministic, persisted region-based kingdom spawner.
@@ -41,7 +44,7 @@ public final class worldGenBluePrintAutoSpawner {
     private static final int RARITY = 2;
 
     private static final String MOD_ID = "kingdoms";
-    private static final String[] CASTLE_POOL = { "castlelarge1", "castlemed1","castlesmall2" };
+    private static final String[] CASTLE_POOL = { "castlenew1", "castlemed1","castlenew2","castlenew3","castlenew4","castlenew5" };
     private static final boolean INCLUDE_AIR = false;
 
     // Anti-surprise: decide all regions within viewDist + EXTRA around players
@@ -70,6 +73,12 @@ public final class worldGenBluePrintAutoSpawner {
     private static final int NO_SPAWN_RADIUS_BLOCKS = 150;
     private static final long NO_SPAWN_RADIUS_SQ = (long) NO_SPAWN_RADIUS_BLOCKS * (long) NO_SPAWN_RADIUS_BLOCKS;
     private static final int MAX_PENDING_CHECKS_PER_TICK = 10;
+
+    private static UUID kingdomUuidForRegion(long worldSeed, long regionKey) {
+        String s = "kingdoms:region:" + worldSeed + ":" + regionKey;
+        return UUID.nameUUIDFromBytes(s.getBytes(StandardCharsets.UTF_8));
+    }
+
 
     private static String pickDifferentCastle(String current, String fallback) {
         if (current == null || current.isBlank()) return fallback;
@@ -173,6 +182,11 @@ public final class worldGenBluePrintAutoSpawner {
 
             ServerLevel overworld = server.overworld();
             if (overworld == null) return;
+
+             // === WORLDGEN TOGGLE ===
+            if (!WorldgenToggleState.get(overworld).isEnabled()) {
+                return; // stop deciding + placing entirely
+            }
 
             // Only overworld for now (matches your old logic)
             feedDecideQueue(server, overworld);
@@ -355,6 +369,16 @@ public final class worldGenBluePrintAutoSpawner {
     // Placement
     // =========================================================
 
+    private static boolean isWorldgenJobInProgress(ServerLevel level, long jobKey) {
+        // If the jobKey is in the persisted worldgen queue, it is in progress or pending resume.
+        WorldgenBlueprintQueueState q = WorldgenBlueprintQueueState.get(level);
+        for (WorldgenBlueprintQueueState.Entry e : q.snapshot()) {
+            if (e.regionKey == jobKey) return true;
+        }
+        return false;
+    }
+
+
     private static void placeSome(MinecraftServer server, ServerLevel level) {
 
         if (KingdomGenGate.hasActiveRegion()) return;
@@ -370,10 +394,21 @@ public final class worldGenBluePrintAutoSpawner {
             long regionKey = pendingQueue.pollFirst();
             RegionDecisionStateV2 state = RegionDecisionStateV2.get(level);
             RegionDecisionStateV2.Entry e = state.get(regionKey);
-            if (e == null || e.statusEnum() != RegionDecisionStateV2.Status.WIN_PENDING) {
+
+            if (e == null || (e.statusEnum() != RegionDecisionStateV2.Status.WIN_PENDING && e.statusEnum() != RegionDecisionStateV2.Status.WIN_PLACING)) {
                 reservedOriginXZ.remove(regionKey);
                 continue;
             }
+
+            if (e.statusEnum() == RegionDecisionStateV2.Status.WIN_PLACING) {
+                continue;
+            }
+
+            if (isWorldgenJobInProgress(level, regionKey)) {
+                state.setStatus(regionKey, RegionDecisionStateV2.Status.WIN_PLACING);
+                continue;
+            }
+
 
             int next = nextPlaceTick.getOrDefault(regionKey, 0);
             if (tickAge < next) {
@@ -498,13 +533,15 @@ public final class worldGenBluePrintAutoSpawner {
 
                 
                 reserve(regionKey, x, z);
-                // mark queued before enqueue
-                KingdomsSpawnState.get(level).markQueued(regionKey);
-
+          
                 if (LOG) {
                     LOGGER.info("[Kingdoms][SpawnV3] ENQUEUE region=({}, {}) key={} bp={} origin={}",
                             e.rx(), e.rz(), regionKey, e.bpId(), origin);
                 }
+
+                // Mark as "in progress" BEFORE enqueue so we cannot enqueue twice after pause/resume.
+                RegionDecisionStateV2.get(level).setStatus(regionKey, RegionDecisionStateV2.Status.WIN_PLACING);
+
 
                 BlueprintPlacerEngine.enqueueWorldgen(
                         level, bp, origin, MOD_ID, INCLUDE_AIR,
@@ -534,18 +571,72 @@ public final class worldGenBluePrintAutoSpawner {
 
                             KingdomSatelliteSpawner.KingdomSize kSize = KingdomSatelliteSpawner.KingdomSize.MEDIUM;
                             List<String> buildingPool = List.of(
-                                    "house1_1","house2_1","house3_1","house4_1","house5_1","house6_6","house7_1","house8_1","windmill","watermill","bakery","clocktower"
+                                    "struct1","struct2","struct3","struct4","struct5","struct6","struct7","struct8","struct9","struct10","struct11","struct12","struct13"
                             );
 
-                            KingdomSatelliteSpawner.enqueuePlanAfterDelay(
-                                    level, origin, bp, MOD_ID, regionKey,
-                                    kSize, buildingPool, level.getRandom(),
-                                    20 * 10
+                            UUID kingdomId = kingdomUuidForRegion(level.getSeed(), regionKey);
+
+
+                           int half = KingdomSatelliteSpawner.maxRadiusForSize(kSize) + 32;
+                            int minX = origin.getX() - half;
+                            int maxX = origin.getX() + half;
+                            int minZ = origin.getZ() - half;
+                            int maxZ = origin.getZ() + half;
+
+                            // Ensure kingdom exists (same as you already do)
+                            name.kingdoms.kingdomState ks = name.kingdoms.kingdomState.get(level.getServer());
+                            name.kingdoms.kingdomState.Kingdom kk = ks.ensureAiKingdom(
+                                    kingdomId,
+                                    kingdomId,
+                                    "Kingdom " + e.rx() + "," + e.rz(),
+                                    origin
                             );
+
+                            // Set border ONCE if not set (use overlap-safe setter if you added it)
+                            boolean haveValidBorder = kk.hasBorder;
+
+                            if (!kk.hasBorder) {
+                                // If you already added trySetKingdomBorder(), use it:
+                                boolean ok = ks.trySetKingdomBorder(level, kk, minX, maxX, minZ, maxZ);
+                                haveValidBorder = ok;
+
+                                if (!ok) {
+                                    LOGGER.warn("[SpawnV3] Border overlap prevented for kingdomId={} regionKey={} rect=({},{})->({},{})",
+                                            kingdomId, regionKey, minX, minZ, maxX, maxZ);
+
+                                    // IMPORTANT: keep kk.hasBorder=false so we know it's invalid
+                                    kk.hasBorder = false;
+                                    kk.borderMinX = kk.borderMaxX = kk.borderMinZ = kk.borderMaxZ = 0;
+                                    ks.setDirty();
+                                }
+                            }
+
+                            // Satellites: clamp to border if valid, otherwise clamp to the local box around the origin
+                            if (haveValidBorder) {
+                                KingdomSatelliteSpawner.enqueuePlanAfterDelay(
+                                        level, origin, bp, MOD_ID, regionKey,
+                                        kSize, buildingPool, level.getRandom(),
+                                        20 * 10,
+                                        kk.borderMinX, kk.borderMaxX,
+                                        kk.borderMinZ, kk.borderMaxZ
+                                );
+                            } else {
+                                KingdomSatelliteSpawner.enqueuePlanAfterDelay(
+                                        level, origin, bp, MOD_ID, regionKey,
+                                        kSize, buildingPool, level.getRandom(),
+                                        20 * 10,
+                                        minX, maxX, minZ, maxZ
+                                );
+                            }
+
+
+
                         },
                         () -> {
                             KingdomGenGate.endRegion(regionKey);
                             
+                            RegionDecisionStateV2.get(level).setStatus(regionKey, RegionDecisionStateV2.Status.WIN_PENDING);
+
                             // FAIL: release queued flag so this region can be tried again
                             KingdomsSpawnState.get(level).clearQueued(regionKey);
 

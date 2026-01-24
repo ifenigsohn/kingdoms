@@ -1,0 +1,41 @@
+{
+  "section_size": 32,
+  "sections": {
+    "x": 1,
+    "y": 1,
+    "z": 1
+  },
+  "sizeX": 9,
+  "sizeY": 10,
+  "sizeZ": 9,
+  "air_id": 0,
+  "palette": [
+    "minecraft:air",
+    "minecraft:dirt_path",
+    "minecraft:grass_block[snowy=false]",
+    "minecraft:dirt",
+    "minecraft:mossy_cobblestone",
+    "minecraft:cobblestone",
+    "minecraft:ladder[facing=east,waterlogged=false]",
+    "minecraft:mossy_cobblestone_slab[type=bottom,waterlogged=false]",
+    "minecraft:mossy_cobblestone_wall[east=tall,north=none,south=low,up=true,waterlogged=false,west=none]",
+    "minecraft:cobblestone_wall[east=none,north=none,south=low,up=true,waterlogged=false,west=low]",
+    "minecraft:cobblestone_slab[type=bottom,waterlogged=false]",
+    "minecraft:barrier[waterlogged=false]",
+    "minecraft:composter[level=0]",
+    "minecraft:cobblestone_wall[east=tall,north=tall,south=none,up=true,waterlogged=false,west=none]",
+    "minecraft:mossy_cobblestone_wall[east=none,north=low,south=none,up=true,waterlogged=false,west=low]",
+    "minecraft:cobblestone_slab[type=double,waterlogged=false]",
+    "minecraft:cobblestone_wall[east=low,north=none,south=none,up=true,waterlogged=false,west=none]",
+    "minecraft:cobblestone_stairs[facing=west,half=bottom,shape=straight,waterlogged=false]",
+    "minecraft:mossy_cobblestone_wall[east=none,north=none,south=none,up=true,waterlogged=false,west=none]",
+    "minecraft:iron_chain[axis=y,waterlogged=false]",
+    "minecraft:cobblestone_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]",
+    "minecraft:mossy_cobblestone_wall[east=low,north=low,south=none,up=true,waterlogged=false,west=none]",
+    "minecraft:cobblestone_wall[east=none,north=none,south=none,up=true,waterlogged=false,west=none]",
+    "minecraft:spruce_fence[east=false,north=false,south=false,waterlogged=false,west=false]",
+    "minecraft:spruce_slab[type=bottom,waterlogged=false]",
+    "minecraft:spruce_slab[type=double,waterlogged=false]",
+    "minecraft:spruce_slab[type=top,waterlogged=false]"
+  ]
+}

@@ -20,6 +20,7 @@ import java.util.List;
  *  UNKNOWN     : no decision yet
  *  LOSE        : never spawn in this region
  *  WIN_PENDING : will spawn (planned), not placed yet
+ *  WIN_PLACING : enqueued / in progress
  *  WIN_SPAWNED : placed
  */
 public final class RegionDecisionStateV2 extends SavedData {
@@ -28,7 +29,8 @@ public final class RegionDecisionStateV2 extends SavedData {
         UNKNOWN((byte)0),
         LOSE((byte)1),
         WIN_PENDING((byte)2),
-        WIN_SPAWNED((byte)3);
+        WIN_PLACING((byte)3),
+        WIN_SPAWNED((byte)4);
 
         public final byte id;
         Status(byte id) { this.id = id; }
@@ -37,7 +39,8 @@ public final class RegionDecisionStateV2 extends SavedData {
             return switch (b) {
                 case 1 -> LOSE;
                 case 2 -> WIN_PENDING;
-                case 3 -> WIN_SPAWNED;
+                case 3 -> WIN_PLACING;
+                case 4 -> WIN_SPAWNED;
                 default -> UNKNOWN;
             };
         }

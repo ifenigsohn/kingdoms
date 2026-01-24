@@ -3,7 +3,6 @@ package name.kingdoms;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 
-import name.kingdoms.aiKingdomState.BorderData;
 import name.kingdoms.kingdomState.Kingdom;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
@@ -15,7 +14,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
-
+import name.kingdoms.entity.SoldierSkins;
 import java.util.*;
 
 public class kingdomState extends SavedData {
@@ -25,7 +24,13 @@ public class kingdomState extends SavedData {
         return kingdoms.values();
     }
 
-    
+    private void removeAllClaimsFor(UUID kid) {
+        if (kid == null) return;
+        claims.entrySet().removeIf(e -> Objects.equals(e.getValue(), kid));
+        claimsFast.entrySet().removeIf(e -> Objects.equals(e.getValue(), kid));
+    }
+
+
 
     public double getResource(UUID kingdomId, String resource) {
         Kingdom k = getKingdom(kingdomId); // you already have getKingdom(UUID)
@@ -81,7 +86,10 @@ public class kingdomState extends SavedData {
 
         for (int gx = minGX; gx <= maxGX; gx++) {
             for (int gz = minGZ; gz <= maxGZ; gz++) {
-                claims.put(new ClaimKey(level.dimension(), gx, gz), kingdomId);
+                ClaimKey ck = new ClaimKey(level.dimension(), gx, gz);
+                claims.put(ck, kingdomId);
+                claimsFast.put(packClaimKey(ck.dim(), ck.gx(), ck.gz()), kingdomId);
+
             }
         }
 
@@ -93,6 +101,7 @@ public class kingdomState extends SavedData {
         if (k != null) return k;
 
         Kingdom created = new Kingdom(id, owner, name, origin);
+        
 
         // AI kingdoms should NOT have a terminal (terminal is player kingdom block logic)
         created.hasTerminal = false;
@@ -162,7 +171,8 @@ public class kingdomState extends SavedData {
         UUID kid = k.id;
 
         // clear ALL claimed cells for this kingdom
-        claims.entrySet().removeIf(e -> Objects.equals(e.getValue(), kid));
+        removeAllClaimsFor(kid);
+
 
         // border off
         k.hasBorder = false;
@@ -199,6 +209,21 @@ public class kingdomState extends SavedData {
         return kingdoms.values();
     }
 
+    private static long packClaimKey(ResourceKey<Level> dim, int gx, int gz) {
+      
+        int dimHash = dim.location().hashCode();
+        long k = 0L;
+        k |= (long) dimHash & 0xFFFFFFFFL;
+        k <<= 32;
+
+        int h = 31 * gx + gz;
+        k |= (long) h & 0xFFFFFFFFL;
+        return k;
+    }
+
+    private final Map<Long, UUID> claimsFast = new HashMap<>();
+
+
     /* -----------------------------
        kingdom border tracking
      ----------------------------- */
@@ -229,8 +254,13 @@ public class kingdomState extends SavedData {
             }
         }
 
+
+        
+
+
         // 2) clear old claims for THIS kingdom
-        claims.entrySet().removeIf(e -> Objects.equals(e.getValue(), kid));
+        removeAllClaimsFor(kid);
+
 
         // 3) store border + claim all cells
         k.hasBorder = true;
@@ -239,9 +269,11 @@ public class kingdomState extends SavedData {
         k.borderMinZ = aMinZ;
         k.borderMaxZ = aMaxZ;
 
-        for (int gx = minGX; gx <= maxGX; gx++) {
+       for (int gx = minGX; gx <= maxGX; gx++) {
             for (int gz = minGZ; gz <= maxGZ; gz++) {
-                claims.put(new ClaimKey(level.dimension(), gx, gz), kid);
+                ClaimKey ck = new ClaimKey(level.dimension(), gx, gz);
+                claims.put(ck, kid);
+                claimsFast.put(packClaimKey(ck.dim(), ck.gx(), ck.gz()), kid);
             }
         }
 
@@ -269,7 +301,9 @@ public class kingdomState extends SavedData {
 
     public void claimCellForKingdom(Level level, Kingdom k, BlockPos pos) {
         if (k == null) return;
-        claims.put(claimFromPos(level, pos), k.id);
+        ClaimKey ck = claimFromPos(level, pos);
+        claims.put(ck, k.id);
+        claimsFast.put(packClaimKey(ck.dim(), ck.gx(), ck.gz()), k.id);
         setDirty();
     }
 
@@ -294,7 +328,8 @@ public class kingdomState extends SavedData {
         k.borderMaxZ = maxZ;
 
         UUID kid = k.id;
-        claims.entrySet().removeIf(e -> e.getValue().equals(kid));
+        removeAllClaimsFor(kid);
+
 
         int minGX = Math.floorDiv(minX, CLAIM_CELL_SIZE);
         int maxGX = Math.floorDiv(maxX, CLAIM_CELL_SIZE);
@@ -303,7 +338,11 @@ public class kingdomState extends SavedData {
 
         for (int gx = minGX; gx <= maxGX; gx++) {
             for (int gz = minGZ; gz <= maxGZ; gz++) {
-                claims.put(new ClaimKey(level.dimension(), gx, gz), kid);
+                ClaimKey ck = new ClaimKey(level.dimension(), gx, gz);
+                claims.put(ck, kid);
+                claimsFast.put(packClaimKey(ck.dim(), ck.gx(), ck.gz()), kid);
+
+
             }
         }
 
@@ -352,6 +391,19 @@ public class kingdomState extends SavedData {
     }
 
     private record ClaimEntry(ResourceKey<Level> dim, int gx, int gz, UUID kid) {}
+
+    private record RetinueData(UUID scribe, UUID treasurer, UUID general) {
+        static final RetinueData NONE = new RetinueData(NIL_UUID, NIL_UUID, NIL_UUID);
+
+        static final Codec<RetinueData> CODEC =
+                    RecordCodecBuilder.create(inst -> inst.group(
+                            UUID_CODEC.optionalFieldOf("scribe", NIL_UUID).forGetter(RetinueData::scribe),
+                            UUID_CODEC.optionalFieldOf("treasurer", NIL_UUID).forGetter(RetinueData::treasurer),
+                            UUID_CODEC.optionalFieldOf("general", NIL_UUID).forGetter(RetinueData::general)
+                    ).apply(inst, RetinueData::new));
+        }
+
+
 
     private static final Codec<ClaimEntry> CLAIM_ENTRY_CODEC =
             RecordCodecBuilder.create(inst -> inst.group(
@@ -423,6 +475,7 @@ public class kingdomState extends SavedData {
         public UUID retinueTreasurer = null;
         public UUID retinueGeneral = null;
         public ItemStack heraldry = ItemStack.EMPTY;
+        public int soldierSkinId = 0;
 
         // IMPORTANT: networking expects k.name
         public String name;
@@ -555,7 +608,11 @@ public class kingdomState extends SavedData {
                         STRING_INT_MAP_CODEC.optionalFieldOf("placed", Map.of()).forGetter(k -> k.placed),
 
                         ItemStack.OPTIONAL_CODEC.optionalFieldOf("heraldry", ItemStack.EMPTY)
-                         .forGetter(k -> k.heraldry),
+                           .forGetter(k -> k.heraldry),
+
+                        Codec.INT.optionalFieldOf("soldierSkinId", 0)
+                           .forGetter(k -> k.soldierSkinId),
+ 
 
 
                         EconomyData.CODEC.optionalFieldOf("eco", new EconomyData(
@@ -576,18 +633,19 @@ public class kingdomState extends SavedData {
                         BLOCKPOS_CODEC.optionalFieldOf("terminalPos", BlockPos.ZERO).forGetter(k -> k.terminalPos),
                         Codec.BOOL.optionalFieldOf("royalGuardsEnabled", false)
                                 .forGetter(k -> k.royalGuardsEnabled),
-                        UUID_CODEC.optionalFieldOf("retinueScribe", NIL_UUID)
-                                .forGetter(k -> k.retinueScribe == null ? NIL_UUID : k.retinueScribe),
-                        UUID_CODEC.optionalFieldOf("retinueTreasurer", NIL_UUID)
-                                .forGetter(k -> k.retinueTreasurer == null ? NIL_UUID : k.retinueTreasurer),
-                        UUID_CODEC.optionalFieldOf("retinueGeneral", NIL_UUID)
-                                .forGetter(k -> k.retinueGeneral == null ? NIL_UUID : k.retinueGeneral)
+                        RetinueData.CODEC.optionalFieldOf("retinue", RetinueData.NONE)
+                        .forGetter(k -> new RetinueData(
+                                k.retinueScribe == null ? NIL_UUID : k.retinueScribe,
+                                k.retinueTreasurer == null ? NIL_UUID : k.retinueTreasurer,
+                                k.retinueGeneral == null ? NIL_UUID : k.retinueGeneral
+                        ))
+
 
                 ).apply(inst, (id, owner, name, origin,
-                               activeMap, placedMap, heraldry,
+                               activeMap, placedMap, heraldry, soldierSkinId,
                                eco, border,
                                hasTerminal, terminalDim, terminalPos, royalGuardsEnabled,
-                               retinueScribe, retinueTreasurer, retinueGeneral) -> {
+                               retinue) -> {
 
                     Kingdom k = new Kingdom(id, owner, name, origin);
 
@@ -609,10 +667,16 @@ public class kingdomState extends SavedData {
                     k.terminalDim = terminalDim;
                     k.terminalPos = terminalPos;
 
-                    k.retinueScribe = NIL_UUID.equals(retinueScribe) ? null : retinueScribe;
-                    k.retinueTreasurer = NIL_UUID.equals(retinueTreasurer) ? null : retinueTreasurer;
-                    k.retinueGeneral = NIL_UUID.equals(retinueGeneral) ? null : retinueGeneral;
+                    k.retinueScribe = (retinue == null || NIL_UUID.equals(retinue.scribe())) ? null : retinue.scribe();
+                    k.retinueTreasurer = (retinue == null || NIL_UUID.equals(retinue.treasurer())) ? null : retinue.treasurer();
+                    k.retinueGeneral = (retinue == null || NIL_UUID.equals(retinue.general())) ? null : retinue.general();
                     k.heraldry = (heraldry == null) ? ItemStack.EMPTY : heraldry;
+                    k.soldierSkinId = net.minecraft.util.Mth.clamp(
+                            soldierSkinId,
+                            0,
+                            SoldierSkins.MAX_SKIN_ID
+                    );
+
 
                     return k;
                 }));
@@ -633,6 +697,8 @@ public class kingdomState extends SavedData {
 
         UUID id = UUID.randomUUID();
         Kingdom k = new Kingdom(id, player, name, origin);
+        k.soldierSkinId = SoldierSkins.random(level.getRandom());
+
 
         k.gold = 10; k.meat = 0; k.grain = 0; k.fish = 0;
         k.wood = 0; k.metal = 0; k.armor = 0; k.weapons = 0;
@@ -647,7 +713,10 @@ public class kingdomState extends SavedData {
         playerKingdom.put(player, id);
 
         // initial claim: the cell containing the origin
-        claims.put(claimFromPos(level, origin), id);
+        ClaimKey ck = claimFromPos(level, origin);
+        claims.put(ck, id);
+        claimsFast.put(packClaimKey(ck.dim(), ck.gx(), ck.gz()), id);
+
 
         setDirty();
         return k;
@@ -665,7 +734,8 @@ public class kingdomState extends SavedData {
 
         kingdoms.remove(kid);
         playerKingdom.remove(player);
-        claims.entrySet().removeIf(e -> Objects.equals(e.getValue(), kid));
+        removeAllClaimsFor(kid);
+
 
         setDirty();
         return true;
@@ -692,6 +762,15 @@ public class kingdomState extends SavedData {
         UUID id = claims.get(claimFromPos(level, pos));
         return id == null ? null : kingdoms.get(id);
     }
+
+    public Kingdom getKingdomAtFast(Level level, int x, int z) {
+        int gx = Math.floorDiv(x, CLAIM_CELL_SIZE);
+        int gz = Math.floorDiv(z, CLAIM_CELL_SIZE);
+
+        UUID kid = claimsFast.get(packClaimKey(level.dimension(), gx, gz));
+        return (kid == null) ? null : kingdoms.get(kid);
+    }
+
 
     /* -----------------------------
        ACTIVE / PLACED COUNT UTILITY
@@ -860,8 +939,14 @@ public class kingdomState extends SavedData {
                     s.claims.put(new ClaimKey(ce.dim(), ce.gx(), ce.gz()), ce.kid());
                 }
 
+                for (var e : s.claims.entrySet()) {
+                    ClaimKey ck = e.getKey();
+                    s.claimsFast.put(packClaimKey(ck.dim(), ck.gx(), ck.gz()), e.getValue());
+                }
+
                 return s;
             }));
+
 
     /* -----------------------------
        SAVED DATA ACCESS

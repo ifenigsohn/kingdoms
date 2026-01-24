@@ -11,12 +11,12 @@ import net.minecraft.world.entity.monster.RangedAttackMob;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.entity.projectile.Arrow;
+import net.minecraft.world.item.BannerItem;
 import net.minecraft.world.item.BowItem;
 import net.minecraft.world.item.DyeColor;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.entity.BannerPattern;
 import net.minecraft.world.level.block.entity.BannerPatternLayers;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.level.storage.ValueOutput;
@@ -24,18 +24,10 @@ import com.google.gson.JsonParser;
 import com.mojang.serialization.JsonOps;
 import java.util.EnumSet;
 
-import com.mojang.serialization.JsonOps;
-
-import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.component.DataComponents;
-import net.minecraft.core.registries.Registries;
-import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.ListTag;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
-import net.minecraft.resources.ResourceKey;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 
@@ -105,9 +97,6 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
     public Role getRole() { return Role.fromOrdinal(this.entityData.get(DATA_ROLE)); }
     public void setRole(Role role) { this.entityData.set(DATA_ROLE, role.ordinal()); applyLoadout(); }
 
-    public int getSkinId() { return this.entityData.get(DATA_SKIN); }
-    public void setSkinId(int id) { this.entityData.set(DATA_SKIN, Math.max(0, id)); }
-
     public boolean isCaptain() { return this.entityData.get(DATA_CAPTAIN); }
     public void setCaptain(boolean captain) { this.entityData.set(DATA_CAPTAIN, captain); }
 
@@ -116,6 +105,14 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
     public void setHeraldry(ItemStack stack) {
         this.entityData.set(DATA_HERALDRY, (stack == null) ? ItemStack.EMPTY : stack.copyWithCount(1));
         applyLoadout();
+    }
+
+    public int getSkinId() {
+        return this.entityData.get(DATA_SKIN);
+    }
+
+    public void setSkinId(int id) {
+        this.entityData.set(DATA_SKIN, Mth.clamp(id, 0, name.kingdoms.entity.SoldierSkins.MAX_SKIN_ID));
     }
 
 
@@ -342,17 +339,19 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
 
     public static ItemStack makeShieldFromBanner(ItemStack banner) {
         ItemStack shield = new ItemStack(Items.SHIELD);
-
         if (banner == null || banner.isEmpty()) return shield;
 
-        // Copy base color if present
-        var base = banner.get(DataComponents.BASE_COLOR);
+        // 1) Base color: banners usually encode this in the ITEM (BLUE_BANNER, etc)
+        DyeColor base = banner.get(DataComponents.BASE_COLOR);
+        if (base == null && banner.getItem() instanceof BannerItem bi) {
+            base = bi.getColor();
+        }
         if (base != null) {
             shield.set(DataComponents.BASE_COLOR, base);
         }
 
-        // Copy patterns if present (this is what makes it match the banner visually)
-        var layers = banner.get(DataComponents.BANNER_PATTERNS);
+        // 2) Patterns: these are stored as component layers
+        BannerPatternLayers layers = banner.get(DataComponents.BANNER_PATTERNS);
         if (layers != null) {
             shield.set(DataComponents.BANNER_PATTERNS, layers);
         }
@@ -514,6 +513,7 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
     // -------------------------
     private void applyLoadout() {
         if (this.level() == null) return;
+        if (this.level().isClientSide()) return;
 
         ItemStack heraldry = getHeraldry();
         boolean hasHeraldry = heraldry != null && !heraldry.isEmpty();
@@ -615,7 +615,7 @@ public class SoldierEntity extends PathfinderMob implements RangedAttackMob {
         this.entityData.set(DATA_SIDE, Mth.clamp(side, 0, 1));
         this.entityData.set(DATA_BANNERMAN, banner != 0);
         this.entityData.set(DATA_ROLE, Mth.clamp(role, 0, 1));
-        this.entityData.set(DATA_SKIN, Math.max(0, skin));
+        this.entityData.set(DATA_SKIN, Mth.clamp(skin, 0, name.kingdoms.entity.SoldierSkins.MAX_SKIN_ID));
         this.entityData.set(DATA_CAPTAIN, captain != 0);
 
         ItemStack loaded = ItemStack.EMPTY;
