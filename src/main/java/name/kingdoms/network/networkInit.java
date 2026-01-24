@@ -105,6 +105,8 @@ public final class networkInit {
         PayloadTypeRegistry.playC2S().register(royalGuardToggleC2SPayload.TYPE, royalGuardToggleC2SPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(setHeraldryPayload.TYPE, setHeraldryPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(soldierSkinSelectC2SPayload.TYPE,soldierSkinSelectC2SPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.toggleRetinueC2SPayload.TYPE,name.kingdoms.payload.toggleRetinueC2SPayload.CODEC);
+
 
 
         // ----- S2C -----
@@ -151,6 +153,18 @@ public final class networkInit {
                 name.kingdoms.entity.RoyalGuardManager.setEnabled(player, k.royalGuardsEnabled);
             });
         });
+
+        ServerPlayNetworking.registerGlobalReceiver(
+                name.kingdoms.payload.toggleRetinueC2SPayload.TYPE,
+                (payload, ctx) -> ctx.server().execute(() -> {
+                    ServerPlayer player = ctx.player();
+                    RetinueSpawner.setEnabled(player, payload.enabled());
+                    player.sendSystemMessage(Component.literal(
+                            payload.enabled() ? "Retinue enabled." : "Retinue disabled."
+                    ));
+                })
+        );
+
 
         // --- SET HERALDRY (custom banner) ---
         ServerPlayNetworking.registerGlobalReceiver(setHeraldryPayload.TYPE, (payload, ctx) -> {

@@ -84,6 +84,18 @@ public final class RetinueSpawner {
         return list.isEmpty() ? null : list.get(0);
     }
 
+    public static void setEnabled(ServerPlayer owner, boolean enabled) {
+        if (!enabled) {
+            // whatever you currently do to despawn/disband retinue
+            despawnAll(owner);
+        } else {
+            // whatever you currently do to spawn/restore retinue
+            spawnOrRestore(owner);
+        }
+    }
+
+    
+
     private static AABB ownerSearchBox(ServerLevel level, UUID ownerId, double r) {
         ServerPlayer p = level.getServer().getPlayerList().getPlayer(ownerId);
         double x = (p != null) ? p.getX() : 0;
@@ -164,4 +176,62 @@ public final class RetinueSpawner {
 
         return mob;
     }
+
+    public static void recallNow(ServerPlayer owner) {
+        // "Recall" should be safe even if disabled; just respawn/teleport when enabled.
+        // We'll implement it as "despawn then restore" so you never get duplicates.
+        despawnAll(owner);
+        spawnOrRestore(owner);
+    }
+
+    /** Removes retinue entities and clears UUIDs from the owner's Kingdom record. */
+    private static void despawnAll(ServerPlayer owner) {
+        if (!(owner.level() instanceof ServerLevel sl)) return;
+
+        var server = sl.getServer();
+        var ks = kingdomState.get(server);
+        var k = ks.getPlayerKingdom(owner.getUUID());
+        if (k == null) return;
+
+        // discard in all levels (retinue might be in another dimension)
+        discardIfPresent(server, k.retinueScribe);
+        discardIfPresent(server, k.retinueTreasurer);
+        discardIfPresent(server, k.retinueGeneral);
+
+        k.retinueScribe = null;
+        k.retinueTreasurer = null;
+        k.retinueGeneral = null;
+
+        ks.markDirty();
+    }
+
+    /** Ensures the retinue exists again (spawns if missing). */
+    private static void spawnOrRestore(ServerPlayer owner) {
+        if (!(owner.level() instanceof ServerLevel sl)) return;
+
+        var server = sl.getServer();
+        var ks = kingdomState.get(server);
+        var k = ks.getPlayerKingdom(owner.getUUID());
+        if (k == null) return;
+
+        ensureRetinue(sl, owner, k);
+        ks.markDirty();
+    }
+
+    /** Finds an entity by UUID across all dimensions and discards it if it's a retinue worker. */
+    private static void discardIfPresent(net.minecraft.server.MinecraftServer server, UUID id) {
+        if (id == null) return;
+
+        for (ServerLevel level : server.getAllLevels()) {
+            var e = level.getEntity(id);
+            if (e instanceof kingdomWorkerEntity w) {
+                // Extra safety: only discard if it's actually a retinue mob
+                if (w.isAlive() && w.isRetinue()) {
+                    w.discard();
+                }
+            }
+        }
+    }
+
+    
 }

@@ -33,6 +33,7 @@ import net.fabricmc.fabric.api.resource.SimpleSynchronousResourceReloadListener;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.resources.ResourceManager;
@@ -65,8 +66,11 @@ public class kingdomsClient implements ClientModInitializer {
     public static volatile ecoSyncPayload CLIENT_ECO =
             ecoSyncPayload.zeros();
 
-    public static KeyMapping OPEN_ECONOMY_KEY;
-    public static KeyMapping OPEN_MAIL_KEY;
+        public static KeyMapping TOGGLE_RETINUE_KEY;
+
+        // client-side UI state only (server remains authoritative)
+        public static volatile boolean RETINUE_ENABLED = true;
+
     public static volatile boolean YOU_HAVE_A_KINGDOM = false;
     public static volatile boolean YOUR_KINGDOM_HAS_BORDER = true; 
 
@@ -148,52 +152,39 @@ public class kingdomsClient implements ClientModInitializer {
         // Keybinds
         // -------------------------
 
-        OPEN_ECONOMY_KEY = KeyBindingHelper.registerKeyBinding(
+        TOGGLE_RETINUE_KEY = KeyBindingHelper.registerKeyBinding(
                 new KeyMapping(
-                        "key.kingdoms.open_economy",
+                        "key.kingdoms.toggle_retinue",
                         InputConstants.Type.KEYSYM,
                         GLFW.GLFW_KEY_K,
                         KINGDOMS_CATEGORY
                 )
         );
 
-        OPEN_MAIL_KEY = KeyBindingHelper.registerKeyBinding(
-                new KeyMapping(
-                        "key.kingdoms.open_mail",
-                        InputConstants.Type.KEYSYM,
-                        GLFW.GLFW_KEY_O,
-                        KINGDOMS_CATEGORY
-                )
-        );
+
 
         // -------------------------
         // Key handlers
         // -------------------------
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+        if (client.player == null) return;
 
-            // K opens economy (request latest info first)
-            while (OPEN_ECONOMY_KEY.consumeClick()) {
-                if (client.player == null) break;
+        // R toggles retinue on/off
+        while (TOGGLE_RETINUE_KEY.consumeClick()) {
+                RETINUE_ENABLED = !RETINUE_ENABLED;
 
-                ClientPlayNetworking.send(new kingdomInfoRequestPayload());
-                ClientPlayNetworking.send(new ecoRequestPayload());
+                ClientPlayNetworking.send(new name.kingdoms.payload.toggleRetinueC2SPayload(RETINUE_ENABLED));
 
-                Minecraft.getInstance().setScreen(new kingdomEconomyScreen());
-            }
+                client.player.displayClientMessage(
+                        Component.literal(RETINUE_ENABLED ? "Retinue enabled." : "Retinue disabled."),
+                        true
+                );
+        }
 
-            // O opens mail screen
-            while (OPEN_MAIL_KEY.consumeClick()) {
-                if (client.player == null) return;
 
-                ClientPlayNetworking.send(new kingdomInfoRequestPayload());
-                ClientPlayNetworking.send(new ecoRequestPayload());
-                ClientPlayNetworking.send(new mailInboxRequestC2SPayload());
-                
-
-                mailScreen.open();
-            }
         });
+
      
     }
 

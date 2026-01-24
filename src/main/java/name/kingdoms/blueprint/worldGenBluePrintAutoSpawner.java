@@ -571,7 +571,8 @@ public final class worldGenBluePrintAutoSpawner {
 
                             KingdomSatelliteSpawner.KingdomSize kSize = KingdomSatelliteSpawner.KingdomSize.MEDIUM;
                             List<String> buildingPool = List.of(
-                                    "struct1","struct2","struct3","struct4","struct5","struct6","struct7","struct8","struct9","struct10","struct11","struct12","struct13"
+                                    "struct1","struct2","struct3","struct4","struct5","struct6","struct7","struct8","struct9","struct10","struct11","struct12","struct13","struct14","struct15","struct16","struct17"
+                                    ,"struct18","struct19","struct20","struct21","struct22","struct23"
                             );
 
                             UUID kingdomId = kingdomUuidForRegion(level.getSeed(), regionKey);

@@ -21,6 +21,18 @@ import java.util.*;
 public final class RoadAnchors {
     private RoadAnchors() {}
 
+    public static void cleanupBarrierAnchors(ServerLevel level, long regionKey) {
+        List<BlockPos> anchors = RoadAnchorState.get(level).getAnchors(regionKey);
+        if (anchors.isEmpty()) return;
+
+        for (BlockPos p : anchors) {
+            if (level.getBlockState(p).is(Blocks.BARRIER)) {
+                level.setBlock(p, Blocks.AIR.defaultBlockState(), 2);
+            }
+        }
+    }
+
+
     /** Find all barrier-pair anchors near origin, add anchors under B1, and delete markers. */
     public static List<BlockPos> consumeBarrierAnchors(ServerLevel level, BlockPos origin) {
         // Tune: how far from blueprint origin to scan for markers

@@ -99,12 +99,16 @@ public final class RoadBuilder {
             JOBS.poll();
 
             if (job.blocksPlacedTotal > 0 || job.edges.isEmpty()) {
+                
+                cleanupBarrierAnchors(job.level, job.regionKey);
+
                 KingdomGenGate.endRegion(job.regionKey);
             } else {
                 LOGGER.warn("[Kingdoms] Roads job finished with 0 blocks for region {} — retrying", job.regionKey);
                 RoadBuilder.enqueue(job.level, job.regionKey, job.edges);
                 // don’t unlock
             }
+
 
             LOGGER.info("[Kingdoms] Finished roads for region {} (blocksPlaced={})",
                     job.regionKey, job.blocksPlacedTotal);
@@ -923,6 +927,25 @@ public final class RoadBuilder {
             return (dz > 0) ? Direction.SOUTH : Direction.NORTH;
         }
     }
+
+    private static void cleanupBarrierAnchors(ServerLevel level, long regionKey) {
+        // Use the anchors we already stored earlier in BlueprintPlacerEngine
+        List<BlockPos> anchors = RoadAnchorState.get(level).getAnchors(regionKey);
+        if (anchors == null || anchors.isEmpty()) return;
+
+        int removed = 0;
+        for (BlockPos p : anchors) {
+            if (level.getBlockState(p).is(Blocks.BARRIER)) {
+                level.setBlock(p, Blocks.AIR.defaultBlockState(), 2);
+                removed++;
+            }
+        }
+
+        if (removed > 0) {
+            LOGGER.info("[RoadBuilder] Removed {} barrier anchor blocks for region {}", removed, regionKey);
+        }
+    }
+
 
     
 
