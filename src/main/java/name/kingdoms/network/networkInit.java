@@ -51,6 +51,7 @@ import name.kingdoms.treasuryShop;
 import name.kingdoms.payload.mailRecipientsRequestC2SPayload;
 import name.kingdoms.payload.mailRecipientsSyncS2CPayload;
 import name.kingdoms.diplomacy.AiLetterText;
+import name.kingdoms.diplomacy.DiplomacyMailGenerator;
 import name.kingdoms.diplomacy.DiplomacyMailboxState;
 import name.kingdoms.diplomacy.DiplomacyResponseQueue;
 import name.kingdoms.diplomacy.EconomyMutator;
@@ -67,6 +68,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import name.kingdoms.payload.mailSendC2SPayload;
 
@@ -106,8 +108,8 @@ public final class networkInit {
         PayloadTypeRegistry.playC2S().register(setHeraldryPayload.TYPE, setHeraldryPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(soldierSkinSelectC2SPayload.TYPE,soldierSkinSelectC2SPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.toggleRetinueC2SPayload.TYPE,name.kingdoms.payload.toggleRetinueC2SPayload.CODEC);
-
-
+        PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.inPersonProposalSendC2SPayload.TYPE,name.kingdoms.payload.inPersonProposalSendC2SPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.requestProposalC2SPayload.TYPE,name.kingdoms.payload.requestProposalC2SPayload.STREAM_CODEC);
 
         // ----- S2C -----
         PayloadTypeRegistry.playS2C().register(aiTradeInfoS2CPayload.TYPE, aiTradeInfoS2CPayload.CODEC);
@@ -165,8 +167,61 @@ public final class networkInit {
                 })
         );
 
+        ServerPlayNetworking.registerGlobalReceiver(name.kingdoms.payload.requestProposalC2SPayload.TYPE, (payload, ctx) -> {
+    ctx.server().execute(() -> {
+        var player = ctx.player();
+        var server = ctx.server();
+        var level = (ServerLevel) player.level();
 
-        // --- SET HERALDRY (custom banner) ---
+        var ks = kingdomState.get(server);
+        var playerK = ks.getPlayerKingdom(player.getUUID());
+        if (playerK == null) {
+            player.displayClientMessage(Component.literal("You are not in a kingdom."), false);
+            return;
+        }
+
+        var toK = ks.getKingdom(payload.toKingdomId());
+        if (toK == null) {
+            player.displayClientMessage(Component.literal("That kingdom does not exist."), false);
+            return;
+        }
+
+        var aiState = aiKingdomState.get(server);
+        var aiK = aiState.getById(toK.id);
+        if (aiK == null) {
+            player.displayClientMessage(Component.literal("That kingdom is not AI."), false);
+            return;
+        }
+
+        // cooldown (same map as in-person proposals)
+        long nowTick = server.getTickCount();
+        ServerLevel mailLevel = server.overworld();
+        var mailbox = DiplomacyMailboxState.get(mailLevel);
+
+        if (mailbox.isProposalOnCooldown(player.getUUID(), toK.id, nowTick)) {
+            long rem = mailbox.proposalCooldownRemaining(player.getUUID(), toK.id, nowTick);
+            int secs = (int)(rem / 20L);
+            player.displayClientMessage(Component.literal("Proposal cooldown: " + secs + "s"), false);
+            return;
+        }
+        mailbox.startProposalCooldown(player.getUUID(), toK.id, nowTick);
+
+        // build a letter FROM AI to PLAYER, but deliver after 10–20s
+        var letter = DiplomacyMailGenerator.makeImmediateProposal(mailLevel, server, toK.id, player.getUUID(), nowTick);
+        if (letter == null) {
+            player.displayClientMessage(Component.literal("No proposal available right now."), false);
+            return;
+        }
+
+        int delay = 200 + mailLevel.getRandom().nextInt(201);
+        mailbox.scheduleDelivery(player.getUUID(), letter, nowTick + delay);
+
+        player.displayClientMessage(Component.literal("The king will respond in " + (delay/20) + "s."), true);
+    });
+});
+
+
+                // --- SET HERALDRY (custom banner) ---
         ServerPlayNetworking.registerGlobalReceiver(setHeraldryPayload.TYPE, (payload, ctx) -> {
             ctx.server().execute(() -> {
                 var player = ctx.player();
@@ -762,6 +817,150 @@ public final class networkInit {
             }
             });
         });
+
+        ServerPlayNetworking.registerGlobalReceiver(name.kingdoms.payload.inPersonProposalSendC2SPayload.TYPE, (payload, ctx) -> {
+            ctx.server().execute(() -> {
+                var player = ctx.player();
+                var server = ctx.server();
+                var level = (ServerLevel) player.level();
+
+                // must be in a kingdom
+                var ks = kingdomState.get(server);
+                var playerK = ks.getPlayerKingdom(player.getUUID());
+                if (playerK == null) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "You are not in a kingdom."));
+                    return;
+                }
+
+                // recipient must exist
+                var toK = ks.getKingdom(payload.toKingdomId());
+                if (toK == null) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "That kingdom does not exist."));
+                    return;
+                }
+
+                // must be AI kingdom
+                var aiState = aiKingdomState.get(server);
+                var aiK = aiState.getById(toK.id);
+                if (aiK == null) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "In-person proposals only work for AI kingdoms."));
+                    return;
+                }
+
+                if (toK.id.equals(playerK.id)) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "You can't send mail to your own kingdom."));
+                    return;
+                }
+
+                // server-authoritative in-person range check
+                var kingEnt = level.getEntity(payload.kingEntityId());
+                if (!(kingEnt instanceof LivingEntity) || kingEnt.isRemoved()) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "King not found."));
+                    return;
+                }
+
+                double maxDist = 8.0;
+                if (player.distanceToSqr(kingEnt) > maxDist * maxDist) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "You must be near the king."));
+                    return;
+                }
+
+                // reuse your existing diplomacy policy gate
+                var decision = name.kingdoms.diplomacy.DiplomacyPlayerSendRules.canSend(
+                        server,
+                        player,
+                        payload.toKingdomId(),
+                        payload.kind()
+                );
+                if (!decision.allowed()) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, decision.reason()));
+                    return;
+                }
+
+                String note = payload.note() == null ? "" : payload.note();
+
+                // validation
+                boolean kindNeedsPositiveAmount = switch (payload.kind()) {
+                    case REQUEST, OFFER, CONTRACT, ULTIMATUM -> true;
+                    default -> false;
+                };
+                if (kindNeedsPositiveAmount && payload.aAmount() <= 0) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "Amount must be > 0."));
+                    return;
+                }
+                if (payload.kind() == Letter.Kind.CONTRACT) {
+                    if (payload.bType() == null || payload.bAmount() <= 0 || payload.maxAmount() <= 0) {
+                        ServerPlayNetworking.send(player,
+                                new mailSendResultS2CPayload(payload.requestId(), false, "Contract values are invalid."));
+                        return;
+                    }
+                }
+
+                // affordability (same as normal handler)
+                boolean playerCan = switch (payload.kind()) {
+                    case REQUEST -> true;
+                    case OFFER -> EconomyMutator.get(playerK, payload.aType()) >= payload.aAmount();
+                    case CONTRACT -> EconomyMutator.get(playerK, payload.aType()) >= payload.aAmount();
+                    case ULTIMATUM -> true;
+                    case COMPLIMENT, INSULT, WARNING, WAR_DECLARATION, ALLIANCE_PROPOSAL, ALLIANCE_BREAK,
+                        WHITE_PEACE, SURRENDER -> true;
+                    default -> throw new IllegalArgumentException("Unexpected value: " + payload.kind());
+                };
+
+                if (!playerCan) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "Your kingdom can't afford that."));
+                    return;
+                }
+
+                // -----------------------------------------
+                // DELAY + 2-MIN COOLDOWN (ONLY HERE)
+                // -----------------------------------------
+                long nowTick = server.getTickCount();
+                ServerLevel mailLevel = server.overworld();
+                var mailbox = DiplomacyMailboxState.get(mailLevel);
+
+                // use mailbox's "proposal" cooldown map (or add a new one; this is fine because ONLY this receiver uses it)
+                if (mailbox.isProposalOnCooldown(player.getUUID(), toK.id, nowTick)) {
+                    long rem = mailbox.proposalCooldownRemaining(player.getUUID(), toK.id, nowTick);
+                    int secs = (int) (rem / 20L);
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "Proposal cooldown: " + secs + "s"));
+                    return;
+                }
+                mailbox.startProposalCooldown(player.getUUID(), toK.id, nowTick);
+
+                int delay = 200 + mailLevel.getRandom().nextInt(201); // 10–20s
+
+                // deliver to AI pipeline AFTER delay (not instantly)
+                mailbox.scheduleInPersonToAi(
+                        player.getUUID(),
+                        toK.id,
+                        payload.kind(),
+                        payload.aType(), payload.aAmount(),
+                        payload.bType(), payload.bAmount(),
+                        payload.maxAmount(),
+                        payload.cb(),
+                        note,
+                        nowTick + delay
+                );
+
+                ServerPlayNetworking.send(player,
+                        new mailSendResultS2CPayload(payload.requestId(), true, "Proposal sent (arrives in " + (delay / 20) + "s)."));
+
+                // keep your existing cooldown marking if you want it for UI gating
+                name.kingdoms.diplomacy.DiplomacyPlayerSendRules.markSentCooldowns(server, playerK.id, toK.id, payload.kind());
+            });
+        });
+
 
         ServerPlayNetworking.registerGlobalReceiver(warCommandMoveOrderC2SPayload.TYPE, (payload, ctx) -> {
             ctx.server().execute(() -> {

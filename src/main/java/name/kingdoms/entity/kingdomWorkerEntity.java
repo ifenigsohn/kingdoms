@@ -401,7 +401,7 @@ public class kingdomWorkerEntity extends PathfinderMob {
 
         // If we've already collected today, they can't pay again.
         if (lastTaxDay == today) {
-            sp.sendSystemMessage(name.kingdoms.KingdomTaxTables.rollNoPayLine(this.getRandom()));
+            sp.sendSystemMessage(name.kingdoms.KingdomTaxTables.rollPayLine(this.getRandom(), ItemStack.EMPTY));
             return InteractionResult.CONSUME;
         }
 
@@ -414,7 +414,7 @@ public class kingdomWorkerEntity extends PathfinderMob {
 
         lastTaxDay = today;
 
-        sp.sendSystemMessage(name.kingdoms.KingdomTaxTables.rollPayLine(this.getRandom(), tax));
+        sp.sendSystemMessage(name.kingdoms.KingdomTaxTables.rollNoPayLine(this.getRandom()));
         return InteractionResult.CONSUME;
 
     }

@@ -2,9 +2,14 @@ package name.kingdoms.diplomacy;
 
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
+
+import name.kingdoms.network.serverMail;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
+import name.kingdoms.diplomacy.DiplomacyResponseQueue;
 
 import java.util.*;
 
@@ -13,6 +18,20 @@ public final class DiplomacyMailboxState extends SavedData {
 
     // player -> letters
     private final Map<UUID, List<Letter>> inbox = new HashMap<>();
+
+    // (player|kingdom) -> tickUntilAllowed
+    private final Map<String, Long> proposalCooldownUntil = new HashMap<>();
+
+    // pending deliveries (persisted)
+    private final List<PendingDelivery> pending = new ArrayList<>();
+
+    private static String pairKey(UUID player, UUID kingdom) {
+        return player.toString() + "|" + kingdom.toString();
+    }
+
+    // pending in-person proposals (player -> AI) to be delivered after a delay
+    private final List<PendingToAi> pendingToAi = new ArrayList<>();
+
 
     public DiplomacyMailboxState() {}
 
@@ -82,6 +101,12 @@ public final class DiplomacyMailboxState extends SavedData {
     private static final Codec<Letter.CasusBelli> CB_CODEC =
             Codec.STRING.xmap(Letter.CasusBelli::valueOf, Letter.CasusBelli::name);
 
+    private static final Codec<Map<String, Long>> COOLDOWN_CODEC =
+        Codec.unboundedMap(Codec.STRING, Codec.LONG);
+
+
+
+
     private static final Codec<Letter> LETTER_CODEC =
         RecordCodecBuilder.create(inst -> inst.group(
                 UUID_CODEC.fieldOf("id").forGetter(Letter::id),
@@ -97,7 +122,7 @@ public final class DiplomacyMailboxState extends SavedData {
                 Codec.LONG.fieldOf("created").forGetter(Letter::createdTick),
                 Codec.LONG.optionalFieldOf("expires", 0L).forGetter(Letter::expiresTick),
 
-                // ✅ bundle the rest
+                // bundle the rest
                 LetterPayload.CODEC.fieldOf("payload").forGetter(l -> new LetterPayload(
                         l.aType(),
                         l.aAmount(),
@@ -129,14 +154,137 @@ public final class DiplomacyMailboxState extends SavedData {
             );
         }));
 
+        private record PendingDelivery(
+                UUID toPlayer,
+                Letter letter,
+                long deliverTick
+        ) {
+            private static final Codec<PendingDelivery> CODEC =
+                    RecordCodecBuilder.create(inst -> inst.group(
+                            UUID_CODEC.fieldOf("to").forGetter(PendingDelivery::toPlayer),
+                            LETTER_CODEC.fieldOf("letter").forGetter(PendingDelivery::letter),
+                            Codec.LONG.fieldOf("deliverTick").forGetter(PendingDelivery::deliverTick)
+                    ).apply(inst, PendingDelivery::new));
+        }
+
+     private record PendingToAi(
+                UUID playerId,
+                UUID aiKingdomId,
+                Letter.Kind kind,
+                ResourceType aType, double aAmount,
+                Optional<ResourceType> bType, double bAmount,
+                double maxAmount,
+                Optional<Letter.CasusBelli> cb,
+                String note,
+                long deliverTick
+        ) {
+            private static final Codec<PendingToAi> CODEC =
+                    RecordCodecBuilder.create(inst -> inst.group(
+                            UUID_CODEC.fieldOf("player").forGetter(PendingToAi::playerId),
+                            UUID_CODEC.fieldOf("ai").forGetter(PendingToAi::aiKingdomId),
+                            KIND_CODEC.fieldOf("kind").forGetter(PendingToAi::kind),
+
+                            RESOURCE_CODEC.fieldOf("aType").forGetter(PendingToAi::aType),
+                            Codec.DOUBLE.fieldOf("aAmt").forGetter(PendingToAi::aAmount),
+
+                            RESOURCE_CODEC.optionalFieldOf("bType").forGetter(PendingToAi::bType),
+                            Codec.DOUBLE.optionalFieldOf("bAmt", 0.0).forGetter(PendingToAi::bAmount),
+
+                            Codec.DOUBLE.optionalFieldOf("maxAmt", 0.0).forGetter(PendingToAi::maxAmount),
+                            CB_CODEC.optionalFieldOf("cb").forGetter(PendingToAi::cb),
+                            Codec.STRING.optionalFieldOf("note", "").forGetter(PendingToAi::note),
+
+                            Codec.LONG.fieldOf("deliver").forGetter(PendingToAi::deliverTick)
+                    ).apply(inst, PendingToAi::new));
+        }
+
+                private static final Codec<List<PendingDelivery>> PENDING_CODEC =
+            PendingDelivery.CODEC.listOf();
+
+                private static final Codec<List<PendingToAi>> PENDING_TO_AI_CODEC =
+                    PendingToAi.CODEC.listOf();
+
 
     private static final Codec<Map<UUID, List<Letter>>> INBOX_CODEC =
             Codec.unboundedMap(UUID_CODEC, LETTER_CODEC.listOf());
 
-    private static final Codec<DiplomacyMailboxState> STATE_CODEC =
-            RecordCodecBuilder.create(inst -> inst.group(
-                    INBOX_CODEC.optionalFieldOf("inbox", Map.of()).forGetter(s -> s.inbox)
-            ).apply(inst, DiplomacyMailboxState::new));
+   private static final Codec<DiplomacyMailboxState> STATE_CODEC =
+        RecordCodecBuilder.create(inst -> inst.group(
+                INBOX_CODEC.optionalFieldOf("inbox", Map.of()).forGetter(s -> s.inbox),
+                COOLDOWN_CODEC.optionalFieldOf("proposalCooldown", Map.of()).forGetter(s -> s.proposalCooldownUntil),
+                PENDING_CODEC.optionalFieldOf("pending", List.of()).forGetter(s -> s.pending),
+                PENDING_TO_AI_CODEC.optionalFieldOf("pendingToAi", List.of()).forGetter(s -> s.pendingToAi)
+        ).apply(inst, (decodedInbox, decodedCooldown, decodedPending, decodedPendingToAi) -> {
+            DiplomacyMailboxState s = new DiplomacyMailboxState(decodedInbox);
+
+            s.proposalCooldownUntil.clear();
+            if (decodedCooldown != null) s.proposalCooldownUntil.putAll(decodedCooldown);
+
+            s.pending.clear();
+            if (decodedPending != null) s.pending.addAll(decodedPending);
+
+            s.pendingToAi.clear();
+            if (decodedPendingToAi != null) s.pendingToAi.addAll(decodedPendingToAi);
+
+            return s;
+        }));
+
+
+
+
+    public void scheduleInPersonToAi(
+        UUID playerId,
+        UUID aiKingdomId,
+        Letter.Kind kind,
+        ResourceType aType, double aAmount,
+        ResourceType bType, double bAmount,
+        double maxAmount,
+        Letter.CasusBelli cb,
+        String note,
+        long deliverTick
+    ){
+        pendingToAi.add(new PendingToAi(
+                playerId, aiKingdomId, kind,
+                aType, aAmount,
+                Optional.ofNullable(bType), bAmount,
+                maxAmount,
+                Optional.ofNullable(cb),
+                note == null ? "" : note,
+                deliverTick
+        ));
+        setDirty();
+    }
+
+    public void tickPendingToAi(MinecraftServer server, long nowTick) {
+        if (pendingToAi.isEmpty()) return;
+
+        for (int i = pendingToAi.size() - 1; i >= 0; i--) {
+            PendingToAi p = pendingToAi.get(i);
+            if (p == null) { pendingToAi.remove(i); setDirty(); continue; }
+            if (nowTick < p.deliverTick()) continue;
+
+            DiplomacyResponseQueue.queueMail(
+                    server,
+                    p.playerId(),
+                    p.aiKingdomId(),
+                    p.kind(),
+                    p.aType(), p.aAmount(),
+                    p.bType().orElse(null), p.bAmount(),
+                    p.maxAmount(),
+                    p.cb().orElse(null),
+                    p.note()
+            );
+
+            pendingToAi.remove(i);
+            setDirty();
+
+            if (DiplomacyResponseQueue.DEBUG_INSTANT) {
+                DiplomacyResponseQueue.processDueNow(server);
+            }
+        }
+    }
+
+
 
     public static final SavedDataType<DiplomacyMailboxState> TYPE =
             new SavedDataType<>(
@@ -149,6 +297,8 @@ public final class DiplomacyMailboxState extends SavedData {
     public static DiplomacyMailboxState get(ServerLevel level) {
         return level.getDataStorage().computeIfAbsent(TYPE);
     }
+
+
 
     // -------------------------
     // API
@@ -181,6 +331,60 @@ public final class DiplomacyMailboxState extends SavedData {
         list.add(letter);
         setDirty();
     }
+
+    public boolean isProposalOnCooldown(UUID player, UUID kingdom, long nowTick) {
+        if (player == null || kingdom == null) return false;
+        long until = proposalCooldownUntil.getOrDefault(pairKey(player, kingdom), 0L);
+        return nowTick < until;
+    }
+
+    public long proposalCooldownRemaining(UUID player, UUID kingdom, long nowTick) {
+        if (player == null || kingdom == null) return 0L;
+        long until = proposalCooldownUntil.getOrDefault(pairKey(player, kingdom), 0L);
+        return Math.max(0L, until - nowTick);
+    }
+
+    public void startProposalCooldown(UUID player, UUID kingdom, long nowTick) {
+        if (player == null || kingdom == null) return;
+        long until = nowTick + (20L * 60L * 2L); // 2 minutes
+        proposalCooldownUntil.put(pairKey(player, kingdom), until);
+        setDirty();
+    }
+
+    public void scheduleDelivery(UUID toPlayer, Letter letter, long deliverTick) {
+        if (toPlayer == null || letter == null) return;
+        pending.add(new PendingDelivery(toPlayer, letter, deliverTick));
+        setDirty();
+    }
+
+    public void tickPendingDeliveries(MinecraftServer server, ServerLevel level, long nowTick) {
+        if (pending.isEmpty()) return;
+
+        for (int i = pending.size() - 1; i >= 0; i--) {
+            PendingDelivery p = pending.get(i);
+            if (p == null || p.toPlayer() == null || p.letter() == null) {
+                pending.remove(i);
+                setDirty();
+                continue;
+            }
+
+            if (nowTick < p.deliverTick()) continue;
+
+            // deliver letter (newest-first)
+            getInbox(p.toPlayer()).add(0, p.letter());
+            pending.remove(i);
+            setDirty();
+
+            // if player is online, sync immediately
+            ServerPlayer sp = server.getPlayerList().getPlayer(p.toPlayer());
+            if (sp != null) {
+                serverMail.syncInbox(sp, getInbox(p.toPlayer()));
+            }
+        }
+    }
+
+    
+   
 
     public void deliverPlayerMail(
             UUID recipientPlayerId,

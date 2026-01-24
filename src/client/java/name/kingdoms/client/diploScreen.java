@@ -96,9 +96,29 @@ public class diploScreen extends AbstractContainerScreen<diploMenu> {
         listW = midW - PAD * 2;
         listH = Math.max(10, (midY + midH - 38) - listY);
 
-        addLocalAction("Write Letter", () -> mailScreen.open());
-        addMailAction("Alliance Proposal", Letter.Kind.ALLIANCE_PROPOSAL, false);
-        addMailAction("Declare War", Letter.Kind.WAR_DECLARATION, true);
+        addLocalAction("Proposal", () -> {
+            UUID toKingdom = menu.getTargetKingdomId();
+            if (toKingdom == null) {
+                if (mc.player != null) mc.player.displayClientMessage(Component.literal("No target kingdom id."), false);
+                return;
+            }
+            // Open mail compose locked to this king
+            mailScreen.openComposeToKingInPerson(toKingdom, kingEntityId);
+
+        });
+
+        addLocalAction("Request Proposal", () -> {
+            UUID toKingdom = menu.getTargetKingdomId();
+            if (toKingdom == null) {
+                if (mc.player != null) mc.player.displayClientMessage(Component.literal("No target kingdom id."), false);
+                return;
+            }
+
+            // Ask server to have the king send a letter to the player (delayed 10-20s).
+            // Server will respond later with a "focus this letter" packet, OR client will auto-focus on next inbox sync (see below).
+            ClientPlayNetworking.send(new name.kingdoms.payload.requestProposalC2SPayload(toKingdom));
+        });
+
 
 
         contentH = actionButtons.size() * BTN_H + Math.max(0, actionButtons.size() - 1) * BTN_GAP;

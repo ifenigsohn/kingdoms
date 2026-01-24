@@ -44,6 +44,15 @@ public final class mailScreen extends Screen {
     private ResourceType composeBType = ResourceType.WOOD;
     private Letter.CasusBelli composeCb = Letter.CasusBelli.UNKNOWN;
 
+    private final Tab startTab;
+    private final UUID forcedRecipientKingdomId; // if non-null, compose only to that kingdom
+    private UUID focusInboxLetterId;             // if non-null, select this on first inbox draw
+    private boolean didFocusInbox = false;
+
+    private final boolean inPersonMode;
+    private final int inPersonKingEntityId;
+
+
     //news
     private int newsSelected = 0;
     private int newsScroll = 0;
@@ -106,8 +115,48 @@ public final class mailScreen extends Screen {
     private int detailsBottom;
 
     public mailScreen() {
-        super(Component.literal("Diplomacy Mail"));
+        this(Tab.INBOX, null, null);
     }
+
+
+    public mailScreen(boolean inPersonMode, int kingEntityId, UUID forcedRecipientKingdomId) {
+        super(Component.literal("Diplomacy Mail"));
+
+        this.startTab = Tab.COMPOSE;
+        this.forcedRecipientKingdomId = forcedRecipientKingdomId;
+
+        this.focusInboxLetterId = null;
+        this.didFocusInbox = false;
+
+        this.inPersonMode = inPersonMode;
+        this.inPersonKingEntityId = kingEntityId;
+    }
+
+    public mailScreen(Tab startTab, UUID forcedRecipientKingdomId, UUID focusInboxLetterId) {
+        super(Component.literal("Diplomacy Mail"));
+
+        this.startTab = (startTab == null) ? Tab.INBOX : startTab;
+        this.forcedRecipientKingdomId = forcedRecipientKingdomId;
+
+        this.focusInboxLetterId = focusInboxLetterId;
+        this.didFocusInbox = false;
+
+        // default non-in-person
+        this.inPersonMode = false;
+        this.inPersonKingEntityId = -1;
+    }
+
+
+    public static void openComposeToKingInPerson(UUID kingKingdomId, int kingEntityId) {
+        ClientPlayNetworking.send(new mailInboxRequestC2SPayload());
+        ClientPlayNetworking.send(new mailRecipientsRequestC2SPayload());
+        ClientPlayNetworking.send(new name.kingdoms.payload.newsRequestC2SPayload(60));
+
+        Minecraft.getInstance().setScreen(new mailScreen(true, kingEntityId, kingKingdomId));
+    }
+
+
+
 
     public static void open() {
         ClientPlayNetworking.send(new mailInboxRequestC2SPayload());
@@ -417,7 +466,7 @@ public final class mailScreen extends Screen {
 
         addRenderableWidget(sendBtn);
 
-        setTab(tab);
+        setTab(startTab);
     }
 
     private String labelAType() {
@@ -518,6 +567,19 @@ public final class mailScreen extends Screen {
         refreshButtons();
     }
 
+    public static void openComposeToKing(UUID kingKingdomId) {
+        ClientPlayNetworking.send(new mailInboxRequestC2SPayload());
+        ClientPlayNetworking.send(new mailRecipientsRequestC2SPayload());
+        ClientPlayNetworking.send(new name.kingdoms.payload.newsRequestC2SPayload(60));
+
+        Minecraft.getInstance().setScreen(new mailScreen(Tab.COMPOSE, kingKingdomId, null));
+    }
+
+    public static void openInboxFocus(UUID letterId) {
+        ClientPlayNetworking.send(new mailInboxRequestC2SPayload());
+        Minecraft.getInstance().setScreen(new mailScreen(Tab.INBOX, null, letterId));
+    }
+
 
 
     private void setTab(Tab t) {
@@ -564,12 +626,28 @@ public final class mailScreen extends Screen {
         refreshRows();
         refreshButtons();
 
-        if (t == Tab.COMPOSE) {
-            recipientsRefreshCooldown = 0;     // force immediate refresh
-            requestRecipientsRefresh();        // get fresh server relations
-            requestPolicyForSelectedRecipient();
+        if (t == Tab.COMPOSE && forcedRecipientKingdomId != null) {
+            recipientSelected = 0;
+            recipientScroll = 0;
+        }
+
+    }
+
+    private void tryFocusInboxLetter() {
+        if (didFocusInbox) return;
+        if (focusInboxLetterId == null) return;
+
+        List<Letter> list = inbox();
+        for (int i = 0; i < list.size(); i++) {
+            if (focusInboxLetterId.equals(list.get(i).id())) {
+                inboxSelected = i;
+                inboxScroll = Math.max(0, i - 1);
+                didFocusInbox = true;
+                return;
+            }
         }
     }
+
 
     // -------------------------
     // Data
@@ -584,8 +662,20 @@ public final class mailScreen extends Screen {
     }
 
     private List<mailRecipientsSyncS2CPayload.Entry> recipients() {
-        return ClientMailRecipientsCache.get();
+        List<mailRecipientsSyncS2CPayload.Entry> all = ClientMailRecipientsCache.get();
+        if (forcedRecipientKingdomId == null) return all;
+
+        // Only show the king we opened for
+        List<mailRecipientsSyncS2CPayload.Entry> out = new ArrayList<>();
+        for (var e : all) {
+            if (forcedRecipientKingdomId.equals(e.kingdomId())) {
+                out.add(e);
+                break;
+            }
+        }
+        return out;
     }
+
 
     private Letter getSelectedInbox() {
         List<Letter> list = inbox();
@@ -716,7 +806,22 @@ public final class mailScreen extends Screen {
 
         long expiresTick = 0; // ultimatum has NO deadline now
 
-        ClientPlayNetworking.send(new mailSendC2SPayload(
+        if (inPersonMode) {
+            ClientPlayNetworking.send(new name.kingdoms.payload.inPersonProposalSendC2SPayload(
+                    reqId,
+                    rec.kingdomId(),
+                    inPersonKingEntityId,
+                    composeKind,
+                    composeAType,
+                    aAmt,
+                    bType,
+                    outBAmt,
+                    outMax,
+                    cb,
+                    note
+                ));
+        } else {
+            ClientPlayNetworking.send(new mailSendC2SPayload(
                 reqId,
                 rec.kingdomId(),
                 composeKind,
@@ -728,7 +833,9 @@ public final class mailScreen extends Screen {
                 cb,
                 note,
                 expiresTick
-        ));
+            ));
+        }
+
     }
 
     private void refreshRows() {
@@ -1057,6 +1164,8 @@ public final class mailScreen extends Screen {
         Letter sel = getSelectedInbox();
         int dx = detailsLeft + 10;
         int dy = top + 25;
+        
+        if (tab == Tab.INBOX) tryFocusInboxLetter();
 
         if (sel == null) {
             g.drawString(this.font, "No letters.", dx, dy, 0xFFFFFFFF);

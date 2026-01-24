@@ -227,11 +227,13 @@ public final class DiplomacyMailGenerator {
 
         kingdomState ks = kingdomState.get(server);
         DiplomacyMailboxState mailbox = DiplomacyMailboxState.get(level);
+        mailbox.tickPendingDeliveries(server, level, nowTick);
+        mailbox.tickPendingToAi(server, nowTick);
 
-        // ✅ relations are now single source of truth
+        // relations are now single source of truth
         DiplomacyRelationsState relState = DiplomacyRelationsState.get(server);
 
-        // ✅ war + alliance context for gating letter kinds
+        // war + alliance context for gating letter kinds
         var warState = name.kingdoms.war.WarState.get(server);
         var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
 
@@ -373,6 +375,7 @@ public final class DiplomacyMailGenerator {
                 mailbox.addLetter(player.getUUID(), letter);
                 serverMail.syncInbox(player, mailbox.getInbox(player.getUUID()));
                 if (--budget <= 0) return;
+
             }
         }
     }
