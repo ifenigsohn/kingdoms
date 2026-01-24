@@ -132,6 +132,7 @@ public final class networkInit {
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.kingdomHoverSyncS2CPayload.TYPE,name.kingdoms.payload.kingdomHoverSyncS2CPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(mailPolicySyncS2CPayload.TYPE, mailPolicySyncS2CPayload.STREAM_CODEC);
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.newsSyncS2CPayload.TYPE,name.kingdoms.payload.newsSyncS2CPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.calendarSyncPayload.TYPE,name.kingdoms.payload.calendarSyncPayload.CODEC);
     }
 
     public static void registerServerReceivers() {
@@ -802,8 +803,20 @@ public final class networkInit {
 
                     int rel = relState.getRelation(player.getUUID(), k.id);
 
-                    // Entry(..., isAi, rel)
-                    out.add(new mailRecipientsSyncS2CPayload.Entry(k.id, nm, isAi, rel));
+                    int headSkinId = 0;
+                    if (isAi) {
+                        var aiK = aiState.getById(k.id);
+                        if (aiK != null) headSkinId = Mth.clamp(aiK.skinId, 0, kingSkinPoolState.MAX_SKIN_ID);
+                    }
+
+                    ItemStack heraldry = ItemStack.EMPTY;
+                    if (k.heraldry != null && !k.heraldry.isEmpty()) {
+                        heraldry = k.heraldry.copyWithCount(1);
+                    }
+
+                    out.add(new mailRecipientsSyncS2CPayload.Entry(k.id, nm, isAi, rel, headSkinId, heraldry));
+
+
                 }
 
                 ServerPlayNetworking.send(player, new mailRecipientsSyncS2CPayload(out));

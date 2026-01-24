@@ -21,6 +21,8 @@ import name.kingdoms.entity.modEntities;
 import name.kingdoms.entity.ai.aiKingdomNPCEntity;
 import name.kingdoms.payload.kingdomTransitionS2CPayload;
 import name.kingdoms.payload.mailInboxSyncPayload;
+import name.kingdoms.war.WarPendingTicker;
+import name.kingdoms.war.WarState;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -46,6 +48,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import java.util.HashMap;
 import java.util.Map;
@@ -112,6 +115,30 @@ public class Kingdoms implements ModInitializer {
         for (var k : ks.getAllKingdoms()) applyEconomyStep(k, 10.0);
         ks.markDirty();
     }
+
+    private static int calendarSyncCooldown = 0;
+
+    private static void tickCalendar(MinecraftServer server) {
+        ServerLevel overworld = server.getLevel(Level.OVERWORLD);
+        if (overworld == null) return;
+
+        var cal = name.kingdoms.time.kingdomCalendarState.get(server);
+        cal.ensureInitialized(server);
+
+        int beforeY = cal.year, beforeM = cal.month, beforeD = cal.day;
+
+        cal.tick(overworld);
+
+        boolean changed = (cal.year != beforeY || cal.month != beforeM || cal.day != beforeD);
+        if (!changed) return;
+
+        // Broadcast to all players (once per day change)
+        var pkt = new name.kingdoms.payload.calendarSyncPayload(cal.year, cal.month, cal.day);
+        for (var player : server.getPlayerList().getPlayers()) {
+            ServerPlayNetworking.send(player, pkt);
+        }
+    }
+
 
     private static void tickKingdomTransitions(MinecraftServer server) {
         transitionTick++;
@@ -200,8 +227,13 @@ public class Kingdoms implements ModInitializer {
         name.kingdoms.war.WarBattleManager.init();
         name.kingdoms.diplomacy.DiplomacyRelationNormalizer.init();
         KingdomSatelliteSpawner.init();
+        ThroneSeatManager.hook();
         AiRelationNormalizer.init();
-        
+        ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickCalendar);
+        WarPendingTicker.init();
+        net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents.END_SERVER_TICK.register(server -> {
+            WarState.get(server).tickPendingWars(server);
+        });
 
         // Blocks/items
         modBlock.initalize();
@@ -209,6 +241,8 @@ public class Kingdoms implements ModInitializer {
         kingdomProtection.register();
 
         ModEffects.register();
+
+        
 
 
         name.kingdoms.network.networkInit.registerPayloadTypes();
@@ -229,6 +263,15 @@ public class Kingdoms implements ModInitializer {
         aiKingdomState.get(server).tickEconomies(overworld);
 
     });
+
+
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+            var cal = name.kingdoms.time.kingdomCalendarState.get(server);
+            cal.ensureInitialized(server);
+
+            ServerPlayNetworking.send(handler.player,
+                    new name.kingdoms.payload.calendarSyncPayload(cal.year, cal.month, cal.day));
+        });
 
 
 

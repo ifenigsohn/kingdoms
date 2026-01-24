@@ -15,10 +15,12 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.multiplayer.PlayerInfo;
+import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponentType;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -32,6 +34,7 @@ import net.minecraft.server.MinecraftServer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+
 
 public class kingdomBordersMapScreen extends Screen {
 
@@ -94,6 +97,17 @@ public class kingdomBordersMapScreen extends Screen {
     private static boolean cacheDirty = false;
     private static int dirtyWrites = 0;
 
+    private DynamicTexture mapTex;
+    private ResourceLocation mapTexId;
+    private NativeImage mapImg;
+
+    private int mapImgW = 0;
+    private int mapImgH = 0;
+
+    // how often to rebuild the panel image (separate from terrain sampling)
+    private int redrawEveryNFrames = 2;
+    private boolean forceRedraw = true;
+
     public kingdomBordersMapScreen() {
         super(Component.literal("Kingdom Borders"));
     }
@@ -102,6 +116,41 @@ public class kingdomBordersMapScreen extends Screen {
         // no-op
     }
 
+    private void ensureMapTexture(int panelW, int panelH, int stepPx) {
+        int w = Math.max(1, panelW / stepPx);
+        int h = Math.max(1, panelH / stepPx);
+
+        if (mapTex != null && w == mapImgW && h == mapImgH) return;
+
+        var tm = Minecraft.getInstance().getTextureManager();
+
+        // cleanup old
+        if (mapTex != null) {
+            mapTex.close();   // closes pixels too
+            mapTex = null;
+        }
+        mapImg = null; // DO NOT close separately
+
+
+        mapImgW = w;
+        mapImgH = h;
+
+        mapImg = new NativeImage(mapImgW, mapImgH, false);
+
+        // ✅ your version supports this:
+        mapTex = new DynamicTexture(() -> "kingdoms_map_panel", mapImg);
+
+        // register (ResourceLocation is correct for your TextureManager)
+        mapTexId = ResourceLocation.fromNamespaceAndPath("kingdoms", "map_panel");
+        tm.register(mapTexId, mapTex);
+
+        forceRedraw = true;
+    }
+
+
+
+
+
     @Override
     protected void init() {
         super.init();
@@ -109,6 +158,8 @@ public class kingdomBordersMapScreen extends Screen {
         ClientPlayNetworking.send(new name.kingdoms.payload.bordersRequestPayload());
         ClientPlayNetworking.send(new warZonesRequestPayload());
     }
+
+    
 
     private boolean resolveSurfaceBlock(ClientLevel level, int wx, int wz, int surfaceY) {
         int y = surfaceY - 1;
@@ -322,13 +373,23 @@ public class kingdomBordersMapScreen extends Screen {
     @Override
     public void removed() {
         saveCache(Minecraft.getInstance());
+
+       if (mapTex != null) {
+            mapTex.close();
+            mapTex = null;
+        }
+        mapImg = null;
+
         super.removed();
     }
+
+
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double deltaX, double deltaY) {
         double factor = (deltaY > 0) ? 0.85 : 1.15;
         scale = Math.max(0.5, Math.min(64.0, scale * factor));
+        forceRedraw = true; 
         return true;
     }
 
@@ -364,7 +425,8 @@ public class kingdomBordersMapScreen extends Screen {
         updateExploredTerrainClosestFirst(px, pz);
 
         // Draw cached terrain
-        drawCachedTerrainFast(g, left, top, right, bottom, cx, cy, px, pz);
+        drawCachedTerrainAsTexture(g, left, top, right, bottom, cx, cy, px, pz);
+
 
         // -------------------------
         // Borders overlay
@@ -645,38 +707,60 @@ public class kingdomBordersMapScreen extends Screen {
     // ------------------------------------
     // Draw cached terrain
     // ------------------------------------
-    private void drawCachedTerrainFast(GuiGraphics g,
-                                       int left, int top, int right, int bottom,
-                                       int cx, int cy,
-                                       int px, int pz) {
+    private void drawCachedTerrainAsTexture(GuiGraphics g,
+                                            int left, int top, int right, int bottom,
+                                            int cx, int cy,
+                                            int px, int pz) {
         if (terrainCache == null) return;
 
-        for (int sy = top; sy < bottom; sy += drawStepPx) {
-            for (int sx = left; sx < right; sx += drawStepPx) {
+        int panelW = right - left;
+        int panelH = bottom - top;
 
-                int worldX = (int) Math.round(px + (sx - cx) * scale);
+        ensureMapTexture(panelW, panelH, drawStepPx);
+        if (mapTex == null || mapTexId == null) return;
+
+        boolean doRedraw = forceRedraw || (frameCounter % redrawEveryNFrames == 0);
+        if (doRedraw) {
+            forceRedraw = false;
+
+            if (mapImg == null) return;
+
+            for (int iy = 0; iy < mapImgH; iy++) {
+                int sy = top + iy * drawStepPx;
                 int worldZ = (int) Math.round(pz + (sy - cy) * scale);
-
-                int tx = worldToCacheX(worldX);
                 int tz = worldToCacheZ(worldZ);
-                if (tx < 0 || tx >= CACHE_W || tz < 0 || tz >= CACHE_H) continue;
 
-                int color = sampleCacheWithFallback(tx, tz);
+                for (int ix = 0; ix < mapImgW; ix++) {
+                    int sx = left + ix * drawStepPx;
+                    int worldX = (int) Math.round(px + (sx - cx) * scale);
+                    int tx = worldToCacheX(worldX);
 
-                int x2 = Math.min(right, sx + drawStepPx);
-                int y2 = Math.min(bottom, sy + drawStepPx);
+                    int color = FOG;
+                    if (tx >= 0 && tx < CACHE_W && tz >= 0 && tz < CACHE_H) {
+                        color = sampleCacheWithFallback(tx, tz);
+                    }
 
-                // draw fog instead of skipping
-                if (color == FOG) {
-                    g.fill(sx, sy, x2, y2, FOG_DRAW);
-                    continue;
+                    if (color == FOG) color = FOG_DRAW;
+                    mapImg.setPixel(ix, iy, color);
                 }
-
-                g.fill(sx, sy, x2, y2, color);
-
             }
+
+            mapTex.upload();
         }
+
+        g.blit(
+            net.minecraft.client.renderer.RenderPipelines.GUI_TEXTURED,
+            mapTexId,
+            left, top,
+            0.0f, 0.0f,        // u,v (pixels in the texture)
+            panelW, panelH,    // dest width/height on screen
+            mapImgW, mapImgH,  // src width/height to sample from texture
+            mapImgW, mapImgH   // full texture size (for normalization)
+        );
+
     }
+
+
 
     private int sampleCacheWithFallback(int tx, int tz) {
         int c = terrainCache.getPixel(tx, tz);

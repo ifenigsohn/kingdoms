@@ -78,11 +78,14 @@ public class kingdomsClient implements ClientModInitializer {
     public static volatile name.kingdoms.payload.bordersSyncPayload CLIENT_BORDERS =
         new name.kingdoms.payload.bordersSyncPayload(java.util.List.of());
 
-                
+    public static volatile name.kingdoms.payload.calendarSyncPayload CLIENT_CALENDAR =
+        new name.kingdoms.payload.calendarSyncPayload(0, 1, 1);
+       
 
     @Override
     public void onInitializeClient() {
 
+        name.kingdoms.client.calendarHudOverlay.init();
         Kingdoms.PROXY = new clientProxyImpl();
         KingdomTransitionHUD.register();
         name.kingdoms.client.WarBattleHUD.register();

@@ -78,6 +78,8 @@ public final class RoadBuilder {
         LOGGER.info("[Kingdoms] Enqueued {} road edges for region {}", edges.size(), regionKey);
     }
 
+   
+
     private static void tick(MinecraftServer server) {
         if (JOBS.isEmpty()) return;
 
@@ -131,6 +133,20 @@ public final class RoadBuilder {
         private boolean isStairAt(int x, int y, int z) {
             scratch.set(x, y, z);
             return level.getBlockState(scratch).getBlock() instanceof StairBlock;
+        }
+
+        private boolean isNearStairTop(int x, int y, int z) {
+            // Check same level and one above (top of stair)
+            for (int yy = y; yy <= y + 1; yy++) {
+                if (isStairAt(x, yy, z)) return true;
+
+                // 4-neighbors (no diagonals)
+                if (isStairAt(x + 1, yy, z)) return true;
+                if (isStairAt(x - 1, yy, z)) return true;
+                if (isStairAt(x, yy, z + 1)) return true;
+                if (isStairAt(x, yy, z - 1)) return true;
+            }
+            return false;
         }
 
 
@@ -418,6 +434,12 @@ public final class RoadBuilder {
                 if (isStairAt(rx, y, rz) || isStairAt(rx, y + 1, rz)) {
                     continue;
                 }
+
+                // NEW: also prevent placing path blocks right next to stair tops
+                if (isNearStairTop(rx, y, rz)) {
+                    continue;
+                }
+
 
                 // If this step includes stairs, don't paint the lower stair row as flat surface.
                 // (prevents another segment from overwriting stairs)
@@ -901,6 +923,8 @@ public final class RoadBuilder {
             return (dz > 0) ? Direction.SOUTH : Direction.NORTH;
         }
     }
+
+    
 
     // must match RoadAStar
     private static final int FOOTPRINT_MARGIN = RoadAStar.FOOTPRINT_MARGIN;

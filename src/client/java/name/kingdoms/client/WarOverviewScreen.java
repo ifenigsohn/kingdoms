@@ -156,7 +156,7 @@ public final class WarOverviewScreen extends Screen {
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
 
         this.renderTransparentBackground(g);
-        super.render(g, mouseX, mouseY, partialTick);
+        
 
         int colW = Math.min(this.width - 20, 360);
         int x = (this.width - colW) / 2;
@@ -205,33 +205,46 @@ public final class WarOverviewScreen extends Screen {
         // ----------------------------
         // Loadout section render
         // ----------------------------
-        int btnY = 20 + 140;
-        int loadoutTop = btnY + 30;
+        int loadoutTop = 120; 
 
         int previewW = 60;
+        int previewH = 80;
 
-        int previewX = x;
-        int previewCenterX = previewX + (previewW / 2);
-        int previewBottomY = loadoutTop + 78;
+        int colCenterX = x + (colW / 2);
 
-        g.drawString(this.font, "Loadout", x, loadoutTop, 0xFFFFFFFF);
-        g.drawString(this.font, "Soldier Skin: " + selectedSoldierSkinId, x + previewW + 10, loadoutTop, 0xFFFFFFFF);
+        // +20 is the “nudge right” amount. Increase/decrease to taste.
+        int previewX = colCenterX + 20 - (previewW / 2);
 
-        if (previewSoldier != null) {
-            int scale = 35;
+       int loadoutX = previewX;
+
+        g.drawString(this.font, "Loadout", loadoutX, loadoutTop, 0xFFFFFFFF);
+        g.drawString(
+                this.font,
+                "Soldier Skin: " + selectedSoldierSkinId,
+                loadoutX + previewW + 10,
+                loadoutTop,
+                0xFFFFFFFF
+        );
+
+
+       if (previewSoldier != null) {
+            int x1 = previewX;
+            int y1 = loadoutTop;
+            int x2 = previewX + previewW;
+            int y2 = loadoutTop + previewH;
+
             InventoryScreen.renderEntityInInventoryFollowsMouse(
                     g,
-                    previewCenterX,
-                    previewBottomY,
-                    scale,
-                    scale, scale, (float) (previewCenterX - mouseX),
-                    (float) (previewBottomY - mouseY),
-                    scale, previewSoldier
+                    x1, y1,
+                    x2, y2,
+                    36,          // scale (match diplo vibe)
+                    0.10F,       // y offset (match diplo)
+                    mouseX, mouseY,
+                    previewSoldier
             );
-        } else {
-            g.drawString(this.font, "(preview unavailable)", x, loadoutTop + 12, 0xFFFF7777);
         }
-
+        super.render(g, mouseX, mouseY, partialTick);
+        
     }
 
     private static String format1(double v) {

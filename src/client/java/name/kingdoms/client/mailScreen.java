@@ -1,5 +1,6 @@
 package name.kingdoms.client;
 
+import name.kingdoms.kingSkinPoolState;
 import name.kingdoms.diplomacy.Letter;
 import name.kingdoms.diplomacy.ResourceType;
 import name.kingdoms.payload.mailActionC2SPayload;
@@ -15,7 +16,11 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
-
+import net.minecraft.util.Mth;
+import net.minecraft.ChatFormatting;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -285,6 +290,9 @@ public final class mailScreen extends Screen {
         panelTop = top + 15;
         panelBottom = this.height - 24; // full height panel
 
+        int tabY = Math.max(4, top - 22);
+        int titleY = Math.max(4, tabY - 14);
+
         int availableH = Math.max(120, panelBottom - panelTop);
 
         // list fills the full panel height (not clamped down)
@@ -323,16 +331,17 @@ public final class mailScreen extends Screen {
         listY = panelTop + 6;
 
         inboxTabBtn = Button.builder(Component.literal("Inbox"), b -> setTab(Tab.INBOX))
-                .bounds(left, top - 22, 80, 20).build();
+        .bounds(left, tabY, 80, 20).build();
 
         composeTabBtn = Button.builder(Component.literal("Compose"), b -> setTab(Tab.COMPOSE))
-                .bounds(left + 85, top - 22, 80, 20).build();
+                .bounds(left + 85, tabY, 80, 20).build();
 
         newsTabBtn = Button.builder(Component.literal("News"), b -> {
                 setTab(Tab.NEWS);
                 requestNews();
             })
-            .bounds(left + 170, top - 22, 80, 20).build();
+            .bounds(left + 170, tabY, 80, 20).build();
+
 
 
         addRenderableWidget(newsTabBtn);
@@ -360,7 +369,7 @@ public final class mailScreen extends Screen {
         buildRowButtons();
 
         int rx = detailsLeft + 10;
-        int ry = panelTop + 10;
+        int ry = panelTop + 28;
 
 
         int btnW = Math.max(140, Math.min(210, detailsInnerW - 90));
@@ -435,13 +444,19 @@ public final class mailScreen extends Screen {
 
         for (int i = 0; i < visibleRows; i++) {
             final int visibleIdx = i;
+
+            int bx = listX + RECIPIENT_ICON_PAD;
+            int bw = rowW - RECIPIENT_ICON_PAD;
+
             Button row = Button.builder(Component.literal(""), b -> onRowClicked(visibleIdx))
-                    .bounds(listX, listY + visibleIdx * rowH, rowW, rowH)
+                    .bounds(bx, listY + visibleIdx * rowH, bw, rowH)
                     .build();
+
             rowButtons.add(row);
             addRenderableWidget(row);
         }
     }
+
 
 
     // -------------------------
@@ -739,10 +754,10 @@ public final class mailScreen extends Screen {
                 int actual = recipientScroll + i;
                 if (actual < list.size()) {
                     var e = list.get(actual);
-                    String suffix = e.isAi() ? ("  [rel " + fmtSigned(e.relation()) + "]") : "";
-                    row.setMessage(Component.literal(e.name() + suffix));
+                    row.setMessage(recipientRowLabel(e));
                 } else row.setMessage(Component.literal(""));
             }
+
         } else { // NEWS
             List<String> list = news();
             newsScroll = clampScroll(newsScroll, list.size());
@@ -994,7 +1009,7 @@ public final class mailScreen extends Screen {
     @Override
     public void render(GuiGraphics g, int mouseX, int mouseY, float delta) {
         g.fill(0, 0, this.width, this.height, 0xAA000000);
-        g.drawString(this.font, this.title, left, top - 36, 0xFFFFFFFF);
+        g.drawString(this.font, this.title, left, Math.max(4, top - 36), 0xFFFFFFFF);
 
         int panelBottom = this.panelBottom;
 
@@ -1011,6 +1026,31 @@ public final class mailScreen extends Screen {
         g.drawString(this.font, "(mouse wheel to scroll list)", left + 8, panelBottom + 6, 0x888888);
 
         super.render(g, mouseX, mouseY, delta);
+
+        // Draw recipient head icons on top of the list rows (compose only)
+        if (tab == Tab.COMPOSE) {
+            List<mailRecipientsSyncS2CPayload.Entry> list = recipients();
+            recipientScroll = clampScroll(recipientScroll, list.size());
+
+            for (int i = 0; i < rowButtons.size(); i++) {
+                int actual = recipientScroll + i;
+                if (actual >= list.size()) continue;
+
+                var e = list.get(actual);
+                ItemStack icon = recipientHeadStack(e);
+
+                int ix = listX + 1;
+                int iy = listY + i * rowH + 2;
+
+                if (icon.isEmpty()) {
+                    g.fill(ix, iy, ix + 16, iy + 16, 0xFF444444);
+                } else {
+                    g.renderItem(icon, ix, iy);
+                }
+
+
+            }
+        }
     }
 
     private void renderInboxDetails(GuiGraphics g) {
@@ -1190,7 +1230,28 @@ public final class mailScreen extends Screen {
         int y = detailsTop;
 
         var rec = getSelectedRecipient();
-        g.drawString(font, "To: " + (rec == null ? "(none)" : rec.name()), x, y, 0xFFFFFFFF);
+        String toText = (rec == null) ? "(none)" : rec.name();
+
+        int rel = (rec == null) ? 0 : rec.relation();
+        int color = 0xFFFFFFFF;
+        if (rel >= REL_ALLY_THRESHOLD) color = 0xFF55FF55;      // green-ish
+        else if (rel <= REL_ENEMY_THRESHOLD) color = 0xFFFF5555; // red-ish
+
+        if (rec != null) {
+            // draw tiny heraldry next to "To:"
+            ItemStack herald = recipientHeraldryStack(rec);
+            if (!herald.isEmpty()) g.renderItem(herald, x, y - 2);
+
+            // (optional) head too:
+            ItemStack head = recipientHeadStack(rec);
+            if (!head.isEmpty()) g.renderItem(head, x + 18, y - 2);
+
+            x += 36; // shift text right if you drew two icons
+        }
+
+
+        g.drawString(font, "To: " + toText, x, y, color);
+
         y += 12;
 
         // Draw contract labels aligned to the actual edit boxes (responsive!)
@@ -1358,4 +1419,53 @@ public final class mailScreen extends Screen {
     private static String safeRes(ResourceType t) {
         return t == null ? "?" : t.name();
     }
+
+    // --- Recipient list visuals ---
+    private static final int RECIPIENT_ICON_PAD = 36;
+    private static final int REL_ALLY_THRESHOLD  = 40;
+    private static final int REL_ENEMY_THRESHOLD = -40;
+
+    private Component recipientRowLabel(mailRecipientsSyncS2CPayload.Entry e) {
+        if (e == null) return Component.literal("");
+
+        Component prefix = Component.empty();
+        int rel = e.relation();
+
+        if (rel >= REL_ALLY_THRESHOLD) {
+            prefix = Component.literal("ALLY ").withStyle(ChatFormatting.GREEN);
+        } else if (rel <= REL_ENEMY_THRESHOLD) {
+            prefix = Component.literal("ENEMY ").withStyle(ChatFormatting.RED);
+        }
+
+        Component name = Component.literal(e.name());
+
+        // keep your existing suffix
+        Component suffix = Component.empty();
+        if (e.isAi()) {
+            suffix = Component.literal("  [rel " + fmtSigned(rel) + "]")
+                    .withStyle(ChatFormatting.GRAY);
+        }
+
+        return Component.empty().append(prefix).append(name).append(suffix);
+    }
+
+   private ItemStack recipientHeadStack(mailRecipientsSyncS2CPayload.Entry e) {
+        if (e == null || !e.isAi()) return ItemStack.EMPTY;
+
+        int id = Mth.clamp(e.headSkinId(), 0, kingSkinPoolState.MAX_SKIN_ID);
+
+        Object raw = name.kingdoms.modItem.KING_HEADS[id];
+        if (!(raw instanceof Item item)) return ItemStack.EMPTY;
+
+        return new ItemStack(item);
+    }
+
+
+    private ItemStack recipientHeraldryStack(mailRecipientsSyncS2CPayload.Entry e) {
+        if (e == null) return ItemStack.EMPTY;
+        ItemStack h = e.heraldry();
+        return (h == null) ? ItemStack.EMPTY : h;
+    }
+
+
 }

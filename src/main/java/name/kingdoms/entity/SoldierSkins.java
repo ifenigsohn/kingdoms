@@ -9,7 +9,7 @@ public final class SoldierSkins {
     private SoldierSkins() {}
 
     // Set this to (# of skins - 1)
-    public static final int MAX_SKIN_ID = 25;
+    public static final int MAX_SKIN_ID = 27;
 
     private static final ResourceLocation FALLBACK =
             ResourceLocation.fromNamespaceAndPath(Kingdoms.MOD_ID, "textures/entity/soldier.png");

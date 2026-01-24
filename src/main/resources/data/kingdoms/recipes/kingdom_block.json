@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "building",
+  "pattern": [
+    " B ",
+    "SGS",
+    "SSS"
+  ],
+  "key": {
+    "B": { "item": "minecraft:white_banner" },
+    "S": { "item": "minecraft:stone_bricks" },
+    "G": { "item": "minecraft:gold_ingot" }
+  },
+  "result": {
+    "id": "kingdoms:kingdom_block",
+    "count": 1
+  }
+}

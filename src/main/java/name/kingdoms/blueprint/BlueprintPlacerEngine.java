@@ -957,9 +957,42 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
 
         // === Dropped item cleanup ===
         private static final int ITEM_CLEAR_PLAYER_RADIUS = 64;     // don't delete drops near players
-        private static final int ITEM_CLEAR_MAX_PER_TASK   = 2000;   // safety cap
-        private boolean itemsCleared = false;
+        private static final int ITEM_CLEAR_MAX_PER_PASS  = 2000;   // safety cap (per pass)
+
+        // we do two passes so we catch both grading debris and placement debris
+        private boolean itemsClearedAfterGrade = false;
+        private boolean itemsClearedAfterPlace = false;
         
+        private boolean isWorldgenTrash(ItemStack stack) {
+            // Exact known offenders
+            if (stack.is(Items.LEAF_LITTER)) return true;
+
+            // Seeds
+            if (stack.is(Items.WHEAT_SEEDS)) return true;
+            if (stack.is(Items.BEETROOT_SEEDS)) return true;
+            if (stack.is(Items.MELON_SEEDS)) return true;
+            if (stack.is(Items.PUMPKIN_SEEDS)) return true;
+
+            // Saplings / propagules / bamboo item
+            if (stack.is(Items.OAK_SAPLING) || stack.is(Items.SPRUCE_SAPLING) || stack.is(Items.BIRCH_SAPLING) ||
+                stack.is(Items.JUNGLE_SAPLING) || stack.is(Items.ACACIA_SAPLING) || stack.is(Items.DARK_OAK_SAPLING) ||
+                stack.is(Items.MANGROVE_PROPAGULE) || stack.is(Items.CHERRY_SAPLING) || stack.is(Items.BAMBOO)) {
+                return true;
+            }
+
+            // Robust fallback: registry id string
+            var key = BuiltInRegistries.ITEM.getKey(stack.getItem());
+            if (key != null) {
+                String id = key.toString(); // ex: "minecraft:wildflowers"
+
+                if (id.endsWith("_seeds")) return true;
+                if (id.contains("wildflower")) return true;
+                if (id.contains("leaf_litter")) return true;
+            }
+
+            return false;
+        }
+
 
 
         private static final class LongArray {
@@ -1131,6 +1164,8 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
                 if (phase == Phase.GRADE_TERRAIN) {
                     boolean gradeDone = gradeTerrain(server, budget, deadlineNanos);
                     if (!gradeDone) return false;
+
+                     clearDroppedItemsInWorkArea(server, "after_grade");
 
                     phase = Phase.PLACE_BLUEPRINT;
                     LOGGER.info("[Kingdoms] Terrain graded for '{}' at {}", bp.id, origin);
@@ -2048,14 +2083,19 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
             return false;
         }
 
-        private void clearDroppedItemsAfterBuild(MinecraftServer server) {
-            if (itemsCleared) return;
-            itemsCleared = true;
+        private void clearDroppedItemsInWorkArea(MinecraftServer server, String pass) {
+            // Pass gating
+            if ("after_grade".equals(pass)) {
+                if (itemsClearedAfterGrade) return;
+                itemsClearedAfterGrade = true;
+            } else if ("after_place".equals(pass)) {
+                if (itemsClearedAfterPlace) return;
+                itemsClearedAfterPlace = true;
+            }
 
-            // Make sure bounds exist
             if (!prepInitialized) initBoundsOnly();
 
-            // Skip if any players are nearby (safety)
+            // Skip if players nearby (safety)
             double cx = (prepMinX + prepMaxX) * 0.5;
             double cz = (prepMinZ + prepMaxZ) * 0.5;
 
@@ -2073,44 +2113,23 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
             int removed = 0;
             List<ItemEntity> drops = level.getEntitiesOfClass(ItemEntity.class, box, e -> e != null && e.isAlive());
             for (ItemEntity it : drops) {
-                if (removed >= ITEM_CLEAR_MAX_PER_TASK) break;
+                if (removed >= ITEM_CLEAR_MAX_PER_PASS) break;
 
                 ItemStack stack = it.getItem();
                 if (stack.isEmpty()) continue;
 
-                if (isJunkDrop(stack)) {
-                    it.discard(); // deletes the entity
+                if (isWorldgenTrash(stack)) {
+                    it.discard();
                     removed++;
                 }
             }
 
             if (DEBUG) {
-                dbg("ITEM_CLEANUP bp=" + bp.id + " removed=" + removed + " bounds=("
-                        + prepMinX + "," + prepMinZ + ")->(" + prepMaxX + "," + prepMaxZ + ")");
+                dbg("ITEM_CLEANUP pass=" + pass + " bp=" + bp.id + " removed=" + removed
+                        + " bounds=(" + prepMinX + "," + prepMinZ + ")->(" + prepMaxX + "," + prepMaxZ + ")");
             }
         }
 
-        private boolean isJunkDrop(ItemStack stack) {
-            // Common “worldgen trash” items
-           
-            if (stack.is(Items.LEAF_LITTER)) return true;
-            if (stack.is(Items.WILDFLOWERS)) return true;
-
-            // Seeds
-            if (stack.is(Items.WHEAT_SEEDS)) return true;
-            if (stack.is(Items.BEETROOT_SEEDS)) return true;
-            if (stack.is(Items.MELON_SEEDS)) return true;
-            if (stack.is(Items.PUMPKIN_SEEDS)) return true;
-
-            // Saplings
-            if (stack.is(Items.OAK_SAPLING) || stack.is(Items.SPRUCE_SAPLING) || stack.is(Items.BIRCH_SAPLING) ||
-                stack.is(Items.JUNGLE_SAPLING) || stack.is(Items.ACACIA_SAPLING) || stack.is(Items.DARK_OAK_SAPLING) ||
-                stack.is(Items.MANGROVE_PROPAGULE) || stack.is(Items.CHERRY_SAPLING) || stack.is(Items.BAMBOO)) {
-                return true;
-            }
-
-            return false;
-        }
 
 
 
@@ -2127,7 +2146,10 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
                 if (System.nanoTime() >= deadlineNanos) return false;
 
                 if (secIn == null) {
-                    if (secY >= bp.sectionsY) return true;
+                    if (secY >= bp.sectionsY) {
+                        clearDroppedItemsInWorkArea(server, "after_place");
+                        return true;
+                    }
                     openCurrentSectionOrSkip(server);
                     continue;
                 }

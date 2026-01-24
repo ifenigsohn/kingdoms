@@ -39,6 +39,26 @@ public final class WarState extends SavedData {
     private static final int AI_WAR_TICK_INTERVAL = 20 * 60 * 1; // 1 MINUTE DEBUG FOR DEV
 
     // -----------------------------
+    // Pending war zone computation (no hitch)
+    // -----------------------------
+
+    // ROOT war key -> pending root info (root wars only)
+    private final Map<String, PendingRootWar> pendingRoots = new HashMap<>();
+
+    // Runtime-only job queue (not serialized)
+    private transient ArrayDeque<String> pendingQueue = new ArrayDeque<>();
+    private transient Map<String, ZoneJob> pendingJobs = new HashMap<>();
+
+    // Tune: how much CPU we allow per tick for pending war zone search (2–4ms is safe)
+    private static final long PENDING_BUDGET_NANOS_PER_TICK = 3_000_000L;
+
+    // optional: cap candidate evaluations per tick even if nanos budget remains
+    private static final int PENDING_MAX_CANDIDATES_PER_TICK = 40;
+
+    private record PendingRootWar(UUID rootA, UUID rootB, long requestedAtTick) {}
+
+
+    // -----------------------------
     // Zone quality tuning
     // -----------------------------
     private static final double MAX_WATER_FRAC = 0.05; 
@@ -359,14 +379,14 @@ public final class WarState extends SavedData {
         if (a.equals(b)) return;
 
         // Root belligerents are the initial declaration pair.
-        declareWarInternal(server, a, b, a, b);
+        requestPendingRootWar(server, a, b);
     }
 
     /**
      * Internal declaration that preserves a single ROOT war for the whole coalition.
      * Every allied pair-link maps back to the same rootKey, and zones are stored once per rootKey.
      */
-    private void declareWarInternal(MinecraftServer server, UUID a, UUID b, UUID rootA, UUID rootB) {
+    private void declareWarInternal(MinecraftServer server, UUID a, UUID b, UUID rootA, UUID rootB, boolean computeZoneIfMissing) {
         if (a == null || b == null) return;
         if (a.equals(b)) return;
 
@@ -384,7 +404,6 @@ public final class WarState extends SavedData {
 
         // Prevent duplicate pair-links
         if (!wars.add(pairKey)) {
-            // Still ensure the mapping exists (migration / weird edges)
             pairToRoot.putIfAbsent(pairKey, rootKey);
             return;
         }
@@ -393,34 +412,167 @@ public final class WarState extends SavedData {
 
         Kingdoms.LOGGER.info("[War] declareWar link a={} b={} pairKey={} rootKey={}", a, b, pairKey, rootKey);
 
-        // Ensure a single battle zone exists for the ROOT war only
-        zones.computeIfAbsent(rootKey, kk -> computeZone(server, rootA, rootB));
+        // Only compute if allowed (we will pass false for pending-war commit)
+        if (computeZoneIfMissing) {
+            zones.computeIfAbsent(rootKey, kk -> computeZone(server, rootA, rootB));
+        }
 
         setDirty();
 
-        // RULE 2: Allies auto-join wars (but they map back to the same root war)
+        // RULE 2: Allies auto-join wars
         for (UUID allyA : alliance.alliesOf(a)) {
             if (!allyA.equals(b) && !alliance.isAllied(allyA, b)) {
-                declareWarInternal(server, allyA, b, rootA, rootB);
+                declareWarInternal(server, allyA, b, rootA, rootB, computeZoneIfMissing);
             }
         }
 
         for (UUID allyB : alliance.alliesOf(b)) {
             if (!allyB.equals(a) && !alliance.isAllied(allyB, a)) {
-                declareWarInternal(server, allyB, a, rootA, rootB);
+                declareWarInternal(server, allyB, a, rootA, rootB, computeZoneIfMissing);
             }
         }
     }
 
 
+    private void commitRootWar(MinecraftServer server, UUID rootA, UUID rootB) {
+        String rootKey = key(rootA, rootB);
+
+        // zone must exist already
+        if (!zones.containsKey(rootKey)) {
+            Rect ra = rectFor(server, rootA);
+            Rect rb = rectFor(server, rootB);
+            int frontX = (ra.cx() + rb.cx()) / 2;
+            int frontZ = (ra.cz() + rb.cz()) / 2;
+            int half = 120;
+            zones.put(rootKey, BattleZone.of(frontX - half, frontZ - half, frontX + half, frontZ + half));
+        }
 
 
-    public void makePeace(UUID a, UUID b) {
+        // Create all pair-links and ally joins, WITHOUT computing zone
+        declareWarInternal(server, rootA, rootB, rootA, rootB, false);
+    }
+
+
+
+    private void requestPendingRootWar(MinecraftServer server, UUID rootA, UUID rootB) {
+        var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
+
+        // RULE 1: Allies cannot declare war on each other
+        if (alliance.isAllied(rootA, rootB)) {
+            Kingdoms.LOGGER.warn("[War] Blocked war declaration between allies: {} <-> {}", rootA, rootB);
+            return;
+        }
+
+        String rootKey = key(rootA, rootB);
+
+        // Already active war?
+        if (wars.contains(rootKey)) return;
+
+        // Already pending?
+        if (pendingRoots.containsKey(rootKey)) return;
+
+        pendingRoots.put(rootKey, new PendingRootWar(rootA, rootB, server.getTickCount()));
+        setDirty();
+
+        // ensure runtime queue exists after load
+        ensurePendingRuntimeInit();
+
+        pendingQueue.addLast(rootKey);
+
+        Kingdoms.LOGGER.info("[War] War pending (zone search scheduled) rootKey={}", rootKey);
+    }
+
+    
+    public void tickPendingWars(MinecraftServer server) {
+        if (pendingRoots.isEmpty()) return;
+
+        ensurePendingRuntimeInit();
+
+        // If something was loaded from disk, make sure it's enqueued
+        if (pendingQueue.isEmpty() && !pendingRoots.isEmpty()) {
+            // repopulate queue (round-robin)
+            for (String rk : pendingRoots.keySet()) pendingQueue.addLast(rk);
+        }
+
+        long deadline = System.nanoTime() + PENDING_BUDGET_NANOS_PER_TICK;
+        int candidatesLeft = PENDING_MAX_CANDIDATES_PER_TICK;
+
+        while (!pendingQueue.isEmpty() && System.nanoTime() < deadline && candidatesLeft > 0) {
+            String rootKey = pendingQueue.removeFirst();
+
+            PendingRootWar pr = pendingRoots.get(rootKey);
+            if (pr == null) continue; // removed/committed
+
+            // War might have been committed by something else
+            if (wars.contains(rootKey)) {
+                pendingRoots.remove(rootKey);
+                pendingJobs.remove(rootKey);
+                setDirty();
+                continue;
+            }
+
+            ZoneJob job = pendingJobs.get(rootKey);
+            if (job == null) {
+                job = new ZoneJob(server, pr.rootA(), pr.rootB());
+                pendingJobs.put(rootKey, job);
+            }
+
+            // Step job: evaluate some candidates, yield often
+            ZoneJob.StepResult r = job.step(server, deadline, candidatesLeft);
+            candidatesLeft = r.candidatesLeft();
+
+            if (r.done()) {
+                // Pick best passing if found; else fallback best-any (or computed default)
+                BattleZone finalZone = (r.bestPass() != null) ? r.bestPass()
+                        : (r.bestAny() != null) ? r.bestAny()
+                        : job.defaultFallback;
+
+                // store zone under ROOT KEY
+                zones.put(rootKey, finalZone);
+
+                // Now commit the war links + ally auto-join (cheap)
+                commitRootWar(server, pr.rootA(), pr.rootB());
+
+                // cleanup
+                pendingRoots.remove(rootKey);
+                pendingJobs.remove(rootKey);
+                setDirty();
+
+                Kingdoms.LOGGER.info("[War] War committed rootKey={} zone={}", rootKey, finalZone);
+                continue;
+            }
+
+            // Not done yet → requeue for round-robin
+            pendingQueue.addLast(rootKey);
+        }
+    }
+
+    private void ensurePendingRuntimeInit() {
+        if (pendingQueue == null) pendingQueue = new ArrayDeque<>();
+        if (pendingJobs == null) pendingJobs = new HashMap<>();
+    }
+
+
+
+   public void makePeace(UUID a, UUID b) {
         String pairKey = key(a, b);
         String rootKey = pairToRoot.getOrDefault(pairKey, pairKey);
 
         boolean changed = false;
 
+        // --- cancel pending root war (if it exists) ---
+        PendingRootWar pr = pendingRoots.remove(rootKey);
+        if (pr != null) {
+            ensurePendingRuntimeInit();
+            pendingJobs.remove(rootKey);
+
+            // remove all occurrences from the queue (it can appear multiple times due to round-robin)
+            pendingQueue.removeIf(k -> k.equals(rootKey));
+
+            changed = true;
+        }
+
+        // --- remove all pair-links belonging to this root war ---
         Iterator<String> it = wars.iterator();
         while (it.hasNext()) {
             String wk = it.next();
@@ -435,10 +587,12 @@ public final class WarState extends SavedData {
             }
         }
 
+        // --- remove the root zone ---
         changed |= (zones.remove(rootKey) != null);
 
         if (changed) setDirty();
     }
+
 
 
     // -----------------------------
@@ -682,10 +836,23 @@ public final class WarState extends SavedData {
 
             BattleZone z = zones.get(rootKey);
             if (z == null) {
-                z = computeZone(server, rootA, rootB);
+                // If war is pending, don’t compute synchronously.
+                // Just skip it for now (UI can show "pending").
+                if (pendingRoots.containsKey(rootKey)) {
+                    continue;
+                }
+
+                // If somehow we have a war without a zone (shouldn't happen), do a cheap fallback box:
+                Rect ra = rectFor(server, rootA);
+                Rect rb = rectFor(server, rootB);
+                int frontX = (ra.cx() + rb.cx()) / 2;
+                int frontZ = (ra.cz() + rb.cz()) / 2;
+                int half = 120;
+                z = BattleZone.of(frontX - half, frontZ - half, frontX + half, frontZ + half);
                 zones.put(rootKey, z);
                 changed = true;
             }
+
 
             out.add(new ZoneView(enemyId, z));
         }
@@ -889,6 +1056,17 @@ public final class WarState extends SavedData {
     private static final Codec<Map<String, BattleZone>> ZONES_CODEC =
             Codec.unboundedMap(Codec.STRING, BattleZone.CODEC);
 
+    private static final Codec<PendingRootWar> PENDING_ROOT_CODEC =
+        RecordCodecBuilder.create(inst -> inst.group(
+            Codec.STRING.fieldOf("rootA").xmap(UUID::fromString, UUID::toString).forGetter(PendingRootWar::rootA),
+            Codec.STRING.fieldOf("rootB").xmap(UUID::fromString, UUID::toString).forGetter(PendingRootWar::rootB),
+            Codec.LONG.optionalFieldOf("requestedAt", 0L).forGetter(PendingRootWar::requestedAtTick)
+        ).apply(inst, PendingRootWar::new));
+
+    private static final Codec<Map<String, PendingRootWar>> PENDING_ROOTS_CODEC =
+        Codec.unboundedMap(Codec.STRING, PENDING_ROOT_CODEC);
+
+
     private static final Codec<AiWarSim> AI_SIM_CODEC =
         RecordCodecBuilder.create(inst -> inst.group(
                 Codec.DOUBLE.optionalFieldOf("moraleA", 100.0).forGetter(AiWarSim::moraleA),
@@ -907,15 +1085,18 @@ public final class WarState extends SavedData {
                 WARS_CODEC.optionalFieldOf("wars", Set.of()).forGetter(s -> s.wars),
                 ZONES_CODEC.optionalFieldOf("zones", Map.of()).forGetter(s -> s.zones),
                 PAIR_TO_ROOT_CODEC.optionalFieldOf("pairToRoot", Map.of()).forGetter(s -> s.pairToRoot),
-                AI_SIM_MAP_CODEC.optionalFieldOf("aiSim", Map.of()).forGetter(s -> s.aiSim)
-        ).apply(inst, (loadedWars, loadedZones, loadedPairToRoot, loadedAiSim) -> {
+                AI_SIM_MAP_CODEC.optionalFieldOf("aiSim", Map.of()).forGetter(s -> s.aiSim),
+                PENDING_ROOTS_CODEC.optionalFieldOf("pendingRoots", Map.of()).forGetter(s -> s.pendingRoots) 
+        ).apply(inst, (loadedWars, loadedZones, loadedPairToRoot, loadedAiSim, loadedPendingRoots) -> {
             WarState s = new WarState();
             s.wars.addAll(loadedWars);
             s.zones.putAll(loadedZones);
             s.pairToRoot.putAll(loadedPairToRoot);
             s.aiSim.putAll(loadedAiSim);
+            s.pendingRoots.putAll(loadedPendingRoots); 
             return s;
         }));
+
 
 
 
@@ -986,6 +1167,159 @@ public final class WarState extends SavedData {
 
             if (changed) setDirty();
         }
+
+        private final class ZoneJob {
+
+    // search state
+    final UUID a, b;
+
+    final int frontX, frontZ;
+    final int ax, az, bx, bz;
+
+    final int[] radiusTries;
+    final int[] halfTries;
+
+    int halfIdx = 0;
+    int radIdx = 0;
+
+    int ox;
+    int oz;
+
+    int curHalf;
+    int curRadius;
+
+    BattleZone bestPass = null;
+    double bestPassScore = Double.POSITIVE_INFINITY;
+
+    BattleZone bestAny = null;
+    double bestAnyScore = Double.POSITIVE_INFINITY;
+
+    final BattleZone defaultFallback;
+
+    ZoneJob(MinecraftServer server, UUID a, UUID b) {
+        this.a = a;
+        this.b = b;
+
+        Rect ra = rectFor(server, a);
+        Rect rb = rectFor(server, b);
+
+        int acx = ra.cx(), acz = ra.cz();
+        int bcx = rb.cx(), bcz = rb.cz();
+
+        int[] pa = closestPointOn(ra, bcx, bcz);
+        int[] pb = closestPointOn(rb, acx, acz);
+
+        this.ax = pa[0];
+        this.az = pa[1];
+        this.bx = pb[0];
+        this.bz = pb[1];
+
+        this.frontX = (ax + bx) / 2;
+        this.frontZ = (az + bz) / 2;
+
+        int dx = bx - ax;
+        int dz = bz - az;
+        int dist = (int) Math.sqrt((double) dx * dx + (double) dz * dz);
+
+        int aRad = Math.max(ra.spanX(), ra.spanZ()) / 2;
+        int bRad = Math.max(rb.spanX(), rb.spanZ()) / 2;
+
+        int half = 90 + (aRad + bRad) / 12 + dist / 20;
+        half = Mth.clamp(half, 90, 220);
+
+        final int minHalf = 70;
+
+        this.radiusTries = new int[] {
+                ZONE_SEARCH_RADIUS,
+                ZONE_SEARCH_RADIUS * 2,
+                ZONE_SEARCH_RADIUS * 3,
+                ZONE_SEARCH_RADIUS * 4
+        };
+
+        this.halfTries = new int[] {
+                half,
+                Math.max(minHalf, (int) Math.round(half * 0.85)),
+                Math.max(minHalf, (int) Math.round(half * 0.70))
+        };
+
+        this.defaultFallback = BattleZone.of(frontX - half, frontZ - half, frontX + half, frontZ + half);
+
+        loadLoop();
+    }
+
+    private void loadLoop() {
+        curHalf = halfTries[halfIdx];
+        curRadius = radiusTries[radIdx];
+        ox = -curRadius;
+        oz = -curRadius;
+    }
+
+    record StepResult(boolean done, BattleZone bestPass, BattleZone bestAny, int candidatesLeft) {}
+
+    StepResult step(MinecraftServer server, long deadlineNanos, int candidatesLeft) {
+            ServerLevel level = server.getLevel(Level.OVERWORLD);
+            if (level == null) {
+                // no overworld; just finish immediately with fallback
+                return new StepResult(true, null, defaultFallback, candidatesLeft);
+            }
+
+            while (System.nanoTime() < deadlineNanos && candidatesLeft > 0) {
+                candidatesLeft--;
+
+                int cx = frontX + ox;
+                int cz = frontZ + oz;
+
+                BattleZone candidate = BattleZone.of(cx - curHalf, cz - curHalf, cx + curHalf, cz + curHalf);
+
+                // reject if overlaps any kingdom
+                if (!overlapsAnyKingdom(level, candidate)) {
+
+                    ZoneQuality q = evaluateZone(level, candidate);
+                    double score = q.score + betweenPenalty(cx, cz, ax, az, bx, bz);
+
+                    // Track best-any (even if failing passes)
+                    if (score < bestAnyScore) {
+                        bestAnyScore = score;
+                        bestAny = candidate;
+                    }
+
+                    if (passes(q) && score < bestPassScore) {
+                        bestPassScore = score;
+                        bestPass = candidate;
+
+                        // Since war is pending, we can stop on first passable to finish faster.
+                        // If you want "best passable", delete this early return.
+                        return new StepResult(true, bestPass, bestAny, candidatesLeft);
+                    }
+                }
+
+                // advance grid
+                ox += ZONE_SEARCH_STEP;
+                if (ox > curRadius) {
+                    ox = -curRadius;
+                    oz += ZONE_SEARCH_STEP;
+                }
+
+                // finished this (half,radius) scan?
+                if (oz > curRadius) {
+                    // next radius, else next half
+                    radIdx++;
+                    if (radIdx >= radiusTries.length) {
+                        radIdx = 0;
+                        halfIdx++;
+                        if (halfIdx >= halfTries.length) {
+                            // exhausted all
+                            return new StepResult(true, bestPass, bestAny, candidatesLeft);
+                        }
+                    }
+                    loadLoop();
+                }
+            }
+
+            return new StepResult(false, bestPass, bestAny, candidatesLeft);
+        }
+    }
+
 
 
     public WarState() {}

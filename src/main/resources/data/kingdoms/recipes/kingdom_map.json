@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    " P ",
+    "CMC",
+    " B "
+  ],
+  "key": {
+    "P": { "item": "minecraft:paper" },
+    "M": { "item": "minecraft:map" },
+    "C": { "item": "minecraft:compass" },
+    "B": { "item": "minecraft:white_banner" }
+  },
+  "result": {
+    "id": "kingdoms:kingdom_map",
+    "count": 1
+  }
+}

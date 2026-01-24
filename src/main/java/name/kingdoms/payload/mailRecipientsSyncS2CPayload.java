@@ -2,9 +2,12 @@ package name.kingdoms.payload;
 
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.codec.ByteBufCodecs;      
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
 import name.kingdoms.Kingdoms;
+
+import net.minecraft.world.item.ItemStack;             
 
 import java.util.ArrayList;
 import java.util.List;
@@ -12,8 +15,8 @@ import java.util.UUID;
 
 public record mailRecipientsSyncS2CPayload(List<Entry> recipients) implements CustomPacketPayload {
 
-    // NEW: include relation + ai flag
-    public record Entry(UUID kingdomId, String name, boolean isAi, int relation) {}
+    
+    public record Entry(UUID kingdomId, String name, boolean isAi, int relation, int headSkinId, ItemStack heraldry) {}
 
     public static final Type<mailRecipientsSyncS2CPayload> TYPE =
             new Type<>(ResourceLocation.fromNamespaceAndPath(Kingdoms.MOD_ID, "mail_recipients_sync"));
@@ -28,10 +31,12 @@ public record mailRecipientsSyncS2CPayload(List<Entry> recipients) implements Cu
                         UUID id = readUUID(buf);
                         String name = buf.readUtf(32767);
 
-                        boolean isAi = buf.readBoolean();   // NEW
-                        int rel = buf.readVarInt();         // NEW
+                        boolean isAi = buf.readBoolean();
+                        int rel = buf.readVarInt();
+                        int headSkinId = buf.readVarInt();
+                        ItemStack heraldry = ItemStack.STREAM_CODEC.decode(buf);
+                        list.add(new Entry(id, name, isAi, rel, headSkinId, heraldry));
 
-                        list.add(new Entry(id, name, isAi, rel));
                     }
                     return new mailRecipientsSyncS2CPayload(list);
                 }
@@ -44,8 +49,13 @@ public record mailRecipientsSyncS2CPayload(List<Entry> recipients) implements Cu
                         writeUUID(buf, e.kingdomId());
                         buf.writeUtf(e.name(), 32767);
 
-                        buf.writeBoolean(e.isAi());     // NEW
-                        buf.writeVarInt(e.relation());  // NEW
+                        // encode
+                        buf.writeBoolean(e.isAi());
+                        buf.writeVarInt(e.relation());
+                        buf.writeVarInt(e.headSkinId());
+                        ItemStack s = (e.heraldry() == null) ? ItemStack.EMPTY : e.heraldry();
+                        ItemStack.STREAM_CODEC.encode(buf, s);
+
                     }
                 }
 

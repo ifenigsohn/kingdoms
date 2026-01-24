@@ -372,6 +372,11 @@ public final class clientNetworkInit {
             });
         });
 
+        ClientPlayNetworking.registerGlobalReceiver(name.kingdoms.payload.calendarSyncPayload.TYPE, (payload, ctx) -> {
+            ctx.client().execute(() -> name.kingdoms.kingdomsClient.CLIENT_CALENDAR = payload);
+        });
+
+
         // --- Open kingdom menu ---
         ClientPlayNetworking.registerGlobalReceiver(openKingdomMenuPayload.TYPE, (payload, ctx) ->
                 ctx.client().execute(() -> kingdomsClientProxy.openKingdomMenu(payload.pos()))
