@@ -137,18 +137,22 @@ public class aiKingdomNPCRenderer
 
     @Override
     public ResourceLocation getTextureLocation(NPCState state) {
-        // Recommended layout:
-        // assets/kingdoms/textures/entity/npc/<type>/<skin>.png
-        // examples:
-        // textures/entity/npc/villager/0.png
-        // textures/entity/npc/guard/0.png
-        // textures/entity/npc/noble/0.png
-        String type = (state.aiTypeId == null || state.aiTypeId.isBlank()) ? "villager" : state.aiTypeId;
+        String type = (state.aiTypeId == null || state.aiTypeId.isBlank())
+                ? "villager"
+                : state.aiTypeId;
+
+        // Route scouts/guards to soldier visuals if desired
+        if ("scout".equals(type) || "guard".equals(type)) {
+            type = "soldier";
+        }
+
         int skin = Math.max(0, state.skinId);
 
         return ResourceLocation.fromNamespaceAndPath(
                 Kingdoms.MOD_ID,
-                "textures/entity/npc/" + type + "/" + skin + ".png"
+                "textures/entity/" + type + "/" + type + "_" + skin + ".png"
         );
     }
+
+
 }

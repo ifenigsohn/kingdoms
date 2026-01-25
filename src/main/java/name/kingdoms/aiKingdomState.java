@@ -53,6 +53,11 @@ public class aiKingdomState extends SavedData {
         return (k != null) ? k.name : "Unknown Kingdom";
     }
 
+        public java.util.Collection<AiKingdom> getAll() {
+                return kingdoms.values();
+        }
+
+
     private static void tickSoldiers(AiKingdom k, RandomSource r, boolean inWar) {
     // safety for old data
     if (k.maxSoldiers <= 0) k.maxSoldiers = defaultMaxSoldiersForSize(k.size);

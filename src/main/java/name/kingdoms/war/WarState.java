@@ -85,6 +85,21 @@ public final class WarState extends SavedData {
             int samples
     ) {}
 
+    private static boolean warInvolvesOnlinePlayer(MinecraftServer server, UUID rootA, UUID rootB) {
+        var ks = kingdomState.get(server);
+        var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
+
+        for (var p : server.getPlayerList().getPlayers()) {
+            UUID pk = ks.getKingdomIdFor(p.getUUID());
+            if (pk == null) continue;
+
+            boolean onA = pk.equals(rootA) || alliance.isAllied(pk, rootA);
+            boolean onB = pk.equals(rootB) || alliance.isAllied(pk, rootB);
+
+            if (onA ^ onB) return true; // involved on exactly one side
+        }
+        return false;
+    }
 
 
     private static boolean overlapsAnyKingdom(ServerLevel level, BattleZone zone) {
@@ -148,30 +163,25 @@ public final class WarState extends SavedData {
 
 
     private static boolean isSurfaceWater(ServerLevel level, int x, int z) {
-        // Use WORLD_SURFACE for "top" (often above water), then check multiple blocks
-        int yTop = level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
+        if (!isChunkLoaded(level, x, z)) return false; // NEW safety
 
-        // Check at yTop and slightly below. Oceans/rivers often need this.
+        int yTop = level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
         for (int dy = 0; dy <= 3; dy++) {
-            var pos = new BlockPos(x, yTop - dy, z);
-            if (level.getFluidState(pos).is(Fluids.WATER)) return true;
+            if (level.getFluidState(new BlockPos(x, yTop - dy, z)).is(Fluids.WATER)) return true;
         }
 
-        // Also check the top of OCEAN_FLOOR column (shorelines)
         int yFloor = level.getHeight(Heightmap.Types.OCEAN_FLOOR, x, z);
         for (int dy = 0; dy <= 2; dy++) {
-            var pos = new BlockPos(x, yFloor + dy, z);
-            if (level.getFluidState(pos).is(Fluids.WATER)) return true;
+            if (level.getFluidState(new BlockPos(x, yFloor + dy, z)).is(Fluids.WATER)) return true;
         }
-
         return false;
     }
 
-
     private static int groundY(ServerLevel level, int x, int z) {
-        // OCEAN_FLOOR gives solid ground even under water (good for hilliness metric)
+        if (!isChunkLoaded(level, x, z)) return 0; // NEW safety (or some sentinel)
         return level.getHeight(Heightmap.Types.OCEAN_FLOOR, x, z);
     }
+
 
     private static ZoneQuality evaluateZone(ServerLevel level, BattleZone zone) {
         int minX = zone.minX();
@@ -437,19 +447,31 @@ public final class WarState extends SavedData {
     private void commitRootWar(MinecraftServer server, UUID rootA, UUID rootB) {
         String rootKey = key(rootA, rootB);
 
-        // zone must exist already
-        if (!zones.containsKey(rootKey)) {
-            Rect ra = rectFor(server, rootA);
-            Rect rb = rectFor(server, rootB);
-            int frontX = (ra.cx() + rb.cx()) / 2;
-            int frontZ = (ra.cz() + rb.cz()) / 2;
-            int half = 120;
-            zones.put(rootKey, BattleZone.of(frontX - half, frontZ - half, frontX + half, frontZ + half));
-        }
+        // IMPORTANT: do NOT auto-create a zone here.
+        // Zones are created only by the pending zone search (player-involved wars).
 
 
         // Create all pair-links and ally joins, WITHOUT computing zone
         declareWarInternal(server, rootA, rootB, rootA, rootB, false);
+    }
+
+    private static boolean isChunkLoaded(ServerLevel level, int x, int z) {
+            // getChunkNow returns null if not loaded (won't load it)
+            return level.getChunkSource().getChunkNow(x >> 4, z >> 4) != null;
+        }
+
+        private static boolean candidateAreaLoaded(ServerLevel level, BattleZone zone) {
+        // sample corners + center + edge mids (9 points)
+        int cx = (zone.minX() + zone.maxX()) / 2;
+        int cz = (zone.minZ() + zone.maxZ()) / 2;
+
+        int[] xs = new int[]{ zone.minX(), cx, zone.maxX() };
+        int[] zs = new int[]{ zone.minZ(), cz, zone.maxZ() };
+
+        for (int x : xs) for (int z : zs) {
+            if (!isChunkLoaded(level, x, z)) return false;
+        }
+        return true;
     }
 
 
@@ -465,28 +487,45 @@ public final class WarState extends SavedData {
 
         String rootKey = key(rootA, rootB);
 
-        // Already active war?
-        if (wars.contains(rootKey)) return;
+        // If zone already exists, nothing to do.
+        if (zones.containsKey(rootKey)) return;
 
         // Already pending?
         if (pendingRoots.containsKey(rootKey)) return;
 
+        // If this war doesn't involve any ONLINE player, do NOT compute a zone.
+        // Still commit the war links immediately (cheap), so AI sim can run.
+        if (!warInvolvesOnlinePlayer(server, rootA, rootB)) {
+            commitRootWar(server, rootA, rootB); // creates wars + pair-links, but no zone
+            Kingdoms.LOGGER.info("[War] War committed AI-only (no zone) rootKey={}", rootKey);
+            return;
+        }
+
+        // Player-involved: schedule zone search
         pendingRoots.put(rootKey, new PendingRootWar(rootA, rootB, server.getTickCount()));
         setDirty();
 
-        // ensure runtime queue exists after load
         ensurePendingRuntimeInit();
-
         pendingQueue.addLast(rootKey);
 
         Kingdoms.LOGGER.info("[War] War pending (zone search scheduled) rootKey={}", rootKey);
+
     }
 
     
     public void tickPendingWars(MinecraftServer server) {
+
+        // Only run pending zone CPU work at 2 Hz (every 10 ticks) or 1 Hz (20 ticks)
+        if ((server.getTickCount() % 10) != 0) return;
+
         if (pendingRoots.isEmpty()) return;
 
         ensurePendingRuntimeInit();
+
+        // Every 5 seconds, scan for player-involved wars missing zones and schedule them.
+        if ((server.getTickCount() % (20 * 5)) == 0) {
+            scheduleZonesForPlayerWars(server);
+        }
 
         // If something was loaded from disk, make sure it's enqueued
         if (pendingQueue.isEmpty() && !pendingRoots.isEmpty()) {
@@ -503,13 +542,14 @@ public final class WarState extends SavedData {
             PendingRootWar pr = pendingRoots.get(rootKey);
             if (pr == null) continue; // removed/committed
 
-            // War might have been committed by something else
-            if (wars.contains(rootKey)) {
+            // If a zone already exists, cancel pending work
+            if (zones.containsKey(rootKey)) {
                 pendingRoots.remove(rootKey);
                 pendingJobs.remove(rootKey);
                 setDirty();
                 continue;
             }
+
 
             ZoneJob job = pendingJobs.get(rootKey);
             if (job == null) {
@@ -674,6 +714,38 @@ public final class WarState extends SavedData {
         setDirty();
     }
 
+    private void scheduleZonesForPlayerWars(MinecraftServer server) {
+        
+        ensurePendingRuntimeInit();
+
+        // gather unique root wars from the wars set
+        HashSet<String> seenRoots = new HashSet<>();
+
+        for (String pairKey : wars) {
+            String rootKey = pairToRoot.getOrDefault(pairKey, pairKey);
+            if (!seenRoots.add(rootKey)) continue;
+
+            if (zones.containsKey(rootKey)) continue;
+            if (pendingRoots.containsKey(rootKey)) continue;
+
+            int bar = rootKey.indexOf('|');
+            if (bar < 0) continue;
+
+            UUID rootA, rootB;
+            try {
+                rootA = UUID.fromString(rootKey.substring(0, bar));
+                rootB = UUID.fromString(rootKey.substring(bar + 1));
+            } catch (Exception ignored) { continue; }
+
+            if (!warInvolvesOnlinePlayer(server, rootA, rootB)) continue;
+
+            // schedule zone computation for this active war
+            pendingRoots.put(rootKey, new PendingRootWar(rootA, rootB, server.getTickCount()));
+            pendingQueue.addLast(rootKey);
+            Kingdoms.LOGGER.info("[War] Scheduled zone search for active player war rootKey={}", rootKey);
+            setDirty();
+        }
+    }
 
 
     // -----------------------------
@@ -925,7 +997,7 @@ public final class WarState extends SavedData {
 
                 // ✅ Hard reject: inside ANY kingdom territory
                 if (overlapsAnyKingdom(level, candidate)) continue;
-
+                if (!candidateAreaLoaded(level, candidate)) continue;
                 ZoneQuality q = evaluateZone(level, candidate);
 
                 if (passes(q)) {
@@ -958,7 +1030,7 @@ public final class WarState extends SavedData {
 
                 // ✅ Still reject zones inside kingdom territory even for fallback.
                 if (overlapsAnyKingdom(level, candidate)) continue;
-
+                if (!candidateAreaLoaded(level, candidate)) continue;
                 ZoneQuality q = evaluateZone(level, candidate);
 
                 double score = q.score + betweenPenalty(cx, cz, ax, az, bx, bz);
@@ -1274,24 +1346,21 @@ public final class WarState extends SavedData {
                 // reject if overlaps any kingdom
                 if (!overlapsAnyKingdom(level, candidate)) {
 
-                    ZoneQuality q = evaluateZone(level, candidate);
-                    double score = q.score + betweenPenalty(cx, cz, ax, az, bx, bz);
+                    if (!candidateAreaLoaded(level, candidate)) {
+                        // skip - never load chunks during zone search
+                    } else {
+                        ZoneQuality q = evaluateZone(level, candidate);
+                        double score = q.score + betweenPenalty(cx, cz, ax, az, bx, bz);
 
-                    // Track best-any (even if failing passes)
-                    if (score < bestAnyScore) {
-                        bestAnyScore = score;
-                        bestAny = candidate;
-                    }
-
-                    if (passes(q) && score < bestPassScore) {
-                        bestPassScore = score;
-                        bestPass = candidate;
-
-                        // Since war is pending, we can stop on first passable to finish faster.
-                        // If you want "best passable", delete this early return.
-                        return new StepResult(true, bestPass, bestAny, candidatesLeft);
+                        if (score < bestAnyScore) { bestAnyScore = score; bestAny = candidate; }
+                        if (passes(q) && score < bestPassScore) {
+                            bestPassScore = score;
+                            bestPass = candidate;
+                            return new StepResult(true, bestPass, bestAny, candidatesLeft);
+                        }
                     }
                 }
+
 
                 // advance grid
                 ox += ZONE_SEARCH_STEP;

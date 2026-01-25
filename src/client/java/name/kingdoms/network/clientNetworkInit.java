@@ -10,6 +10,7 @@ import name.kingdoms.kingdomsClientProxy;
 import name.kingdoms.treasuryScreen;
 import name.kingdoms.client.ClientEconomyView;
 import name.kingdoms.client.ClientMailCache;
+import name.kingdoms.client.ClientMailRecipientsCache;
 import name.kingdoms.client.KingdomTransitionHUD;
 import name.kingdoms.client.diploScreen;
 import name.kingdoms.menu.diploMenu;
@@ -286,13 +287,19 @@ public final class clientNetworkInit {
 
         ClientPlayNetworking.registerGlobalReceiver(mailRecipientsSyncS2CPayload.TYPE, (payload, ctx) -> {
             ctx.client().execute(() -> {
-                name.kingdoms.client.ClientMailRecipientsCache.set(payload.recipients());
+                // store the list
+                ClientMailRecipientsCache.set(payload.recipients());
 
-                if (Minecraft.getInstance().screen instanceof name.kingdoms.client.mailScreen ms) {
-                    ms.requestPolicyForSelectedRecipientPublic();
+                // debug
+                name.kingdoms.Kingdoms.LOGGER.info("[MAIL][CLIENT] recipients_sync received: {}", payload.recipients().size());
+
+                // if the mail screen is open, refresh it immediately (optional but nice)
+                if (ctx.client().screen instanceof name.kingdoms.client.mailScreen ms) {
+                    ms.requestPolicyForSelectedRecipientPublic(); // optional (you already have this method)
                 }
             });
         });
+
 
         // --- Diplomacy open screen ---
         

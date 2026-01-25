@@ -11,7 +11,8 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 
-public class kingdomKingSpawnerBlock extends Block {
+public class kingdomKingSpawnerBlock extends Block implements IKingSpawnerBlock {
+
 
     private final String aiTypeId;
     

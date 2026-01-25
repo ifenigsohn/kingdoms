@@ -3,6 +3,7 @@ package name.kingdoms.entity.ai;
 import name.kingdoms.IKingdomSpawnerBlock;
 import name.kingdoms.kingdomState;
 import name.kingdoms.namePool;
+import name.kingdoms.diplomacy.DiplomacyRelationsState;
 import name.kingdoms.entity.SoldierEntity;
 import name.kingdoms.war.WarState;
 import net.minecraft.core.BlockPos;
@@ -12,8 +13,10 @@ import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.DifficultyInstance;
+import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.*;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
@@ -24,6 +27,7 @@ import net.minecraft.world.entity.ai.targeting.TargetingConditions;
 import net.minecraft.world.entity.monster.Creeper;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
@@ -59,6 +63,20 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     private static final EntityDataAccessor<String> KINGDOM_UUID =
             SynchedEntityData.defineId(aiKingdomNPCEntity.class, EntityDataSerializers.STRING);
 
+    private static final EntityDataAccessor<Boolean> IS_AMBIENT =
+        SynchedEntityData.defineId(aiKingdomNPCEntity.class, EntityDataSerializers.BOOLEAN);
+
+    private static final EntityDataAccessor<Integer> AMBIENT_TTL =
+            SynchedEntityData.defineId(aiKingdomNPCEntity.class, EntityDataSerializers.INT);
+
+    private static final EntityDataAccessor<String> AMBIENT_EVENT_ID =
+        SynchedEntityData.defineId(aiKingdomNPCEntity.class, EntityDataSerializers.STRING);
+
+    private static final EntityDataAccessor<String> AMBIENT_OTHER_KINGDOM_UUID =
+            SynchedEntityData.defineId(aiKingdomNPCEntity.class, EntityDataSerializers.STRING);
+
+
+
 
     // --- Positions ---
     @Nullable private BlockPos homePos;
@@ -74,6 +92,13 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     private int combatEquipLinger = 0;
 
     private int panicTicks = 0;
+
+    // --- Ambient queued speech (server-only, no need to sync) ---
+    private UUID ambientTalkPlayer = null;
+    private String ambientTalkLine = null;
+    private String ambientTalkTitle = null;
+    private int ambientTalkTtl = 0;
+
 
     // --- Sleep poof rate (optional flair) ---
     private static final int SLEEP_POOF_INTERVAL_TICKS = 60;
@@ -170,6 +195,18 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             @Override public boolean canUse() { return aiKingdomNPCEntity.this.isCombatant() && super.canUse(); }
         });
 
+        // Attack enemy AI NPC combatants (ambient-only)
+        this.targetSelector.addGoal(5, new NearestAttackableTargetGoal<>(
+                this,
+                aiKingdomNPCEntity.class,
+                true,
+                (TargetingConditions.Selector) (LivingEntity e, ServerLevel lvl) ->
+                        (e instanceof aiKingdomNPCEntity other) && aiKingdomNPCEntity.this.isEnemyAiNpc(other)
+        ) {
+            @Override public boolean canUse() { return aiKingdomNPCEntity.this.isCombatant() && super.canUse(); }
+        });
+
+
     }
 
 
@@ -182,7 +219,48 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         builder.define(HAS_SPAWNER, false);
         builder.define(SPAWNER_POS, BlockPos.ZERO);
         builder.define(KINGDOM_UUID, "");
+        builder.define(IS_AMBIENT, false);
+        builder.define(AMBIENT_TTL, 0);
+        builder.define(AMBIENT_EVENT_ID, "");
+        builder.define(AMBIENT_OTHER_KINGDOM_UUID, "");
+
+
     }
+
+    public boolean isAmbient() {
+        return this.entityData.get(IS_AMBIENT);
+    }
+
+    public void setAmbient(boolean v) {
+        this.entityData.set(IS_AMBIENT, v);
+        refreshNametag(); // so visibility rules apply
+    }
+
+    public void setAmbientTtl(int ticks) {
+        this.entityData.set(IS_AMBIENT, true);
+        this.entityData.set(AMBIENT_TTL, Math.max(0, ticks));
+        refreshNametag();
+    }
+
+    private boolean isEnemyAiNpc(aiKingdomNPCEntity other) {
+        if (other == null || other == this) return false;
+        if (!other.isCombatant()) return false;
+
+        // IMPORTANT: keep it ambient-only so your normal town population doesn't constantly fight
+        if (!(this.isAmbient() || other.isAmbient())) return false;
+
+        if (!(this.level() instanceof ServerLevel sl)) return false;
+
+        UUID myKid = this.getKingdomUUID();
+        UUID theirKid = other.getKingdomUUID();
+        if (myKid == null || theirKid == null) return false;
+        if (myKid.equals(theirKid)) return false;
+
+        var war = WarState.get(sl.getServer());
+        return war.isAtWar(myKid, theirKid);
+    }
+
+
 
     // --- Type / skin / name ---
     public String getAiTypeId() { return this.entityData.get(AI_TYPE_ID); }
@@ -202,14 +280,23 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     private static String titleForType(String type) {
         return switch (type) {
             case "guard" -> "Guard";
+            case "soldier" -> "Soldier";
+            case "scout" -> "Scout";
             case "noble" -> "Noble";
+
+            case "peasant" -> "Peasant";
+            case "trader" -> "Trader";
+            case "envoy" -> "Envoy";
+            case "refugee" -> "Refugee";
+            case "scholar" -> "Scholar";
+
+
             default -> "Villager";
         };
     }
 
-    private void refreshNametag() {
-        this.setCustomNameVisible(false);
 
+    private void refreshNametag() {
         String type = getAiTypeId();
         String job = titleForType(type);
 
@@ -217,8 +304,11 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         if (nm == null || nm.isBlank()) nm = "Aelfric";
 
         this.setCustomName(Component.literal(nm + " [" + job + "]"));
-        this.setCustomNameVisible(false);
+
+        // Ambient/event NPCs show their name; spawner-population stays hidden to prevent clutter
+        this.setCustomNameVisible(this.entityData.get(IS_AMBIENT));
     }
+
 
     // Spawner binding API
     public void setSpawnerPos(BlockPos pos) {
@@ -260,12 +350,24 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
         if (chosen < 0) {
             int maxExclusive = switch (type) {
-                case "guard" -> 1;   // number of skins
-                case "noble" -> 25;   // 
-                default -> 12;       // 
+                case "guard" -> 1;
+
+                case "noble" -> 25;
+
+                // New roles (tune these to whatever skin counts you actually have)
+                case "peasant" -> 3;
+                case "trader" -> 4;
+                case "envoy" -> 8;
+                case "refugee" -> 3;
+                case "villager" -> 12;
+                case "scholar" -> 2; // tune to your actual skin count
+                case "soldier" -> 29;
+                case "scout" -> 29;
+                default -> 12;
             };
             if (maxExclusive < 1) maxExclusive = 1;
             chosen = this.random.nextInt(maxExclusive);
+
         }
 
         this.entityData.set(SKIN_ID, Mth.clamp(chosen, 0, Integer.MAX_VALUE));
@@ -293,6 +395,16 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         return false;
     }
 
+    public void queueAmbientSpeech(ServerPlayer player, String title, String line, int ttlTicks) {
+        if (player == null || line == null || line.isBlank()) return;
+
+        this.ambientTalkPlayer = player.getUUID();
+        this.ambientTalkTitle = (title == null) ? "" : title;
+        this.ambientTalkLine = line;
+        this.ambientTalkTtl = Math.max(20, ttlTicks); // at least 1s
+    }
+
+
     @Override
     public @Nullable SpawnGroupData finalizeSpawn(
             ServerLevelAccessor level,
@@ -316,10 +428,82 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         return data;
     }
 
+    public void applyKingdomMilitarySkin() {
+        if (this.level().isClientSide()) return;
+
+        UUID kid = getKingdomUUID();
+        if (kid == null) return;
+
+        String t = getAiTypeId();
+        boolean military = "soldier".equals(t) || "scout".equals(t) || "guard".equals(t);
+        if (!military) return;
+
+        // Choose a deterministic skin “family” per kingdom
+        int base = Math.floorMod(kid.hashCode(), 6); // 6 = your soldier/scout skin count
+
+        // Optional: make scouts/guards shift within the same family
+        int offset = switch (t) {
+            case "scout" -> 2;
+            case "guard" -> 4;
+            default -> 0; // soldier
+        };
+
+        int skin = Math.floorMod(base + offset, 6);
+        this.setSkinId(skin);
+    }
+
+
     @Override
     public void tick() {
         super.tick();
         if (!(this.level() instanceof ServerLevel level)) return;
+
+        // Deliver queued ambient speech only when close enough
+        if (ambientTalkTtl > 0) {
+            ambientTalkTtl--;
+
+            var server = level.getServer();
+            if (server != null && ambientTalkPlayer != null && ambientTalkLine != null) {
+                ServerPlayer sp = server.getPlayerList().getPlayer(ambientTalkPlayer);
+
+                if (sp != null) {
+                    double d2 = this.distanceToSqr(sp);
+                    if (d2 <= (10.0 * 10.0)) {
+                        String nm = getNpcName();
+                        if (nm == null || nm.isBlank()) nm = "Aelfric";
+
+                        String title = ambientTalkTitle;
+                        if (title == null || title.isBlank()) title = titleForType(getAiTypeId());
+
+                        sp.sendSystemMessage(Component.literal(nm + " [" + title + "]: " + ambientTalkLine));
+
+                        // clear so it only happens once
+                        ambientTalkTtl = 0;
+                        ambientTalkPlayer = null;
+                        ambientTalkLine = null;
+                        ambientTalkTitle = null;
+                    }
+                } else {
+                    // player left -> drop it
+                    ambientTalkTtl = 0;
+                    ambientTalkPlayer = null;
+                    ambientTalkLine = null;
+                    ambientTalkTitle = null;
+                }
+            }
+        }
+
+
+        // TTL despawn for ambient event NPCs
+        if (this.entityData.get(IS_AMBIENT)) {
+            int ttl = this.entityData.get(AMBIENT_TTL);
+            if (ttl <= 0) {
+                this.discard();
+                return;
+            }
+            this.entityData.set(AMBIENT_TTL, ttl - 1);
+        }
+
 
         if (isCombatant() && !this.isSleeping()) {
             boolean fightingNow = this.getTarget() != null && this.getTarget().isAlive();
@@ -413,6 +597,12 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
         out.putString("NpcName", getNpcName());
 
+        out.putBoolean("IsAmbient", this.entityData.get(IS_AMBIENT));
+        out.putInt("AmbientTtl", this.entityData.get(AMBIENT_TTL));
+        out.putString("AmbientEventId", this.entityData.get(AMBIENT_EVENT_ID));
+        out.putString("AmbientOtherKid", this.entityData.get(AMBIENT_OTHER_KINGDOM_UUID));
+
+
         UUID kid = getKingdomUUID();
         if (kid != null) out.putString("KingdomUUID", kid.toString());
 
@@ -431,6 +621,15 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         this.entityData.set(SKIN_ID, in.getInt("SkinId").orElse(0));
         this.entityData.set(KINGDOM_UUID, in.getString("KingdomUUID").orElse(""));
         this.entityData.set(NPC_NAME, in.getString("NpcName").orElse(""));
+
+        boolean isAmb = in.getBooleanOr("IsAmbient", false);
+        int ttl = in.getInt("AmbientTtl").orElse(0);
+        this.entityData.set(IS_AMBIENT, isAmb);
+        this.entityData.set(AMBIENT_TTL, ttl);
+
+        this.entityData.set(AMBIENT_EVENT_ID, in.getString("AmbientEventId").orElse(""));
+        this.entityData.set(AMBIENT_OTHER_KINGDOM_UUID, in.getString("AmbientOtherKid").orElse(""));
+
 
         homePos = in.getLong("HomePos").map(BlockPos::of).orElse(null);
         assignedBedPos = in.getLong("BedPos").map(BlockPos::of).orElse(null);
@@ -656,7 +855,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
     private boolean isCombatant() {
         String t = getAiTypeId();
-        return "guard".equals(t) || "soldier".equals(t);
+        return "guard".equals(t) || "soldier".equals(t) || "scout".equals(t);
     }
 
     private void setCombatSword(boolean equip) {
@@ -694,6 +893,72 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             return s.getSide() == SoldierEntity.Side.ENEMY;
         }
 
+    public String getAmbientEventId() {
+        String s = this.entityData.get(AMBIENT_EVENT_ID);
+        return (s == null) ? "" : s;
+    }
+
+    @Nullable
+    public UUID getAmbientOtherKingdomUUID() {
+        String s = this.entityData.get(AMBIENT_OTHER_KINGDOM_UUID);
+        if (s == null || s.isBlank()) return null;
+        try { return UUID.fromString(s); } catch (IllegalArgumentException e) { return null; }
+    }
+
+    public void setAmbientScene(String eventId, @Nullable UUID otherKid, int ttlTicks) {
+        this.setAmbientTtl(ttlTicks);
+        this.entityData.set(AMBIENT_EVENT_ID, eventId == null ? "" : eventId);
+        this.entityData.set(AMBIENT_OTHER_KINGDOM_UUID, otherKid == null ? "" : otherKid.toString());
+    }
+
+    private static final java.util.Map<java.util.UUID, Integer> LAST_AMBIENT_PAYOUT_TICK = new java.util.HashMap<>();
+
+    @Override
+    public void die(DamageSource source) {
+        super.die(source);
+
+        if (!(this.level() instanceof ServerLevel sl)) return;
+        if (!this.isAmbient()) return;
+
+        // find the "real" killer
+        Entity killer = source.getEntity();
+        if (killer == null && source.getDirectEntity() instanceof Projectile proj) {
+            killer = proj.getOwner();
+        }
+        if (!(killer instanceof net.minecraft.server.level.ServerPlayer sp)) return;
+
+        // anti-farm: one payout per 15s per player
+        int now = sl.getServer().getTickCount();
+        int last = LAST_AMBIENT_PAYOUT_TICK.getOrDefault(sp.getUUID(), -999999);
+        if (now - last < 20 * 15) return;
+        LAST_AMBIENT_PAYOUT_TICK.put(sp.getUUID(), now);
+
+        String ev = getAmbientEventId();
+        UUID myKid = getKingdomUUID();
+        UUID otherKid = getAmbientOtherKingdomUUID();
+
+        // Only do "positive" payouts for specific events (so killing random ambient villagers isn't rewarded)
+        if ("war_edge_skirmish".equals(ev)) {
+            // player helped the OTHER side (the one this NPC was opposed to)
+            if (otherKid != null) {
+                DiplomacyRelationsState.get(sl.getServer()).addRelation(sp.getUUID(), otherKid, +1);
+            }
+            // optionally: the victim's kingdom dislikes you a bit
+            if (myKid != null) {
+                DiplomacyRelationsState.get(sl.getServer()).addRelation(sp.getUUID(), myKid, -1);
+            }
+
+            // tiny economy drip (rare)
+            if (sl.random.nextFloat() < 0.25f) {
+                var ks = kingdomState.get(sl.getServer());
+                var pk = ks.getPlayerKingdom(sp.getUUID());
+                if (pk != null) {
+                    pk.gold = Math.max(0, pk.gold + 10);
+                    ks.markDirty();
+                }
+            }
+        }
+    }
 
 
 

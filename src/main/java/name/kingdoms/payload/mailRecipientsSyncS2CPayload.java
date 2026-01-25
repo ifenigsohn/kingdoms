@@ -27,6 +27,7 @@ public record mailRecipientsSyncS2CPayload(List<Entry> recipients) implements Cu
                 public mailRecipientsSyncS2CPayload decode(RegistryFriendlyByteBuf buf) {
                     int n = buf.readVarInt();
                     List<Entry> list = new ArrayList<>(Math.max(0, n));
+
                     for (int i = 0; i < n; i++) {
                         UUID id = readUUID(buf);
                         String name = buf.readUtf(32767);
@@ -34,12 +35,25 @@ public record mailRecipientsSyncS2CPayload(List<Entry> recipients) implements Cu
                         boolean isAi = buf.readBoolean();
                         int rel = buf.readVarInt();
                         int headSkinId = buf.readVarInt();
-                        ItemStack heraldry = ItemStack.STREAM_CODEC.decode(buf);
-                        list.add(new Entry(id, name, isAi, rel, headSkinId, heraldry));
 
+                        ItemStack heraldry = ItemStack.EMPTY;
+                        boolean hasHeraldry = buf.readBoolean();
+                        if (hasHeraldry) {
+                            try {
+                                heraldry = ItemStack.STREAM_CODEC.decode(buf);
+                            } catch (Exception ex) {
+                                Kingdoms.LOGGER.error("[MAIL] Failed to decode heraldry stack in recipients_sync", ex);
+                                heraldry = ItemStack.EMPTY;
+                            }
+                        }
+
+                        // ✅ THIS WAS MISSING
+                        list.add(new Entry(id, name, isAi, rel, headSkinId, heraldry));
                     }
+
                     return new mailRecipientsSyncS2CPayload(list);
                 }
+
 
                 @Override
                 public void encode(RegistryFriendlyByteBuf buf, mailRecipientsSyncS2CPayload value) {
@@ -53,8 +67,33 @@ public record mailRecipientsSyncS2CPayload(List<Entry> recipients) implements Cu
                         buf.writeBoolean(e.isAi());
                         buf.writeVarInt(e.relation());
                         buf.writeVarInt(e.headSkinId());
-                        ItemStack s = (e.heraldry() == null) ? ItemStack.EMPTY : e.heraldry();
-                        ItemStack.STREAM_CODEC.encode(buf, s);
+                        ItemStack s = e.heraldry();
+                        boolean hasHeraldry = (s != null && !s.isEmpty());
+
+                        buf.writeBoolean(hasHeraldry);
+
+                        if (hasHeraldry) {
+                            // Normalize count
+                            ItemStack one = s.copy();
+                            if (one.getCount() < 1) one.setCount(1);
+                            if (one.getCount() > 64) one.setCount(64);
+
+                            try {
+                                ItemStack.STREAM_CODEC.encode(buf, one);
+                            } catch (Exception ex) {
+                                Kingdoms.LOGGER.error("[MAIL] Failed to encode heraldry stack for recipient kingdomId={} name={} item={}",
+                                        e.kingdomId(), e.name(), one.getItem().toString(), ex);
+
+                                // IMPORTANT: do NOT encode EMPTY here (it crashes).
+                                // Instead: write "no heraldry" for this entry by backtracking is not possible,
+                                // so we avoid exceptions by ensuring the stack we encode is always valid.
+                                // Best fallback: encode a known-safe banner.
+                                ItemStack safe = new ItemStack(net.minecraft.world.item.Items.WHITE_BANNER);
+                                ItemStack.STREAM_CODEC.encode(buf, safe);
+                            }
+                        }
+
+
 
                     }
                 }

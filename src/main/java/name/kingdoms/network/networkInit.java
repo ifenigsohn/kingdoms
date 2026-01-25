@@ -264,9 +264,15 @@ public final class networkInit {
                     if (k == null) return;
 
                     ItemStack heraldry = ItemStack.EMPTY;
-                    if (k.heraldry != null && !k.heraldry.isEmpty()) {
-                        heraldry = k.heraldry.copyWithCount(1);
+
+                    if (k.heraldry != null && !k.heraldry.isEmpty()
+                            && k.heraldry.getItem() instanceof net.minecraft.world.item.BannerItem) {
+
+                        // copy as a fresh stack, count = 1
+                        heraldry = k.heraldry.copy();
+                        heraldry.setCount(1);
                     }
+
 
 
                     // relation (you already use this elsewhere)
@@ -978,7 +984,7 @@ public final class networkInit {
         });
 
 
-        ServerPlayNetworking.registerGlobalReceiver(mailRecipientsRequestC2SPayload.TYPE, (payload, ctx) -> {
+       ServerPlayNetworking.registerGlobalReceiver(mailRecipientsRequestC2SPayload.TYPE, (payload, ctx) -> {
             ctx.server().execute(() -> {
                 var player = ctx.player();
                 var server = ctx.server();
@@ -988,51 +994,79 @@ public final class networkInit {
                 var relState = name.kingdoms.diplomacy.DiplomacyRelationsState.get(server);
 
                 var out = new java.util.ArrayList<mailRecipientsSyncS2CPayload.Entry>();
+                var seen = new java.util.HashSet<java.util.UUID>();
 
+                // -------------------------
+                // PLAYER KINGDOMS (online only)
+                // -------------------------
                 for (var k : ks.getAllKingdoms()) {
                     if (k == null) continue;
 
                     // don't show yourself
                     if (k.owner != null && k.owner.equals(player.getUUID())) continue;
 
-                    boolean isAi = (aiState.getById(k.id) != null);
-
-                    // player kingdom is only selectable if the owner is ONLINE
+                    // only selectable if owner is ONLINE
                     ServerPlayer ownerOnline = (k.owner != null) ? server.getPlayerList().getPlayer(k.owner) : null;
-                    boolean isOnlinePlayerKingdom = (!isAi && ownerOnline != null);
+                    if (ownerOnline == null) continue;
 
-                    // keep ONLY AI + ONLINE player kingdoms
-                    if (!isAi && !isOnlinePlayerKingdom) continue;
-
-                    // name shown in UI
-                    String nm;
-                    if (isAi) {
-                        nm = (k.name == null || k.name.isBlank()) ? "Unknown" : k.name;
-                    } else {
-                        // for players, I recommend showing kingdom name + player name
-                        String kName = (k.name == null || k.name.isBlank()) ? "Kingdom" : k.name;
-                        nm = kName + " (" + ownerOnline.getName().getString() + ")";
-                    }
+                    String kName = (k.name == null || k.name.isBlank()) ? "Kingdom" : k.name;
+                    String nm = kName + " (" + ownerOnline.getName().getString() + ")";
 
                     int rel = relState.getRelation(player.getUUID(), k.id);
 
+                    // only used for AI heads (keep 0 for players)
                     int headSkinId = 0;
-                    if (isAi) {
-                        var aiK = aiState.getById(k.id);
-                        if (aiK != null) headSkinId = Mth.clamp(aiK.skinId, 0, kingSkinPoolState.MAX_SKIN_ID);
-                    }
 
+                    // heraldry: only send a 1-count vanilla banner (or empty)
                     ItemStack heraldry = ItemStack.EMPTY;
-                    if (k.heraldry != null && !k.heraldry.isEmpty()) {
-                        heraldry = k.heraldry.copyWithCount(1);
+                    if (k.heraldry != null && !k.heraldry.isEmpty()
+                            && k.heraldry.getItem() instanceof net.minecraft.world.item.BannerItem) {
+                        heraldry = k.heraldry.copy();
+                        heraldry.setCount(1);
                     }
 
-                    out.add(new mailRecipientsSyncS2CPayload.Entry(k.id, nm, isAi, rel, headSkinId, heraldry));
-
-
+                    out.add(new mailRecipientsSyncS2CPayload.Entry(k.id, nm, false, rel, headSkinId, heraldry));
+                    seen.add(k.id);
                 }
 
-                ServerPlayNetworking.send(player, new mailRecipientsSyncS2CPayload(out));
+                // -------------------------
+                // AI KINGDOMS (directly from aiKingdomState)
+                // -------------------------
+                for (var aiK : aiState.kingdoms.values()) {
+                    if (aiK == null) continue;
+
+                    UUID id = aiK.id;
+                    if (id == null) continue;
+
+                    // skip duplicates if already added via ks loop
+                    if (seen.contains(id)) continue;
+
+                    // skip "yourself" if it ever matches (rare)
+                    if (aiK.kingUuid != null && aiK.kingUuid.equals(player.getUUID())) continue;
+
+                    String nm = (aiK.name == null || aiK.name.isBlank()) ? "Unknown" : aiK.name;
+
+                    int rel = relState.getRelation(player.getUUID(), id);
+
+                    int headSkinId = Mth.clamp(aiK.skinId, 0, kingSkinPoolState.MAX_SKIN_ID);
+
+                    // heraldry for AI is stored on kingdomState kingdom if present
+                    ItemStack heraldry = ItemStack.EMPTY;
+                    var kk = ks.getKingdom(id);
+                    if (kk != null && kk.heraldry != null && !kk.heraldry.isEmpty()
+                            && kk.heraldry.getItem() instanceof net.minecraft.world.item.BannerItem) {
+                        heraldry = kk.heraldry.copy();
+                        heraldry.setCount(1);
+                    }
+
+                    out.add(new mailRecipientsSyncS2CPayload.Entry(id, nm, true, rel, headSkinId, heraldry));
+                    seen.add(id);
+                }
+
+                Kingdoms.LOGGER.info("[MAIL] recipients -> {} (ks={}, aiState={})",
+                        out.size(), ks.getAllKingdoms().size(), aiState.kingdoms.size());
+
+                ServerPlayNetworking.send(player, new mailRecipientsSyncS2CPayload(java.util.List.copyOf(out)));
             });
         });
 

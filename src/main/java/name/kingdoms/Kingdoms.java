@@ -230,6 +230,8 @@ public class Kingdoms implements ModInitializer {
         ThroneSeatManager.hook();
         AiRelationNormalizer.init();
         ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickCalendar);
+        ServerTickEvents.END_SERVER_TICK.register(name.kingdoms.ambient.AmbientManager::tick);
+
         WarPendingTicker.init();
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents.END_SERVER_TICK.register(server -> {
             WarState.get(server).tickPendingWars(server);
