@@ -168,7 +168,7 @@ public class RoadAmbientNPCEntity extends PathfinderMob {
             setAiTypeId(t);
 
             int maxExclusive = switch (t) {
-                case "peasant" -> 3;
+                case "peasant" -> 46;
                 case "villager" -> 12;
                 case "noble" -> 25;
                 case "soldier" -> 29;

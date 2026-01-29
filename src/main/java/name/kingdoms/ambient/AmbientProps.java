@@ -346,7 +346,7 @@ public final class AmbientProps {
         }
     
 
-        if (terrainPatch == null) {
+        if (terrainPatch != null && !terrainPatch.isEmpty()) {
             return null;
         }
 

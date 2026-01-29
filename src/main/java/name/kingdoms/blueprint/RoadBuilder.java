@@ -397,13 +397,6 @@ public final class RoadBuilder {
             // "turn on grade" = turning while entering or exiting a slope
             boolean turnOnGrade = turned90 && ((dyPrev != 0) || (dyNext != 0));
 
-            // Place the pad only on non-bridges
-            boolean placedPad = false;
-            if (!isBridge && turnOnGrade) {
-                ops += placeLandingPadSquare(cur, y);
-                placedPad = true;
-            }
-
             // ----- stair reservation for this step (prevents surface overwriting stair tiles) -----
             BlockPos stairLower = null;
             Direction stairTravel = null;
@@ -425,7 +418,7 @@ public final class RoadBuilder {
             if (next != null) {
                 int dy = next.getY() - cur.getY();
                 if (dy == 1 || dy == -1) {
-                    ops += placeStairStep(cur, next, fwd, dy, placedPad);
+                    ops += placeStairStep(cur, next, fwd, dy, turnOnGrade);
                 }
             }
 
@@ -436,11 +429,6 @@ public final class RoadBuilder {
                 int rz = cur.getZ() + pz * w;
 
                 if (isStairAt(rx, y, rz) || isStairAt(rx, y + 1, rz)) {
-                    continue;
-                }
-
-                // NEW: also prevent placing path blocks right next to stair tops
-                if (isNearStairTop(rx, y, rz)) {
                     continue;
                 }
 
@@ -464,18 +452,11 @@ public final class RoadBuilder {
                 if (isFootprintBlocked(rx, rz)) continue;
 
                 long k = keyXZ(rx, rz);
-                if (!touchedXZ.add(k)) {
-                    // already processed this column, but still ensure surface at this y
-                    // (idempotent; cheap)
-                } else {
-                    // grade gently: cut small overhangs and fill small gaps
-                    if (!isBridge) {
-                        cutDownTo(rx, rz, y);
-                        fillUpTo(rx, rz, y - 1);
-                    }
-
-                     clearRoadVolume(rx, y, rz);
+                if (touchedXZ.add(k)) {
+                    // paint-only: only clear above the deck
+                    clearRoadVolume(rx, y + 1, rz);
                 }
+
 
                 // support / pillars
                 if (isBridge) {

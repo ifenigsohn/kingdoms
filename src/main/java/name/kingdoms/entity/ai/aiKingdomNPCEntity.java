@@ -456,12 +456,12 @@ public class aiKingdomNPCEntity extends PathfinderMob {
                 case "noble" -> 25;
 
                 // New roles (tune these to whatever skin counts you actually have)
-                case "peasant" -> 3;
+                case "peasant" -> 46;
                 case "trader" -> 4;
                 case "envoy" -> 8;
                 case "refugee" -> 3;
                 case "villager" -> 12;
-                case "scholar" -> 2; // tune to your actual skin count
+                case "scholar" -> 45; // tune to your actual skin count
                 case "soldier" -> 29;
                 case "scout" -> 29;
                 default -> 12;

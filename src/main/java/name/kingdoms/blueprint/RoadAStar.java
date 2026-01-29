@@ -14,6 +14,19 @@ public final class RoadAStar {
 
     private static final int MAX_ITERS = 250_000;
 
+    // Hard constraint: minimum straight steps before a turn
+    private static final int MIN_STRAIGHT_BEFORE_TURN = 3;
+
+    // A* assumes builder will clear a corridor above the road
+    private static final int CLEAR_HEIGHT = 4;
+
+    // Penalty for tunneling through solid blocks in the corridor
+    private static final double TUNNEL_BLOCK_PENALTY = 6.0;
+
+    // Penalty for placing the road “inside” a solid block at the deck position
+    private static final double DECK_SOLID_PENALTY = 18.0;
+
+
     // How far outside a footprint we treat as blocked (keeps roads off walls)
     public static final int FOOTPRINT_MARGIN = 2;
 
@@ -32,9 +45,24 @@ public final class RoadAStar {
     private static final double SIGN_FLIP_PENALTY  = 6.0;    // lastDy and dy opposite signs
     private static final double STEP_RUN_PENALTY   = 1.25;   // extended runs of dy!=0
 
+    private enum Dir {
+        NONE, EAST, WEST, SOUTH, NORTH;
+
+        static Dir fromDelta(int dx, int dz) {
+            if (dx > 0) return EAST;
+            if (dx < 0) return WEST;
+            if (dz > 0) return SOUTH;
+            if (dz < 0) return NORTH;
+            return NONE;
+        }
+    }
+
+
     public static List<BlockPos> findPath(ServerLevel level, long regionKey, BlockPos start, BlockPos goal) {
-        NodeKey startK = new NodeKey(start.getX(), start.getZ());
-        NodeKey goalK  = new NodeKey(goal.getX(),  goal.getZ());
+        NodeKey startK = new NodeKey(start.getX(), start.getZ(), Dir.NONE, MIN_STRAIGHT_BEFORE_TURN);
+        int goalX = goal.getX();
+        int goalZ = goal.getZ();
+
 
         int minX = Math.min(start.getX(), goal.getX()) - SEARCH_PADDING;
         int maxX = Math.max(start.getX(), goal.getX()) + SEARCH_PADDING;
@@ -62,18 +90,19 @@ public final class RoadAStar {
             // stale queue entries check
             if (curN.f > cur.f + 1e-9) continue;
 
-            if (cur.k.equals(goalK)) {
+            if (cur.k.x == goalX && cur.k.z == goalZ) {
                 return reconstruct(cur);
             }
 
+
             int cx = cur.k.x;
             int cz = cur.k.z;
-            int cy = cur.y;
 
-            step(level, regionKey, cur, cx + 1, cz, cy, goal, best, open, minX, maxX, minZ, maxZ);
-            step(level, regionKey, cur, cx - 1, cz, cy, goal, best, open, minX, maxX, minZ, maxZ);
-            step(level, regionKey, cur, cx, cz + 1, cy, goal, best, open, minX, maxX, minZ, maxZ);
-            step(level, regionKey, cur, cx, cz - 1, cy, goal, best, open, minX, maxX, minZ, maxZ);
+            step(level, regionKey, cur, cx + 1, cz, goalX, goalZ, best, open, minX, maxX, minZ, maxZ);
+            step(level, regionKey, cur, cx - 1, cz, goalX, goalZ, best, open, minX, maxX, minZ, maxZ);
+            step(level, regionKey, cur, cx, cz + 1, goalX, goalZ, best, open, minX, maxX, minZ, maxZ);
+            step(level, regionKey, cur, cx, cz - 1, goalX, goalZ, best, open, minX, maxX, minZ, maxZ);
+
         }
 
         return fallbackLine(level, regionKey, start, goal);
@@ -81,13 +110,14 @@ public final class RoadAStar {
     
 
     private static void step(ServerLevel level,
-                             long regionKey,
-                             NodeRec cur,
-                             int nx, int nz, int curY,
-                             BlockPos goal,
-                             HashMap<NodeKey, NodeRec> best,
-                             PriorityQueue<Node> open,
-                             int minX, int maxX, int minZ, int maxZ) {
+                         long regionKey,
+                         NodeRec cur,
+                         int nx, int nz,
+                         int goalX, int goalZ,
+                         HashMap<NodeKey, NodeRec> best,
+                         PriorityQueue<Node> open,
+                         int minX, int maxX, int minZ, int maxZ) {
+
 
         if (nx < minX || nx > maxX || nz < minZ || nz > maxZ) return;
         
@@ -97,70 +127,65 @@ public final class RoadAStar {
             return;
         }
 
-        boolean isGoal = (nx == goal.getX() && nz == goal.getZ());
+        boolean isGoal = (nx == goalX && nz == goalZ);
         if (!isGoal && isFootprintBlocked(level, regionKey, nx, nz, FOOTPRINT_MARGIN)) return;
 
+        // Determine move direction
+        int mdx = nx - cur.k.x;
+        int mdz = nz - cur.k.z;
+        Dir ndir = Dir.fromDelta(mdx, mdz);
+
+        // Turn spacing hard constraint
+        Dir cdir = cur.k.dir;
+        int since = cur.k.sinceTurn;
+
+        boolean isTurn = (cdir != Dir.NONE && ndir != cdir);
+        if (isTurn && since < MIN_STRAIGHT_BEFORE_TURN) {
+            return; // hard reject
+        }
+        int nextSince = isTurn ? 0 : (since + 1);
+
+
+        // Desired surface, but we only step by +/-1 max (tunneling allowed)
         int surf = surfaceY(level, nx, nz);
 
-        int dy = surf - curY;
-        if (dy < -1 || dy > 1) return; // enforce 1-step maximum
+        int curY = cur.y;
+        int ny = surf;
+        if (ny > curY + 1) ny = curY + 1;
+        else if (ny < curY - 1) ny = curY - 1;
+
+        int dy = ny - curY; // guaranteed in [-1, +1]
 
         // base move cost + grade penalty
         double g2 = cur.g + 1.0 + Math.abs(dy) * GRADE_PENALTY;
         if (dy > 0) g2 += UPHILL_EXTRA;
 
         // mild water penalty (still allowed)
-        if (isWaterAtOrBelow(level, nx, surf, nz)) g2 += 2.0;
+        if (isWaterAtOrBelow(level, nx, ny, nz)) g2 += 2.0;
 
-        // turn penalty
-        if (cur.prev != null) {
-            int pdx = cur.k.x - cur.prev.k.x;
-            int pdz = cur.k.z - cur.prev.k.z;
-            int ndx = nx - cur.k.x;
-            int ndz = nz - cur.k.z;
-            if (pdx != ndx || pdz != ndz) g2 += TURN_PENALTY;
-        }
+        // turn penalty (still useful, but the spacing rule is the real guard)
+        if (isTurn) g2 += TURN_PENALTY;
 
-        // extra anti-zigzag: penalize alternating axis steps (E/N/E/N...)
-        if (cur.prev != null) {
-            int pdx = cur.k.x - cur.prev.k.x;
-            int pdz = cur.k.z - cur.prev.k.z;
-            int ndx = nx - cur.k.x;
-            int ndz = nz - cur.k.z;
-
-            boolean prevAxisX = (pdx != 0);
-            boolean nextAxisX = (ndx != 0);
-
-            if (prevAxisX != nextAxisX) {
-                g2 += 150;
-            }
-        }
-
-
-        // ---- smoothness penalties using lastDy/stepRun ----
+        // ---- smoothness penalties ----
         int newStepRun = (dy != 0) ? (cur.stepRun + 1) : 0;
-
         if (dy != cur.lastDy) g2 += DY_CHANGE_PENALTY;
+        if (cur.lastDy != 0 && dy != 0 && Integer.signum(cur.lastDy) != Integer.signum(dy)) g2 += SIGN_FLIP_PENALTY;
+        if (newStepRun > 2) g2 += (newStepRun - 2) * STEP_RUN_PENALTY;
 
-        // penalize immediate "up then down" or "down then up"
-        if (cur.lastDy != 0 && dy != 0 && Integer.signum(cur.lastDy) != Integer.signum(dy)) {
-            g2 += SIGN_FLIP_PENALTY;
-        }
+        // ---- tunneling penalty: count solids in corridor ABOVE the road deck ----
+        g2 += tunnelPenalty(level, nx, ny, nz);
 
-        // penalize long continuous climbs/descents so it prefers landing-ish flats
-        if (newStepRun > 2) {
-            g2 += (newStepRun - 2) * STEP_RUN_PENALTY;
-        }
-
-        NodeKey nk = new NodeKey(nx, nz);
+        // Create next key/state
+        NodeKey nk = new NodeKey(nx, nz, ndir, nextSince);
 
         NodeRec prevBest = best.get(nk);
         if (prevBest == null || g2 < prevBest.g) {
-            NodeRec nr = new NodeRec(nk, surf, cur, g2, dy, newStepRun);
-            nr.f = g2 + heuristic(nx, nz, goal.getX(), goal.getZ());
+            NodeRec nr = new NodeRec(nk, ny, cur, g2, dy, newStepRun);
+            nr.f = g2 + heuristic(nx, nz, goalX, goalZ);
             best.put(nk, nr);
             open.add(new Node(nk, nr.f));
         }
+
     }
 
     private static int surfaceY(ServerLevel level, int x, int z) {
@@ -214,6 +239,28 @@ public final class RoadAStar {
         Collections.reverse(out);
         return out;
     }
+
+    private static double tunnelPenalty(ServerLevel level, int x, int roadY, int z) {
+        double p = 0.0;
+
+        // deck position itself
+        BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos(x, roadY, z);
+        BlockState deck = level.getBlockState(m);
+        if (!deck.isAir() && deck.getFluidState().isEmpty()) {
+            p += DECK_SOLID_PENALTY;
+        }
+
+        // corridor above deck
+        for (int i = 1; i <= CLEAR_HEIGHT; i++) {
+            m.set(x, roadY + i, z);
+            BlockState bs = level.getBlockState(m);
+            if (!bs.isAir() && bs.getFluidState().isEmpty()) {
+                p += TUNNEL_BLOCK_PENALTY;
+            }
+        }
+        return p;
+    }
+
 
     private static List<BlockPos> fallbackLine(ServerLevel level, long regionKey, BlockPos a, BlockPos b) {
         ArrayList<BlockPos> out = new ArrayList<>();
@@ -269,7 +316,8 @@ public final class RoadAStar {
     }
 
     private record Node(NodeKey k, double f) {}
-    private record NodeKey(int x, int z) {}
+    private record NodeKey(int x, int z, Dir dir, int sinceTurn) {}
+
 
     private static final class NodeRec {
         final NodeKey k;

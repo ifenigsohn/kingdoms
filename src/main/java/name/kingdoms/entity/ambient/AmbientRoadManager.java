@@ -64,12 +64,12 @@ public final class AmbientRoadManager {
             case "guard" -> 1;
             case "noble" -> 25;
 
-            case "peasant" -> 3;
+            case "peasant" -> 46;
             case "villager" -> 12;
             case "trader" -> 4;
             case "envoy" -> 8;
             case "refugee" -> 3;
-            case "scholar" -> 2;
+            case "scholar" -> 45;
 
             case "soldier" -> 29;
             case "scout" -> 29;
