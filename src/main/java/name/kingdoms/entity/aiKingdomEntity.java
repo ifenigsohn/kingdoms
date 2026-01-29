@@ -76,6 +76,12 @@ public class aiKingdomEntity extends PathfinderMob {
     private static final int NOON_TELEPORT_COOLDOWN_TICKS = 20 * 60;
     private int noonTeleportCooldown = 0;
 
+    // ---- ambient scene behavior ----
+private java.util.UUID ambientLeaderId = null;
+private net.minecraft.core.BlockPos ambientAnchorPos = null;
+private int ambientAnchorRadius = 0;
+
+
     private int panicTicks = 0;
 
     // --- Diplomacy freeze (server timer; refreshed by C2S keepalive) ---
@@ -389,6 +395,30 @@ public class aiKingdomEntity extends PathfinderMob {
         return data;
     }
 
+
+    // Leader-follow (train)
+    public void setAmbientLeader(java.util.UUID leaderId, int spacingBlocks) {
+        this.ambientLeaderId = leaderId;
+        // spacingBlocks currently used by spawner; goal uses distances, but keep this hook anyway.
+    }
+
+    public java.util.UUID getAmbientLeaderId() {
+        return this.ambientLeaderId;
+    }
+
+
+
+
+
+    public net.minecraft.core.BlockPos getAmbientAnchorPos() {
+        return this.ambientAnchorPos;
+    }
+
+
+
+    public boolean hasAmbientAnchor() {
+        return this.ambientAnchorPos != null && this.ambientAnchorRadius > 0;
+    }
 
     
     // --- Tick ---

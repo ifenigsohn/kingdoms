@@ -18,8 +18,8 @@ public final class DiplomacyPlayerSendRules {
     }
 
     // “long cooldown” knobs (tune freely)
-    public static final long COMPLIMENT_COOLDOWN_TICKS = 20L * 60L * 10L; // 10 minutes
-    public static final long INSULT_COOLDOWN_TICKS     = 20L * 60L * 10L; // 10 minutes
+    public static final long COMPLIMENT_COOLDOWN_TICKS = 20L * 60L * 8L; // 10 minutes
+    public static final long INSULT_COOLDOWN_TICKS     = 20L * 60L * 8L; // 10 minutes
 
     /** “Deal” letters in your GDD */
     public static boolean isDealKind(Letter.Kind k) {
@@ -106,9 +106,9 @@ public final class DiplomacyPlayerSendRules {
                 if (rel >= -30) return Decision.no("Relation too high for an ultimatum (must be below -30).");
             }
 
-            // Compliment: rel > -1
+            // Compliment: rel > -5
             if (kind == Letter.Kind.COMPLIMENT) {
-                if (rel <= -1) return Decision.no("You can only compliment neutral+ kingdoms (relation must be above -1).");
+                if (rel <= -5) return Decision.no("You can only compliment neutral+ kingdoms (relation must be above -1).");
             }
 
             // Alliance proposal: rel > +50
@@ -121,17 +121,16 @@ public final class DiplomacyPlayerSendRules {
         if (kind == Letter.Kind.COMPLIMENT || kind == Letter.Kind.INSULT) {
             ServerLevel mailLevel = server.overworld();
             var cd = DiplomacyCooldownState.get(mailLevel);
-            long now = mailLevel.getGameTime();
-            long last = cd.getLastSent(fromK.id, toK.id, kind);
 
-            long cooldown = (kind == Letter.Kind.COMPLIMENT) ? COMPLIMENT_COOLDOWN_TICKS : INSULT_COOLDOWN_TICKS;
-            long remaining = (last == 0L) ? 0L : (last + cooldown - now);
+            // IMPORTANT: use the same clock everywhere (recommended)
+            long nowTick = server.getTickCount();
 
-            if (remaining > 0) {
-                long secs = remaining / 20L;
-                return Decision.no("On cooldown (" + secs + "s remaining).");
+            long rem = cd.remaining(fromK.id, toK.id, kind, nowTick);
+            if (rem > 0) {
+                return Decision.no("On cooldown (" + (rem / 20L) + "s remaining).");
             }
         }
+
 
         // Insult is always allowed (except cooldown), Warning always allowed, etc.
         return Decision.ok();
@@ -143,6 +142,12 @@ public final class DiplomacyPlayerSendRules {
 
         ServerLevel mailLevel = server.overworld();
         var cd = DiplomacyCooldownState.get(mailLevel);
-        cd.markSent(fromKingdomId, toKingdomId, kind, mailLevel.getGameTime());
+        long nowTick = server.getTickCount();
+        long cooldown = (kind == Letter.Kind.COMPLIMENT)
+                ? COMPLIMENT_COOLDOWN_TICKS
+                : INSULT_COOLDOWN_TICKS;
+
+        cd.markSent(fromKingdomId, toKingdomId, kind, nowTick, cooldown);
+
     }
 }

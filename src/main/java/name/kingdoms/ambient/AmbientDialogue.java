@@ -6,6 +6,7 @@ import net.minecraft.server.level.ServerLevel;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 public final class AmbientDialogue {
     private AmbientDialogue() {}
@@ -20,21 +21,30 @@ public final class AmbientDialogue {
     }
 
     /** Tag-only entry point. Prefer calling this from events. */
+    /** Tag-only entry point. Prefer calling this from events. */
     public static String pickLine(AmbientContext ctx, String role, String dialogueTag) {
-        role = (role == null) ? "villager" : role.toLowerCase(Locale.ROOT);
+    role = (role == null) ? "villager" : role.toLowerCase(Locale.ROOT);
 
-        // If tag missing, don't crash or go silent:
-        // return a bland fallback line rather than referencing removed base pools.
-        if (dialogueTag == null || dialogueTag.isBlank()) {
-            return fallbackLine(ctx, role);
-        }
-
-        String tagged = pickTagged(ctx, role, dialogueTag);
-        if (tagged != null) return tagged;
-
-        // Tag exists but no matching keys for this role/context
+    if (dialogueTag == null || dialogueTag.isBlank()) {
         return fallbackLine(ctx, role);
     }
+
+    
+
+    // =====================================================
+    // GENERATED GOSSIP (personality-driven)
+    // =====================================================
+    if ("gossip_peasants_about_king".equals(dialogueTag)
+            || "gossip_nobles_about_king".equals(dialogueTag)) {
+        return GossipLines.generate(ctx, role, dialogueTag);
+    }
+
+    String tagged = pickTagged(ctx, role, dialogueTag);
+    if (tagged != null) return tagged;
+
+    return fallbackLine(ctx, role);
+}
+
 
     private static void mergeTag(String tag, Map<String, String[]> extra) {
         Map<String, String[]> base = TAG_POOLS.get(tag);
@@ -48,15 +58,6 @@ public final class AmbientDialogue {
     }
 
 
-    /**
-     * OLD API kept only so nothing else breaks if it still calls pickLine(ctx, role).
-     * Uses a generic fallback (since base pools were removed).
-     */
-    public static String pickLine(AmbientContext ctx, String role) {
-        role = (role == null) ? "villager" : role.toLowerCase(Locale.ROOT);
-        return fallbackLine(ctx, role);
-    }
-
     private static String pickTagged(AmbientContext ctx, String role, String tag) {
         Map<String, String[]> byKey = TAG_POOLS.get(tag);
         if (byKey == null) return null;
@@ -65,7 +66,15 @@ public final class AmbientDialogue {
         KingdomMoodBands bands = KingdomMoodBands.from(ctx);
 
         // Most specific → least specific
-        String[] pool = byKey.get(role + ":" + tone.name());
+        // Most specific → least specific
+        String[] pool = null;
+
+        // Special-case: in YOUR kingdom and YOU are the sovereign → address player as king
+        if (tone == Tone.OWN_KINGDOM && playerIsKing(ctx)) {
+        pool = byKey.get(role + ":OWN_KINGDOM_PLAYER_KING");
+        }
+
+        if (pool == null) pool = byKey.get(role + ":" + tone.name());
         if (pool == null && bands.poverty) pool = byKey.get(role + ":POOR");
         if (pool == null && bands.excess)  pool = byKey.get(role + ":RICH");
         if (pool == null) pool = byKey.get(role);
@@ -74,11 +83,9 @@ public final class AmbientDialogue {
         if (pool == null) pool = byKey.get("any");
 
         if (pool == null || pool.length == 0) return null;
-
-        // Optional personality spice: if you want it, we can “tilt” into extra lines
-        // by appending, but since you're tag-only, best practice is: define those
-        // extras per-tag instead. Keeping this minimal and deterministic.
         return pool[ctx.level().random.nextInt(pool.length)];
+
+
     }
 
     private static Tone pickTone(AmbientContext ctx) {
@@ -121,6 +128,35 @@ public final class AmbientDialogue {
             return new KingdomMoodBands(false, false);
         }
     }
+
+    private static boolean playerIsKing(AmbientContext ctx) {
+        if (ctx.playerKingdom() == null || ctx.player() == null) return false;
+
+        UUID playerId = ctx.player().getUUID();
+        Object pk = ctx.playerKingdom();
+
+        // Try common field names
+        for (String fName : new String[]{"kingId", "rulerId", "leaderId", "sovereignId", "ownerId"}) {
+                try {
+                var f = pk.getClass().getField(fName);
+                Object v = f.get(pk);
+                if (v instanceof UUID id) return playerId.equals(id);
+                } catch (Throwable ignored) {}
+        }
+
+        // Try common getter names
+        for (String mName : new String[]{"getKingId", "getRulerId", "getLeaderId", "getSovereignId", "getOwnerId"}) {
+                try {
+                var m = pk.getClass().getMethod(mName);
+                Object v = m.invoke(pk);
+                if (v instanceof UUID id) return playerId.equals(id);
+                } catch (Throwable ignored) {}
+        }
+
+        return false;
+        }
+
+
 
     /** If a tag/role pool is missing, we still show *some* line. */
     private static String fallbackLine(AmbientContext ctx, String role) {
@@ -735,6 +771,30 @@ public final class AmbientDialogue {
                     "Safe travels. You’ll need luck."
             }
     ));
+    
+    TAG_POOLS.put("wilderness_camp_small", Map.of(
+            "peasant:WILDERNESS", new String[]{
+                    "No banner out here. Just teeth and weather.",
+                    "Not much to share, I’m afraid, but you’re welcome to the fire a spell",
+                    "Keep walking. We’ve had enough trouble tonight.",
+                    "Hands where I can see ’em.",
+                    "Profit’s thin when roads are hungry.",
+                    "I trade fast and camp farther.",
+                    "Road’s safer with company, but we don’t ask questions.",
+                    "Please… don’t hurt us.",
+                    "Saints watch us tonight…",
+                    "Ho! Stranger! Come drink, before it’s gone!",
+                    "Sing with us or leave—either way’s fine.",
+                    "That fire’s the warmest thing in my life.",
+
+            },
+            "any:WILDERNESS", new String[]{
+                    "The wilderness doesn’t care who rules."
+            },
+            "any", new String[]{
+                    "Safe travels. You’ll need luck."
+            }
+    ));
 
     TAG_POOLS.put("border_watch", Map.of(
             "guard:FOREIGN_NEUTRAL", new String[]{
@@ -999,6 +1059,18 @@ public final class AmbientDialogue {
                     "Better a candle than nothing."
             }
     ));
+
+    TAG_POOLS.put("hunter_camp_tent", Map.of(
+        "peasant:WILDERNESS", new String[] {
+                "Quiet. You’ll scare the game.",
+                "Fresh tracks—deer, maybe boar.",
+                "Camp’s small, but it’s warm enough."
+        },
+        "any:WILDERNESS", new String[] {
+                "Smoke carries. Keep it low."
+        }
+        ));
+
 
     TAG_POOLS.put("wounded_soldier", Map.of(
             "soldier:WAR_EDGE", new String[]{
@@ -1585,6 +1657,65 @@ public final class AmbientDialogue {
             }
     ));
 
+    mergeTag("soldier_patrol_roads", Map.of(
+                // --- Player is king in own kingdom (direct address) ---
+                "soldier:OWN_KINGDOM_PLAYER_KING", new String[]{
+                        "My liege. Roads are secure—no bandit activity reported.",
+                        "Your Grace, patrol reports: quiet routes and clear crossings.",
+                        "Sire. We’ve driven off prowlers near the treeline.",
+                        "My king. We’ll keep the roads safe for your people.",
+                        "Your Majesty—orders? We’ll carry them out."
+                },
+
+                // --- Own kingdom (generic / if player not sovereign) ---
+                "soldier:OWN_KINGDOM", new String[]{
+                        "Road’s watched. Keep it peaceful.",
+                        "Patrol’s on duty—move along.",
+                        "Bandits get bold when we get lazy.",
+                        "If you see trouble, report it to the guard.",
+                        "We keep the roads clear so the realm can breathe."
+                },
+
+                // --- Foreign kingdom: allied ---
+                "soldier:FOREIGN_ALLIED", new String[]{
+                        "Allied traveler—good. Keep to the road and there’s no trouble.",
+                        "We’re friends of your crown today. Don’t make it complicated.",
+                        "Pass freely. Still—no weapons drawn near the villages.",
+                        "Allied banners don’t mean no rules. Walk straight and we’ll nod.",
+                        "Safe roads help both realms. Keep it that way."
+                },
+
+                // --- Foreign kingdom: neutral ---
+                "soldier:FOREIGN_NEUTRAL", new String[]{
+                        "Foreign face. Stay on the road and we won’t speak twice.",
+                        "Neutral doesn’t mean trusted. Don’t loiter.",
+                        "Pass through—quietly.",
+                        "Keep your hands visible. It avoids misunderstandings.",
+                        "Trade if you must. But don’t test our patience."
+                },
+
+                // --- Foreign kingdom: hostile ---
+                "soldier:FOREIGN_HOSTILE", new String[]{
+                        "Hostile colors don’t belong on our roads. Move.",
+                        "We’re watching you. Closely.",
+                        "One wrong step and we call it scouting.",
+                        "Crossing our land is a privilege you haven’t earned.",
+                        "If you’re here to cause trouble, you’ll die tired."
+                },
+
+                // Optional: scouts can also be tone-aware (nice flavor)
+                "scout:FOREIGN_HOSTILE", new String[]{
+                        "Foreign footsteps travel loud. We heard you coming.",
+                        "Hostile lands aren’t forgiving—turn back while you can.",
+                        "We track everything that moves out here. Including you."
+                },
+                "scout:FOREIGN_ALLIED", new String[]{
+                        "Allied traveler—keep to the path. The woods don’t know treaties.",
+                        "Road’s safe enough. Off-road is another story."
+                }
+        ));
+
+
     mergeTag("spy_caught", Map.of(
             "guard:OWN_KINGDOM", new String[]{
                     "You’re in the wrong place for an honest person.",
@@ -1633,6 +1764,403 @@ public final class AmbientDialogue {
 
 
 }
+    private static final class GossipLines {
 
+        enum Band { LOW, MED, HIGH }
+
+        static String generate(AmbientContext ctx, String role, String tag) {
+            boolean nobles = "gossip_nobles_about_king".equals(tag) || "noble".equalsIgnoreCase(role);
+
+            String kingName = resolveKingName(ctx);
+            String place = ctx.inKingdom() ? "in these lands" : "out here";
+
+            // Pick a trait to gossip about for variety
+            String[] traits = new String[] {"aggression", "honor", "greed", "pragmatism", "trustBias"};
+            String trait = traits[ctx.level().random.nextInt(traits.length)];
+
+            double v = readTrait01(ctx, trait); // 0..1 (best effort)
+            Band b = band(v);
+
+            return switch (trait) {
+                case "aggression" -> nobles
+                        ? nobleAggression(ctx, kingName, b, place)
+                        : peasantAggression(ctx, kingName, b, place);
+
+                case "honor" -> nobles
+                        ? nobleHonor(ctx, kingName, b, place)
+                        : peasantHonor(ctx, kingName, b, place);
+
+                case "greed" -> nobles
+                        ? nobleGreed(ctx, kingName, b, place)
+                        : peasantGreed(ctx, kingName, b, place);
+
+                case "pragmatism" -> nobles
+                        ? noblePragmatism(ctx, kingName, b, place)
+                        : peasantPragmatism(ctx, kingName, b, place);
+
+                case "trustBias" -> nobles
+                        ? nobleTrust(ctx, kingName, b, place)
+                        : peasantTrust(ctx, kingName, b, place);
+
+                default -> nobles
+                        ? "King " + kingName + " plays the realm like a board."
+                        : "They say King " + kingName + " cares little for folk like us.";
+            };
+        }
+
+        // ---------- banding ----------
+        private static Band band(double v01) {
+            if (v01 >= 0.67) return Band.HIGH;
+            if (v01 <= 0.33) return Band.LOW;
+            return Band.MED;
+        }
+
+        // ---------- best-effort trait reader ----------
+        private static double readTrait01(AmbientContext ctx, String fieldName) {
+            Object ai = ctx.aiHere();
+            if (ai == null) return 0.5; // neutral if unknown
+
+            // Try common numeric fields: double/float/int
+            try {
+                var f = ai.getClass().getField(fieldName);
+                Object v = f.get(ai);
+                if (v instanceof Number n) return clamp01(n.doubleValue());
+            } catch (Throwable ignored) {}
+
+            // Also try getters (getAggression(), aggression(), etc.)
+            try {
+                var m = ai.getClass().getMethod("get" + cap(fieldName));
+                Object v = m.invoke(ai);
+                if (v instanceof Number n) return clamp01(n.doubleValue());
+            } catch (Throwable ignored) {}
+            try {
+                var m = ai.getClass().getMethod(fieldName);
+                Object v = m.invoke(ai);
+                if (v instanceof Number n) return clamp01(n.doubleValue());
+            } catch (Throwable ignored) {}
+
+            return 0.5;
+        }
+
+        private static double clamp01(double x) {
+            if (x < 0) return 0;
+            if (x > 1) return 1;
+            return x;
+        }
+
+        private static String cap(String s) {
+            if (s == null || s.isEmpty()) return s;
+            return Character.toUpperCase(s.charAt(0)) + s.substring(1);
+        }
+
+        // ---------- king name ----------
+        private static String resolveKingName(AmbientContext ctx) {
+            // Best option: AI kingdom name / ruler name (best effort)
+            Object ai = ctx.aiHere();
+            if (ai != null) {
+                String n = readString(ai, "rulerName");
+                if (n == null) n = readString(ai, "kingName");
+                if (n == null) n = readString(ai, "name");
+                if (n != null && !n.isBlank()) return n;
+            }
+
+            // Fallback: kingdom name if present
+            if (ctx.hereKingdom() != null) {
+                try {
+                    var f = ctx.hereKingdom().getClass().getField("name");
+                    Object v = f.get(ctx.hereKingdom());
+                    if (v instanceof String s && !s.isBlank()) return s;
+                } catch (Throwable ignored) {}
+            }
+
+            return "Unknown";
+        }
+
+        private static String readString(Object obj, String field) {
+            try {
+                var f = obj.getClass().getField(field);
+                Object v = f.get(obj);
+                return (v instanceof String s) ? s : null;
+            } catch (Throwable ignored) {}
+            try {
+                var m = obj.getClass().getMethod("get" + cap(field));
+                Object v = m.invoke(obj);
+                return (v instanceof String s) ? s : null;
+            } catch (Throwable ignored) {}
+            return null;
+        }
+
+        // ---------- line templates ----------
+       private static String peasantAggression(AmbientContext ctx, String k, Band b, String place) {
+            String[] lines = switch (b) {
+                case HIGH -> new String[]{
+                        "King " + k + " is a dastardly, heinous ruler—always itching for war " + place + ".",
+                        "King " + k + " keeps the realm sharp with blood and threats " + place + ".",
+                        "King " + k + " would rather burn a border than bless a harvest " + place + ".",
+                        "King " + k + " sends men marching like it’s a pastime " + place + ".",
+                        "King " + k + " thinks peace is weakness—so we never get it " + place + "."
+                };
+                case MED -> new String[]{
+                        "King " + k + " has a temper. Best not cross his banners " + place + ".",
+                        "King " + k + " rattles swords when pride gets poked " + place + ".",
+                        "King " + k + " can be calm—until he isn’t " + place + ".",
+                        "King " + k + " likes to threaten before he bargains " + place + ".",
+                        "King " + k + " keeps the peace… but keeps a hand on the hilt " + place + "."
+                };
+                case LOW -> new String[]{
+                        "King " + k + " avoids bloodshed, they say. A rare thing " + place + ".",
+                        "King " + k + " would rather sign than slaughter " + place + ".",
+                        "King " + k + " doesn’t rush to war—thank the heavens " + place + ".",
+                        "King " + k + " lets hotheads cool before he moves " + place + ".",
+                        "King " + k + " calls war a last resort, not a hobby " + place + "."
+                };
+            };
+            return lines[ctx.level().random.nextInt(lines.length)];
+        }
+
+        private static String nobleAggression(AmbientContext ctx, String k, Band b, String place) {
+            String[] lines = switch (b) {
+                case HIGH -> new String[]{
+                        "King " + k + " hungers for conflict; even allies become convenient tools " + place + ".",
+                        "King " + k + " treats peace like an inconvenience " + place + ".",
+                        "King " + k + " prefers conquest to compromise " + place + ".",
+                        "King " + k + " turns every dispute into a campaign " + place + ".",
+                        "King " + k + " escalates first—then asks who’s offended " + place + "."
+                };
+                case MED -> new String[]{
+                        "King " + k + " prefers pressure over peace—measured, but dangerous " + place + ".",
+                        "King " + k + " flexes the army to win negotiations " + place + ".",
+                        "King " + k + " will strike if it’s profitable, not poetic " + place + ".",
+                        "King " + k + " keeps rivals uneasy, and calls it stability " + place + ".",
+                        "King " + k + " tolerates peace, so long as it serves him " + place + "."
+                };
+                case LOW -> new String[]{
+                        "King " + k + " won’t gamble the realm on war. Sensible… if dull " + place + ".",
+                        "King " + k + " values order over glory " + place + ".",
+                        "King " + k + " would rather build coffers than battlefields " + place + ".",
+                        "King " + k + " avoids wars that cannot be cleanly won " + place + ".",
+                        "King " + k + " is cautious—he doesn’t spill blood for sport " + place + "."
+                };
+            };
+            return lines[ctx.level().random.nextInt(lines.length)];
+        }
+
+        private static String peasantHonor(AmbientContext ctx, String k, Band b, String place) {
+            String[] lines = switch (b) {
+                case HIGH -> new String[]{
+                        "King " + k + " keeps his word, even when it costs him. Imagine that " + place + ".",
+                        "King " + k + " pays debts he doesn’t have to pay " + place + ".",
+                        "King " + k + " doesn’t break oaths lightly " + place + ".",
+                        "King " + k + " treats promises like chains—binding, but fair " + place + ".",
+                        "King " + k + " won’t cheat a man just because he can " + place + "."
+                };
+                case MED -> new String[]{
+                        "King " + k + " talks of honor, but coins still speak loud " + place + ".",
+                        "King " + k + " is decent… until it gets expensive " + place + ".",
+                        "King " + k + " keeps some oaths and forgets others " + place + ".",
+                        "King " + k + " does right when eyes are watching " + place + ".",
+                        "King " + k + " likes to look honorable, at least " + place + "."
+                };
+                case LOW -> new String[]{
+                        "King " + k + " swears oaths like he swats flies. Nothing sticks " + place + ".",
+                        "King " + k + " lies with a smile and calls it politics " + place + ".",
+                        "King " + k + " breaks promises the moment it suits him " + place + ".",
+                        "King " + k + " sells his word cheap " + place + ".",
+                        "King " + k + " makes vows just to trap fools " + place + "."
+                };
+            };
+            return lines[ctx.level().random.nextInt(lines.length)];
+        }
+
+        private static String nobleHonor(AmbientContext ctx, String k, Band b, String place) {
+            String[] lines = switch (b) {
+                case HIGH -> new String[]{
+                        "King " + k + " treats vows as law. It makes him predictable—valuable " + place + ".",
+                        "King " + k + " will not stain his name for convenience " + place + ".",
+                        "King " + k + " honors treaties even when they chafe " + place + ".",
+                        "King " + k + " prefers reputation to profit " + place + ".",
+                        "King " + k + " keeps his dignity intact—rare at court " + place + "."
+                };
+                case MED -> new String[]{
+                        "King " + k + " is honorable when it’s convenient; political when it isn’t " + place + ".",
+                        "King " + k + " bargains with honor like it’s a currency " + place + ".",
+                        "King " + k + " keeps vows—unless power demands otherwise " + place + ".",
+                        "King " + k + " tries to be principled, but courts erode stone " + place + ".",
+                        "King " + k + " maintains appearances, which is half of honor anyway " + place + "."
+                };
+                case LOW -> new String[]{
+                        "King " + k + " has no honor—only advantage. Courts should take note " + place + ".",
+                        "King " + k + " treats oaths as tools, not truths " + place + ".",
+                        "King " + k + " will betray an ally and call it necessity " + place + ".",
+                        "King " + k + " mistakes cruelty for strength " + place + ".",
+                        "King " + k + " makes promises to break them later " + place + "."
+                };
+            };
+            return lines[ctx.level().random.nextInt(lines.length)];
+        }
+
+        private static String peasantGreed(AmbientContext ctx, String k, Band b, String place) {
+            String[] lines = switch (b) {
+                case HIGH -> new String[]{
+                        "King " + k + " would tax the air if he could. We feel it " + place + ".",
+                        "King " + k + " counts our bread before we eat it " + place + ".",
+                        "King " + k + " squeezes the realm until it squeals " + place + ".",
+                        "King " + k + " takes and takes—then asks why we’re thin " + place + ".",
+                        "King " + k + " loves coin more than people " + place + "."
+                };
+                case MED -> new String[]{
+                        "King " + k + " likes coin—don’t they all? Still, it pinches " + place + ".",
+                        "King " + k + " raises dues when the court gets hungry " + place + ".",
+                        "King " + k + " takes his share, and then a bit extra " + place + ".",
+                        "King " + k + " keeps taxes steady… until he wants something new " + place + ".",
+                        "King " + k + " isn’t the worst, but the collectors never miss " + place + "."
+                };
+                case LOW -> new String[]{
+                        "King " + k + " doesn’t squeeze us as hard as most. Small mercies " + place + ".",
+                        "King " + k + " lets villages breathe between payments " + place + ".",
+                        "King " + k + " asks less than other lords would " + place + ".",
+                        "King " + k + " cares more for stability than hoarding " + place + ".",
+                        "King " + k + " doesn’t bleed the poor dry—rare crown, that " + place + "."
+                };
+            };
+            return lines[ctx.level().random.nextInt(lines.length)];
+        }
+
+        private static String nobleGreed(AmbientContext ctx, String k, Band b, String place) {
+            String[] lines = switch (b) {
+                case HIGH -> new String[]{
+                        "King " + k + " counts coin the way priests count sins—endlessly " + place + ".",
+                        "King " + k + " measures loyalty in silver " + place + ".",
+                        "King " + k + " turns every policy into profit " + place + ".",
+                        "King " + k + " hoards wealth like a dragon with paperwork " + place + ".",
+                        "King " + k + " will sell peace if the price is right " + place + "."
+                };
+                case MED -> new String[]{
+                        "King " + k + " enjoys wealth, but understands appearances " + place + ".",
+                        "King " + k + " taxes carefully—enough to fill coffers, not enough to revolt " + place + ".",
+                        "King " + k + " likes gifts, but keeps the realm functioning " + place + ".",
+                        "King " + k + " is acquisitive, not careless " + place + ".",
+                        "King " + k + " collects coin as a habit, not a frenzy " + place + "."
+                };
+                case LOW -> new String[]{
+                        "King " + k + " isn’t driven by gold. That makes him… harder to buy " + place + ".",
+                        "King " + k + " values legitimacy more than luxury " + place + ".",
+                        "King " + k + " spends on the realm instead of his table " + place + ".",
+                        "King " + k + " cannot be bribed easily—useful, and annoying " + place + ".",
+                        "King " + k + " doesn’t chase wealth like the rest of them " + place + "."
+                };
+            };
+            return lines[ctx.level().random.nextInt(lines.length)];
+        }
+
+        private static String peasantPragmatism(AmbientContext ctx, String k, Band b, String place) {
+            String[] lines = switch (b) {
+                case HIGH -> new String[]{
+                        "King " + k + " does what works, not what’s pretty. Sometimes that helps us " + place + ".",
+                        "King " + k + " fixes problems fast—even if it bruises pride " + place + ".",
+                        "King " + k + " cares about results, not speeches " + place + ".",
+                        "King " + k + " builds first and boasts later " + place + ".",
+                        "King " + k + " keeps things running. That’s more than most " + place + "."
+                };
+                case MED -> new String[]{
+                        "King " + k + " tries to be practical, but pride still trips him " + place + ".",
+                        "King " + k + " solves some things and ignores others " + place + ".",
+                        "King " + k + " listens to advisors—until he doesn’t " + place + ".",
+                        "King " + k + " makes sensible moves, then undoes them for show " + place + ".",
+                        "King " + k + " wants order, but gets distracted by court noise " + place + "."
+                };
+                case LOW -> new String[]{
+                        "King " + k + " lives in stories, not barns. We pay for it " + place + ".",
+                        "King " + k + " loves grand plans and forgets the mud " + place + ".",
+                        "King " + k + " rules by rumor and ceremony " + place + ".",
+                        "King " + k + " ignores what’s broken until it collapses " + place + ".",
+                        "King " + k + " thinks pride feeds people. It doesn’t " + place + "."
+                };
+            };
+            return lines[ctx.level().random.nextInt(lines.length)];
+        }
+
+        private static String noblePragmatism(AmbientContext ctx, String k, Band b, String place) {
+            String[] lines = switch (b) {
+                case HIGH -> new String[]{
+                        "King " + k + " is ruthlessly practical—policy first, sentiment last " + place + ".",
+                        "King " + k + " treats the realm like a machine to be tuned " + place + ".",
+                        "King " + k + " cuts what doesn’t work, no matter who cries " + place + ".",
+                        "King " + k + " values stability over virtue-signaling " + place + ".",
+                        "King " + k + " makes hard choices quickly—often correctly " + place + "."
+                };
+                case MED -> new String[]{
+                        "King " + k + " balances principle and outcome. Adequate, if cautious " + place + ".",
+                        "King " + k + " will compromise if it preserves the realm " + place + ".",
+                        "King " + k + " follows advisors, but keeps a firm leash " + place + ".",
+                        "King " + k + " avoids extremes—sometimes to a fault " + place + ".",
+                        "King " + k + " is careful with reforms, careful with enemies " + place + "."
+                };
+                case LOW -> new String[]{
+                        "King " + k + " rules by impulse and pageantry. Dangerous in the long run " + place + ".",
+                        "King " + k + " confuses spectacle for strength " + place + ".",
+                        "King " + k + " changes course with every new favorite " + place + ".",
+                        "King " + k + " ignores costs until the bill comes due " + place + ".",
+                        "King " + k + " treats governance like theater " + place + "."
+                };
+            };
+            return lines[ctx.level().random.nextInt(lines.length)];
+        }
+
+        private static String peasantTrust(AmbientContext ctx, String k, Band b, String place) {
+            String[] lines = switch (b) {
+                case HIGH -> new String[]{
+                        "King " + k + " trusts folk too easily. Bandits love that " + place + ".",
+                        "King " + k + " believes promises like a child—dangerous for us " + place + ".",
+                        "King " + k + " lets strangers talk sweet and walk away rich " + place + ".",
+                        "King " + k + " thinks everyone means well. They don’t " + place + ".",
+                        "King " + k + " gives second chances to wolves in hats " + place + "."
+                };
+                case MED -> new String[]{
+                        "King " + k + " trusts some, suspects most. Same as any ruler " + place + ".",
+                        "King " + k + " listens first, then checks the locks " + place + ".",
+                        "King " + k + " gives trust in measured cups " + place + ".",
+                        "King " + k + " keeps friends close and ledgers closer " + place + ".",
+                        "King " + k + " is wary, but not cruel about it " + place + "."
+                };
+                case LOW -> new String[]{
+                        "King " + k + " sees spies in every shadow. Makes everyone nervous " + place + ".",
+                        "King " + k + " trusts no one—so everyone pays for it " + place + ".",
+                        "King " + k + " keeps changing guards like the wind changes " + place + ".",
+                        "King " + k + " hears treason in casual talk " + place + ".",
+                        "King " + k + " rules with suspicion as law " + place + "."
+                };
+            };
+            return lines[ctx.level().random.nextInt(lines.length)];
+        }
+
+        private static String nobleTrust(AmbientContext ctx, String k, Band b, String place) {
+            String[] lines = switch (b) {
+                case HIGH -> new String[]{
+                        "King " + k + " extends trust readily—useful, if exploitable " + place + ".",
+                        "King " + k + " assumes loyalty until proven otherwise " + place + ".",
+                        "King " + k + " welcomes strangers to the table too quickly " + place + ".",
+                        "King " + k + " prefers openness to paranoia—sometimes unwisely " + place + ".",
+                        "King " + k + " believes diplomacy will tame wolves " + place + "."
+                };
+                case MED -> new String[]{
+                        "King " + k + " is cautious. A court survives on caution " + place + ".",
+                        "King " + k + " trusts with conditions, not feelings " + place + ".",
+                        "King " + k + " keeps allies close, rivals closer " + place + ".",
+                        "King " + k + " tests loyalty quietly, like a professional " + place + ".",
+                        "King " + k + " neither gullible nor cruel—simply careful " + place + "."
+                };
+                case LOW -> new String[]{
+                        "King " + k + " trusts no one. Paranoia becomes policy " + place + ".",
+                        "King " + k + " sees plots where there are only whispers " + place + ".",
+                        "King " + k + " keeps the court fearful to keep it obedient " + place + ".",
+                        "King " + k + " would rather accuse than be surprised " + place + ".",
+                        "King " + k + " builds walls inside walls, and calls it wisdom " + place + "."
+                };
+            };
+            return lines[ctx.level().random.nextInt(lines.length)];
+        }
+
+    }
     
 }

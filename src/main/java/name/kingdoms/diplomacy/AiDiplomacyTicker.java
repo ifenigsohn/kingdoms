@@ -549,7 +549,8 @@ public final class AiDiplomacyTicker {
                         ctxEval,
                         aType, aAmt,
                         bType, bAmt,
-                        maxAmt
+                        maxAmt,
+                        false
                 );
 
                 boolean accepted = (res.decision() == DiplomacyEvaluator.Decision.ACCEPT);

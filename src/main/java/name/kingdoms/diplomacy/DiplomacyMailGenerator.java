@@ -343,14 +343,18 @@ public final class DiplomacyMailGenerator {
                     continue; // do not send normal diplomacy letters while at war
                 }
 
+                boolean playerPresent = isPlayerPresentWithKingdom(player, from);
 
                 Optional<Letter.Kind> kindOpt = DiplomacyLetterPolicy.chooseOutgoing(
                         rand,
                         rel,
                         aiK.personality,
                         atWar,
-                        allied
+                        allied,
+                        playerPresent
                 );
+
+                
 
                 if (kindOpt.isEmpty()) continue;
 
@@ -379,6 +383,14 @@ public final class DiplomacyMailGenerator {
             }
         }
     }
+
+    private static boolean isPlayerPresentWithKingdom(ServerPlayer player, kingdomState.Kingdom k) {
+        // “present” = within 128 blocks of the kingdom origin (court area proxy)
+        double dx = (k.origin.getX() + 0.5) - player.getX();
+        double dz = (k.origin.getZ() + 0.5) - player.getZ();
+        return (dx * dx + dz * dz) <= (128.0 * 128.0);
+    }
+
 
     // ------------------------------------------
     // Letter building (policy-selected kind)
@@ -568,7 +580,12 @@ public final class DiplomacyMailGenerator {
 
         RandomSource r = level.getRandom();
         long expires = nowTick + (20L * 60L * 10L);
+        
+        
 
+       
+
+        // Use relations + personality policy here too
         // Use relations + personality policy here too
         DiplomacyRelationsState relState = DiplomacyRelationsState.get(server);
         int rel = relState.getRelation(toPlayer, fromAiId);
@@ -581,6 +598,19 @@ public final class DiplomacyMailGenerator {
 
         boolean atWar = (playerK != null) && warState.isAtWar(playerK.id, fromAiId);
         boolean allied = (playerK != null) && alliance.isAllied(playerK.id, fromAiId);
+
+        // ---- playerPresent: only meaningful if player exists + not null ----
+        ServerPlayer sp = server.getPlayerList().getPlayer(toPlayer);
+        boolean playerPresent = false;
+
+        if (sp != null) {
+            // Best: if you can fetch the AI kingdom's Kingdom record by id, use it.
+            // If you don't have a direct method, see notes below.
+            kingdomState.Kingdom fromKingdom = ks.getKingdom(fromAiId); // <-- you need this method (or equivalent)
+            if (fromKingdom != null) {
+                playerPresent = isPlayerPresentWithKingdom(sp, fromKingdom);
+            }
+        }
 
         // -------------------------------------------------
         // WAR MODE: proposal button only returns peace letters
@@ -624,7 +654,7 @@ public final class DiplomacyMailGenerator {
 
 
         Optional<Letter.Kind> kindOpt = DiplomacyLetterPolicy.chooseOutgoing(
-                r, rel, aiK.personality, atWar, allied
+                r, rel, aiK.personality, atWar, allied, playerPresent
         );
 
         if (kindOpt.isEmpty()) return null;

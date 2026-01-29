@@ -36,7 +36,7 @@ import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.level.storage.ValueOutput;
-
+import net.minecraft.world.phys.Vec3;
 
 import java.util.UUID;
 
@@ -82,6 +82,17 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     @Nullable private BlockPos homePos;
     @Nullable private BlockPos assignedBedPos;
 
+    @Nullable private BlockPos ambientLoiterCenter = null;
+    private int ambientLoiterRadius = 0;
+    private long ambientLoiterUntilTick = 0;
+
+    public void setAmbientLoiter(BlockPos center, int radius, int durationTicks) {
+        this.ambientLoiterCenter = center;
+        this.ambientLoiterRadius = Math.max(2, radius);
+        this.ambientLoiterUntilTick = this.level().getServer().getTickCount() + Math.max(20, durationTicks);
+    }
+
+
     // --- Teleport safety ---
     private static final int HARD_TELEPORT_RADIUS = 70;
     private static final long MORNING_TIME = 1000L;
@@ -99,6 +110,18 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     private String ambientTalkTitle = null;
     private int ambientTalkTtl = 0;
 
+    private java.util.UUID ambientLeaderId = null;
+    private int ambientFollowDist = 3;
+
+    public void setAmbientLeader(java.util.UUID leader, int followDist) {
+        this.ambientLeaderId = leader;
+        this.ambientFollowDist = followDist;
+    }
+
+    public java.util.UUID getAmbientLeaderId() { return ambientLeaderId; }
+    public int getAmbientFollowDist() { return ambientFollowDist; }
+
+
 
     // --- Sleep poof rate (optional flair) ---
     private static final int SLEEP_POOF_INTERVAL_TICKS = 60;
@@ -115,6 +138,24 @@ public class aiKingdomNPCEntity extends PathfinderMob {
                 .add(Attributes.FOLLOW_RANGE, 24.0D)
                 .add(Attributes.ATTACK_DAMAGE, 4.0D);   
     }
+    
+    @Override
+    public boolean isCustomNameVisible() {
+    // Ambient soldiers ALWAYS show their nametag
+    if (this.isAmbient()) {
+        return true;
+    }
+    return super.isCustomNameVisible();
+}
+
+    public BlockPos getAmbientLoiterCenter() { return ambientLoiterCenter; }
+    public int getAmbientLoiterRadius() { return ambientLoiterRadius; }
+    public boolean isAmbientLoiterActive() {
+        if (this.level().isClientSide()) return false;
+        var srv = this.level().getServer();
+        return ambientLoiterCenter != null && srv != null && srv.getTickCount() < ambientLoiterUntilTick;
+    }
+
 
 
     @Override
@@ -126,7 +167,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     @Override
     protected void registerGoals() {
         this.goalSelector.addGoal(0, new FloatGoal(this));
-
+        
         // Panic only for non-combatants
         this.goalSelector.addGoal(1, new PanicGoal(this, 1.35D) {
             @Override public boolean canUse() { return !aiKingdomNPCEntity.this.isCombatant() && super.canUse(); }
@@ -139,11 +180,22 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             @Override public boolean canContinueToUse() { return aiKingdomNPCEntity.this.isCombatant() && !aiKingdomNPCEntity.this.isSleeping() && super.canContinueToUse(); }
         });
 
+        this.goalSelector.addGoal(3, new AmbientSeparationGoal(this, 2.0, 1.05));
+        this.goalSelector.addGoal(4, new name.kingdoms.entity.ai.AmbientFollowLeaderGoal(this, 1.15, 6.0f, 3.0f));
+
         this.goalSelector.addGoal(4, new OpenDoorGoal(this, true));
 
         // Existing NPC goals
         this.goalSelector.addGoal(5, new FindBedAtNightGoalNPC(this, 1.05D, 30));
         this.goalSelector.addGoal(6, new ReturnHomeDayGoalNPC(this, 1.05D));
+
+        this.goalSelector.addGoal(6, new AmbientLoiterGoal(this, new AmbientLoiterGoal.LoiterAccess() {
+            @Override public BlockPos getAmbientLoiterCenter() { return aiKingdomNPCEntity.this.getAmbientLoiterCenter(); }
+            @Override public int getAmbientLoiterRadius() { return aiKingdomNPCEntity.this.getAmbientLoiterRadius(); }
+            @Override public boolean isAmbientLoiterActive() { return aiKingdomNPCEntity.this.isAmbientLoiterActive(); }
+        }, 0.9D));
+
+
 
         this.goalSelector.addGoal(7, new WaterAvoidingRandomStrollGoal(this, 0.9D) {
             @Override public boolean canUse() { return !aiKingdomNPCEntity.this.isSleeping() && super.canUse(); }
@@ -242,6 +294,44 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         refreshNametag();
     }
 
+    @Override
+    public boolean isPushable() {
+        // Only ambient NPCs should behave like real bodies in crowds
+        if (this.isAmbient()) return true;
+        return super.isPushable();
+    }
+
+    @Override
+    public boolean canBeCollidedWith(Entity other) {
+        // Needed so other entities can collide with them
+        if (this.isAmbient()) return true;
+        return super.canBeCollidedWith(other);
+    }
+
+    @Override
+    protected void doPush(Entity other) {
+        // Keep normal mob pushing behavior, but only “enabled” for ambient
+        if (this.isAmbient()) {
+            super.doPush(other);
+        }
+        // non-ambient: leave vanilla/super behavior (or no-op if you previously changed it elsewhere)
+        else {
+            super.doPush(other);
+        }
+    }
+
+    @Override
+    public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
+        Vec3 base = super.getVehicleAttachmentPoint(vehicle);
+
+        if (vehicle instanceof net.minecraft.world.entity.animal.horse.AbstractHorse) {
+                 return base.add(0.0, 0.75, 0.0);
+        }
+
+        return base;
+    }
+
+
     private boolean isEnemyAiNpc(aiKingdomNPCEntity other) {
         if (other == null || other == this) return false;
         if (!other.isCombatant()) return false;
@@ -303,11 +393,22 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         String nm = getNpcName();
         if (nm == null || nm.isBlank()) nm = "Aelfric";
 
-        this.setCustomName(Component.literal(nm + " [" + job + "]"));
+        String built = nm + " [" + job + "]";
+
+        // Only append [KING_NAME] for ambient combatants (soldier/scout/guard)
+        if (!this.level().isClientSide() && this.isAmbient() && this.isCombatant()) {
+            String king = resolveKingNameForTag((ServerLevel) this.level(), this.getKingdomUUID());
+            if (king != null && !king.isBlank()) {
+                built = built + " [" + king + "]";
+            }
+        }
+
+        this.setCustomName(Component.literal(built));
 
         // Ambient/event NPCs show their name; spawner-population stays hidden to prevent clutter
         this.setCustomNameVisible(this.entityData.get(IS_AMBIENT));
     }
+
 
 
     // Spawner binding API
@@ -498,11 +599,17 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         if (this.entityData.get(IS_AMBIENT)) {
             int ttl = this.entityData.get(AMBIENT_TTL);
             if (ttl <= 0) {
+                // If riding an ambient mount, kill it too so you don't leak horses
+                Entity v = this.getVehicle();
+                if (v != null && v.getTags().contains(name.kingdoms.ambient.SpawnUtil.AMBIENT_MOUNT_TAG)) {
+                    v.discard();
+                }
                 this.discard();
                 return;
             }
             this.entityData.set(AMBIENT_TTL, ttl - 1);
         }
+
 
 
         if (isCombatant() && !this.isSleeping()) {
@@ -664,6 +771,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
         @Override
         public boolean canUse() {
+            if (mob.isAmbient()) return false; 
             if (mob.isSleeping()) return false;
             if (mob.homePos == null) return false;
 
@@ -677,6 +785,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
         @Override
         public boolean canContinueToUse() {
+            if (mob.isAmbient()) return false;    
             if (mob.isSleeping()) return false;
             if (mob.homePos == null) return false;
 
@@ -722,6 +831,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
         @Override
         public boolean canUse() {
+            if (mob.isAmbient()) return false; 
             if (!(mob.level() instanceof ServerLevel sl)) return false;
             if (mob.isSleeping()) return false;
 
@@ -758,6 +868,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
         @Override
         public boolean canContinueToUse() {
+            if (mob.isAmbient()) return false;  
             if (mob.isSleeping()) return false;
             if (mob.assignedBedPos == null) return false;
 
@@ -917,6 +1028,13 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     public void die(DamageSource source) {
         super.die(source);
 
+        Entity v = this.getVehicle();
+        if (v != null && v.getTags().contains(name.kingdoms.ambient.SpawnUtil.AMBIENT_MOUNT_TAG)) {
+            v.discard();
+        }
+
+
+
         if (!(this.level() instanceof ServerLevel sl)) return;
         if (!this.isAmbient()) return;
 
@@ -959,6 +1077,71 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             }
         }
     }
+
+    private static String resolveKingNameForTag(ServerLevel sl, @Nullable UUID kid) {
+        if (kid == null) return null;
+
+        // ---- 1) Player kingdoms (kingdomState) ----
+        try {
+            var ks = kingdomState.get(sl.getServer());
+            var k = ks.getKingdom(kid);
+            if (k != null) {
+                // If the owner is online, use their player name
+                ServerPlayer owner = sl.getServer().getPlayerList().getPlayer(k.owner);
+                if (owner != null) {
+                    String n = owner.getGameProfile().name();
+                    if (n != null && !n.isBlank()) return n;
+                }
+
+                // Fallback: kingdom name
+                if (k.name != null && !k.name.isBlank()) return k.name;
+
+                return "Unknown";
+            }
+        } catch (Throwable ignored) {}
+
+        // ---- 2) AI kingdoms (aiKingdomState) via reflection ----
+        try {
+            Class<?> cls = Class.forName("name.kingdoms.aiKingdomState");
+
+            Object aiState = cls.getMethod("get", net.minecraft.server.MinecraftServer.class)
+                    .invoke(null, sl.getServer());
+
+            Object mapObj = cls.getField("kingdoms").get(aiState);
+
+            @SuppressWarnings("unchecked")
+            java.util.Map<java.util.UUID, Object> map = (java.util.Map<java.util.UUID, Object>) mapObj;
+
+            Object aiK = map.get(kid);
+            if (aiK != null) {
+                // Try common accessor names on a record/class
+                for (String method : new String[]{
+                        "kingName", "rulerName", "king", "ruler", "name"
+                }) {
+                    try {
+                        Object val = aiK.getClass().getMethod(method).invoke(aiK);
+                        if (val instanceof String s && !s.isBlank()) return s;
+                    } catch (Throwable ignored2) {}
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        return "Unknown";
+    }
+
+    public void setAmbientAnchor(@Nullable BlockPos center, int radius) {
+        this.ambientLoiterCenter = center;
+        this.ambientLoiterRadius = Math.max(0, radius);
+        // keep it effectively “on” (TTL despawns them anyway)
+        var srv = this.level().getServer();
+        this.ambientLoiterUntilTick = (srv == null) ? 0 : srv.getTickCount() + (20L * 60L * 60L); // 1 hour
+    }
+
+    @Nullable
+    public BlockPos getAmbientAnchor() { return ambientLoiterCenter; }
+
+    public int getAmbientAnchorRadius() { return ambientLoiterRadius; }
+
 
 
 

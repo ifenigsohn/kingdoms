@@ -31,8 +31,10 @@ public final class DiplomacyResponseQueue {
             double maxAmount,
             Letter.CasusBelli cb,
             String note,
+            boolean inPerson,
             long dueTick
     ) {}
+
 
     private record PendingProposal(
             UUID playerId,
@@ -78,9 +80,34 @@ public final class DiplomacyResponseQueue {
                 maxAmount,
                 cb,
                 note == null ? "" : note,
+                false,
                 now + delay
         ));
     }
+
+    public static void queueMailInPerson(MinecraftServer server,
+                                        UUID playerId, UUID aiId,
+                                        Letter.Kind kind,
+                                        ResourceType aType, double aAmount,
+                                        ResourceType bType, double bAmount,
+                                        double maxAmount,
+                                        Letter.CasusBelli cb,
+                                        String note) {
+
+        long now = server.getTickCount();
+        long delay = computeDelayTicks(server, true); // fast
+        MAIL.add(new PendingMail(
+                playerId, aiId, kind,
+                aType, aAmount,
+                bType, bAmount,
+                maxAmount,
+                cb,
+                note == null ? "" : note,
+                true,
+                now + delay
+        ));
+    }
+
 
     /** Queue a fast “proposal from AI” (diplo screen button). */
     public static void queueProposal(MinecraftServer server, UUID playerId, UUID aiId) {
@@ -262,7 +289,8 @@ public final class DiplomacyResponseQueue {
                     ctxEval,
                     p.aType, p.aAmount,
                     p.bType, p.bAmount,
-                    p.maxAmount
+                    p.maxAmount,
+                    p.inPerson
             );
 
             // Apply relation delta (clamped inside DiplomacyRelationsState)

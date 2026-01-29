@@ -460,6 +460,7 @@ public final class RoadBuilder {
                 }
 
 
+
                 if (isFootprintBlocked(rx, rz)) continue;
 
                 long k = keyXZ(rx, rz);
@@ -638,7 +639,7 @@ public final class RoadBuilder {
         }
 
 
-        private int placeStairStep(BlockPos cur, BlockPos next, Direction travel, int dy, boolean isBridge) {
+         private int placeStairStep(BlockPos cur, BlockPos next, Direction travel, int dy, boolean isBridge) {
             int ops = 0;
 
             // stairs go on the lower cell:
@@ -712,6 +713,8 @@ public final class RoadBuilder {
                 }
             return ops;
         }
+
+
 
         // ============================================================
         // Bridge detection (simple + reliable)

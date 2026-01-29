@@ -6,6 +6,7 @@ import name.kingdoms.client.borderWandClient;
 import name.kingdoms.client.clientProxyImpl;
 import name.kingdoms.client.kingdomWorkerRenderer;
 import name.kingdoms.client.KingdomTransitionHUD;
+import name.kingdoms.client.RoadAmbientNPCRenderer;
 import name.kingdoms.client.ScribeLines;
 import name.kingdoms.client.SoldierRenderer;
 import name.kingdoms.client.aiKingdomEntityRenderer;
@@ -148,6 +149,10 @@ public class kingdomsClient implements ClientModInitializer {
                 aiKingdomNPCRenderer::new
         );
 
+        EntityRendererRegistry.register(Kingdoms.ROAD_AMBIENT_NPC, RoadAmbientNPCRenderer::new);
+
+        
+
         // -------------------------
         // Keybinds
         // -------------------------
@@ -170,7 +175,7 @@ public class kingdomsClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
         if (client.player == null) return;
 
-        // R toggles retinue on/off
+        // k toggles retinue on/off
         while (TOGGLE_RETINUE_KEY.consumeClick()) {
                 RETINUE_ENABLED = !RETINUE_ENABLED;
 

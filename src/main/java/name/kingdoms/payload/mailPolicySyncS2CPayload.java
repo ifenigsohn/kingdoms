@@ -13,7 +13,7 @@ import java.util.UUID;
 
 public record mailPolicySyncS2CPayload(UUID toKingdomId, List<Entry> entries) implements CustomPacketPayload {
 
-    public record Entry(int kindOrdinal, boolean allowed, String reason) {}
+    public record Entry(int kindOrdinal, boolean allowed, String reason, int cooldownRemainingTicks) {}
 
     public static final Type<mailPolicySyncS2CPayload> TYPE =
             new Type<>(ResourceLocation.fromNamespaceAndPath(Kingdoms.MOD_ID, "mail_policy_sync"));
@@ -30,12 +30,15 @@ public record mailPolicySyncS2CPayload(UUID toKingdomId, List<Entry> entries) im
     }
 
     private static final StreamCodec<RegistryFriendlyByteBuf, Entry> ENTRY_CODEC =
-            StreamCodec.composite(
-                    ByteBufCodecs.VAR_INT, Entry::kindOrdinal,
-                    ByteBufCodecs.BOOL, Entry::allowed,
-                    ByteBufCodecs.STRING_UTF8, Entry::reason,
-                    Entry::new
-            );
+        StreamCodec.composite(
+                ByteBufCodecs.VAR_INT, Entry::kindOrdinal,
+                ByteBufCodecs.BOOL, Entry::allowed,
+                ByteBufCodecs.STRING_UTF8, Entry::reason,
+                ByteBufCodecs.VAR_INT, Entry::cooldownRemainingTicks,
+                Entry::new
+        );
+
+
 
     public static final StreamCodec<RegistryFriendlyByteBuf, mailPolicySyncS2CPayload> STREAM_CODEC =
             StreamCodec.of(
@@ -49,6 +52,7 @@ public record mailPolicySyncS2CPayload(UUID toKingdomId, List<Entry> entries) im
                         return new mailPolicySyncS2CPayload(toId, list);
                     }
             );
+            
 
     @Override
     public Type<? extends CustomPacketPayload> type() {

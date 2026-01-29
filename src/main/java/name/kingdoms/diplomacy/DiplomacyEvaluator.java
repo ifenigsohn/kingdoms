@@ -1,6 +1,7 @@
 package name.kingdoms.diplomacy;
 
 import name.kingdoms.aiKingdomState;
+import name.kingdoms.borderSelection;
 import net.minecraft.util.RandomSource;
 
 import java.util.EnumMap;
@@ -102,7 +103,8 @@ public final class DiplomacyEvaluator {
             Context ctx,
             ResourceType aType, double aAmt,
             ResourceType bType, double bAmt,
-            double maxAmount
+            double maxAmount,
+            boolean inPerson
     ) {
         // Sanity / hard diplomatic gates
         if (ctx.allied) {
@@ -142,18 +144,33 @@ public final class DiplomacyEvaluator {
 
         // Alliance proposal (baseline decision; capacity/war enforcement can still happen in ResponseQueue)
         if (kind == Letter.Kind.ALLIANCE_PROPOSAL) {
-            return decideAlliance(rng, p, ctx);
+            return decideAlliance(rng, p, ctx, inPerson);
         }
 
         // Normalize relationship into 0..1 trust-ish
         double rel01 = (ctx.relation + 100) / 200.0; // 0..1
         double trust = clamp01(0.10 + 0.75*rel01 + 0.30*p.trustBias());
 
+        boolean negotiates = switch (kind) {
+            case OFFER, REQUEST, CONTRACT, ULTIMATUM, ALLIANCE_PROPOSAL -> true;
+            default -> false;
+        };
+
+        if (inPerson && negotiates) {
+            // Showing up personally makes your intent clearer + signals commitment.
+            trust = clamp01(trust + 0.12);  // tune 0.08–0.18
+        }
+
+
         double greed = clamp01(p.greed());
         double gen   = clamp01(p.generosity());
         double honor = clamp01(p.honor());
         double prag  = clamp01(p.pragmatism());
-        double agg   = clamp01(p.aggression());
+        double agg = clamp01(p.aggression());
+        if (inPerson && negotiates) {
+            agg *= 0.75; // 25% less aggression impact in-person (tune 0.65–0.85)
+        }
+
 
         // Military / war pressure
         double milRatio = militaryRatio(ctx.aiSoldiers, ctx.otherSoldiersEstimate); // >1 ai stronger
@@ -332,10 +349,14 @@ public final class DiplomacyEvaluator {
     // -------------------------
     // Alliance baseline decision
     // -------------------------
-    private static Result decideAlliance(RandomSource rng, aiKingdomState.KingdomPersonality p, Context ctx) {
+    private static Result decideAlliance(RandomSource rng, aiKingdomState.KingdomPersonality p, Context ctx, boolean inPerson) {
         double rel01 = (ctx.relation + 100) / 200.0;
         double trust = clamp01(0.10 + 0.75*rel01 + 0.30*p.trustBias());
 
+        if (inPerson) {
+            trust = clamp01(trust + 0.12);  // same bump as other negotiation
+        }
+                
         // If already allied, accept “formally” (idempotent)
         if (ctx.allied) {
             return Result.accept(+5, "");
@@ -351,6 +372,8 @@ public final class DiplomacyEvaluator {
 
         // War pressure + trustBias makes alliances more attractive
         double warPressure = (ctx.atWarWithAnyone ? 0.30 : 0.0) + (ctx.aiEnemyCountApprox > 0 ? 0.20 : 0.0);
+        double aAgg = clamp01(p.aggression());
+        if (inPerson) aAgg *= 0.75;
         double desire =
                 0.55
                         + 0.35*p.trustBias()

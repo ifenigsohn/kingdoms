@@ -95,9 +95,9 @@ public record AmbientContext(
         BlockPos pos = player.blockPosition();
 
         var here = ks.getKingdomAt(level, pos);
-        var pk = ks.getPlayerKingdom(player.getUUID());
+        var pk   = ks.getPlayerKingdom(player.getUUID());
 
-        boolean inWarZone = WarZoneUtil.isInsideAnyWarZone(server, pos);
+        boolean inWarZone   = WarZoneUtil.isInsideAnyWarZone(server, pos);
         boolean nearWarZone = !inWarZone && WarZoneUtil.isNearAnyWarZone(server, pos, 32);
 
         boolean kingdomAtWar = (here != null) && war.isAtWarWithAny(here.id);
@@ -114,22 +114,18 @@ public record AmbientContext(
             aiHere = aiKingdomState.get(server).getById(here.id);
         }
 
-        // ---- distance helpers (squared) ----
-        int distHereOriginSq = distSq2D(pos, here == null ? null : here.origin);
-        int distHereTerminalSq = distSq2D(pos, here == null ? null : here.terminalPos);
+        int distHereOriginSq    = distSq2D(pos, here == null ? null : here.origin);
+        int distHereTerminalSq  = distSq2D(pos, here == null ? null : here.terminalPos);
 
-        int distPlayerOriginSq = distSq2D(pos, pk == null ? null : pk.origin);
+        int distPlayerOriginSq   = distSq2D(pos, pk == null ? null : pk.origin);
         int distPlayerTerminalSq = distSq2D(pos, pk == null ? null : pk.terminalPos);
 
-        // ---- border info ----
-        boolean insideHereBorder = isInsideBorder(here, pos);
+        boolean insideHereBorder   = isInsideBorder(here, pos);
         boolean insidePlayerBorder = isInsideBorder(pk, pos);
 
-        int distToHereBorderSq = borderDistSq(here, pos);
+        int distToHereBorderSq   = borderDistSq(here, pos);
         int distToPlayerBorderSq = borderDistSq(pk, pos);
 
-        // ---- proximity scans (sampled; cheap) ----
-        // Tune radius/samples: these run once per ambient pulse (minutes), not every tick.
         int distToNearestJobBlockSq = sampledNearestDistSq(level, pos, 72,
                 bs -> bs.getBlock() instanceof name.kingdoms.jobBlock,
                 120);
@@ -138,19 +134,14 @@ public record AmbientContext(
                 bs -> bs.getBlock() instanceof name.kingdoms.IKingdomSpawnerBlock,
                 140);
 
-        // If you haven't created IKingSpawnerBlock yet, leave this as -1 until you do
         int distToNearestKingSpawnerSq = sampledNearestDistSq(level, pos, 96,
-            bs -> bs.getBlock() instanceof name.kingdoms.kingdomKingSpawnerBlock,
-            140);
+                bs -> bs.getBlock() instanceof name.kingdoms.kingdomKingSpawnerBlock,
+                140);
 
-
-        // If you don't have a direct reference to your kingdom block, keep this disabled for now
         int distToNearestKingdomBlockSq = sampledNearestDistSq(level, pos, 96,
-        bs -> bs.is(name.kingdoms.modBlock.kingdom_block),
-        140);
+                bs -> bs.is(name.kingdoms.modBlock.kingdom_block),
+                140);
 
-
-        // ---- nearest AI kingdom distance ----
         var aiState = aiKingdomState.get(server);
         UUID nearestAiId = null;
         int nearestAiD2 = -1;
@@ -171,7 +162,6 @@ public record AmbientContext(
                     nearestAiId = k.id;
                 }
 
-                // when inside an AI kingdom, measure distance to the nearest OTHER AI kingdom
                 if (here != null && here.id != null && here.id.equals(k.id)) continue;
                 if (d2 >= 0 && (nearestOtherAiD2 < 0 || d2 < nearestOtherAiD2)) {
                     nearestOtherAiD2 = d2;
@@ -209,6 +199,15 @@ public record AmbientContext(
                 nearestOtherAiD2
         );
     }
+
+    // Optional convenience overload (nice for callers)
+    public static AmbientContext build(ServerLevel level, ServerPlayer player, kingdomState ks) {
+        MinecraftServer server = level.getServer();
+        return build(server, level, player, ks, WarState.get(server));
+    }
+
+
+
 
     // -----------------------
     // Helpers

@@ -8,6 +8,7 @@ import net.minecraft.world.entity.EntityDimensions;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.animal.horse.Horse;
+import name.kingdoms.ambient.AmbientPropManager;
 import name.kingdoms.blueprint.BlueprintPlacerEngine;
 import name.kingdoms.blueprint.KingdomSatelliteSpawner;
 import name.kingdoms.blueprint.RoadBuilder;
@@ -66,6 +67,8 @@ public class Kingdoms implements ModInitializer {
     public static EntityType<kingdomWorkerEntity> KINGDOM_WORKER_ENTITY_TYPE;
     public static EntityType<aiKingdomEntity> AI_KINGDOM_ENTITY_TYPE;
     public static EntityType<aiKingdomNPCEntity> AI_KINGDOM_NPC_ENTITY_TYPE;
+    public static EntityType<name.kingdoms.entity.ai.RoadAmbientNPCEntity> ROAD_AMBIENT_NPC;
+
     
     public static SimpleParticleType SLEEP_Z_PARTICLE;
 
@@ -231,6 +234,7 @@ public class Kingdoms implements ModInitializer {
         AiRelationNormalizer.init();
         ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickCalendar);
         ServerTickEvents.END_SERVER_TICK.register(name.kingdoms.ambient.AmbientManager::tick);
+        AmbientPropManager.init();
 
         WarPendingTicker.init();
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents.END_SERVER_TICK.register(server -> {
@@ -245,6 +249,26 @@ public class Kingdoms implements ModInitializer {
         ModEffects.register();
 
         
+        // ---- Road ambient NPC entity registration ----
+        ResourceLocation roadNpcId = ResourceLocation.fromNamespaceAndPath(MOD_ID, "road_ambient_npc");
+        ResourceKey<EntityType<?>> roadNpcKey = ResourceKey.create(Registries.ENTITY_TYPE, roadNpcId);
+
+        ROAD_AMBIENT_NPC = Registry.register(
+                BuiltInRegistries.ENTITY_TYPE,
+                roadNpcId,
+                FabricEntityTypeBuilder.createMob()
+                        .entityFactory(name.kingdoms.entity.ai.RoadAmbientNPCEntity::new)
+                        .spawnGroup(MobCategory.MISC)
+                        .dimensions(EntityDimensions.fixed(0.6f, 1.8f))
+                        .trackRangeBlocks(64)
+                        .trackedUpdateRate(3)
+                        .build(roadNpcKey)
+        );
+
+        FabricDefaultAttributeRegistry.register(
+                ROAD_AMBIENT_NPC,
+                name.kingdoms.entity.ai.RoadAmbientNPCEntity.createAttributes()
+        );
 
 
         name.kingdoms.network.networkInit.registerPayloadTypes();
@@ -264,6 +288,10 @@ public class Kingdoms implements ModInitializer {
         if (overworld == null) return;
         aiKingdomState.get(server).tickEconomies(overworld);
 
+    });
+
+       ServerTickEvents.END_SERVER_TICK.register(server -> {
+        name.kingdoms.entity.ambient.AmbientRoadManager.tick(server);
     });
 
 

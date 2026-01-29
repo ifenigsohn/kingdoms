@@ -3,6 +3,7 @@ package name.kingdoms.network;
 import java.util.UUID;
 import name.kingdoms.payload.OpenMailS2CPayload;
 import name.kingdoms.Kingdoms;
+import name.kingdoms.RetinueRespawnManager;
 import name.kingdoms.RetinueSpawner;
 import name.kingdoms.aiKingdomState;
 import name.kingdoms.entity.RoyalGuardManager;
@@ -12,6 +13,7 @@ import name.kingdoms.jobBlocks;
 import name.kingdoms.jobDefinition;
 import name.kingdoms.kingSkinPoolState;
 import name.kingdoms.kingdomState;
+import name.kingdoms.kingdomState.Kingdom;
 import name.kingdoms.modItem;
 import name.kingdoms.payload.CreateKingdomPayload;
 import name.kingdoms.payload.OpenTreasuryS2CPayload;
@@ -74,7 +76,6 @@ import name.kingdoms.payload.mailSendC2SPayload;
 
 public final class networkInit {
     private networkInit() {}
-
 
 
 
@@ -157,18 +158,26 @@ public final class networkInit {
         });
 
         ServerPlayNetworking.registerGlobalReceiver(
-                name.kingdoms.payload.toggleRetinueC2SPayload.TYPE,
-                (payload, ctx) -> ctx.server().execute(() -> {
-                    ServerPlayer player = ctx.player();
-                    RetinueSpawner.setEnabled(player, payload.enabled());
-                    player.sendSystemMessage(Component.literal(
-                            payload.enabled() ? "Retinue enabled." : "Retinue disabled."
-                    ));
-                })
+            name.kingdoms.payload.toggleRetinueC2SPayload.TYPE,
+            (payload, ctx) -> ctx.server().execute(() -> {
+                ServerPlayer player = ctx.player();
+
+                RetinueRespawnManager.setEnabled(ctx.server(), player.getUUID(), payload.enabled());
+
+                if (payload.enabled()) {
+                    RetinueRespawnManager.spawnOwnedNow(player);
+                }
+
+                player.sendSystemMessage(Component.literal(
+                    payload.enabled() ? "Retinue enabled." : "Retinue disabled."
+                ));
+            })
         );
 
-        ServerPlayNetworking.registerGlobalReceiver(name.kingdoms.payload.requestProposalC2SPayload.TYPE, (payload, ctx) -> {
-    ctx.server().execute(() -> {
+
+
+    ServerPlayNetworking.registerGlobalReceiver(name.kingdoms.payload.requestProposalC2SPayload.TYPE, (payload, ctx) -> {
+        ctx.server().execute(() -> {
         var player = ctx.player();
         var server = ctx.server();
         var level = (ServerLevel) player.level();
@@ -476,33 +485,63 @@ public final class networkInit {
 
         
         ServerPlayNetworking.registerGlobalReceiver(
-                name.kingdoms.payload.mailPolicyRequestC2SPayload.TYPE,
-                (payload, ctx) -> ctx.server().execute(() -> {
+            name.kingdoms.payload.mailPolicyRequestC2SPayload.TYPE,
+            (payload, ctx) -> ctx.server().execute(() -> {
 
-                    var player = ctx.player();
-                    var server = ctx.server();
+                var player = ctx.player();
+                var server = ctx.server();
 
-                    var toId = payload.toKingdomId();
-                    if (toId == null) return;
+                var toId = payload.toKingdomId();
+                if (toId == null) return;
 
-                    var out = new java.util.ArrayList<name.kingdoms.payload.mailPolicySyncS2CPayload.Entry>();
+                var ks = name.kingdoms.kingdomState.get(server);
 
-                    for (name.kingdoms.diplomacy.Letter.Kind k : name.kingdoms.diplomacy.Letter.Kind.values()) {
-                        var d = name.kingdoms.diplomacy.DiplomacyPlayerSendRules.canSend(server, player, toId, k);
+                Kingdom fromK = ks.getPlayerKingdom(player.getUUID());
+                if (fromK == null) return;
 
-                        // keep reasons small; empty string for allowed
-                        String reason = d.allowed() ? "" : (d.reason() == null ? "Blocked." : d.reason());
+                UUID fromId = fromK.id;
 
-                        out.add(new name.kingdoms.payload.mailPolicySyncS2CPayload.Entry(
-                                k.ordinal(),
-                                d.allowed(),
-                                reason
-                        ));
+                ServerLevel level = (ServerLevel) player.level();
+                long nowTick = server.getTickCount();
+
+
+                var cdState = name.kingdoms.diplomacy.DiplomacyCooldownState.get(level);
+
+                var out = new java.util.ArrayList<name.kingdoms.payload.mailPolicySyncS2CPayload.Entry>();
+
+                for (name.kingdoms.diplomacy.Letter.Kind k : name.kingdoms.diplomacy.Letter.Kind.values()) {
+                    var d = name.kingdoms.diplomacy.DiplomacyPlayerSendRules.canSend(server, player, toId, k);
+
+                    long cooldownTicks = cooldownTicksForKind(k);
+                    long rem = cdState.remaining(fromId, toId, k, nowTick);
+
+
+                    int remInt = (int) Math.min(rem, Integer.MAX_VALUE);
+
+                    boolean allowedFinal = d.allowed() && remInt == 0;
+
+                    String reason;
+                    if (!d.allowed()) {
+                        reason = (d.reason() == null ? "Blocked." : d.reason());
+                    } else if (remInt > 0) {
+                        reason = "Cooldown (" + (remInt / 20) + "s)";
+                    } else {
+                        reason = "";
                     }
 
-                    ServerPlayNetworking.send(player, new name.kingdoms.payload.mailPolicySyncS2CPayload(toId, out));
-                })
+                    out.add(new name.kingdoms.payload.mailPolicySyncS2CPayload.Entry(
+                        k.ordinal(),
+                        allowedFinal,
+                        reason,
+                        remInt
+                    ));
+                }
+
+                ServerPlayNetworking.send(player, new name.kingdoms.payload.mailPolicySyncS2CPayload(toId, out));
+            })
         );
+
+
 
         
                     // --- BORDERS REQUEST (map/wand refresh) ---
@@ -549,6 +588,31 @@ public final class networkInit {
                     return;
                 }
 
+                // ----------------------------
+                // Cooldown enforcement (server authoritative)
+                // ----------------------------
+                ServerLevel mailLevel = server.overworld(); // SavedData lives here
+                var cds = name.kingdoms.diplomacy.DiplomacyCooldownState.get(mailLevel);
+
+                long nowTick = server.getTickCount();
+                long cd = name.kingdoms.diplomacy.DiplomacyCooldowns.ticksFor(payload.kind(), false);
+
+                if (cds.isOnCooldown(playerK.id, toK.id, payload.kind(), nowTick)) {
+                    long rem = cds.remaining(playerK.id, toK.id, payload.kind(), nowTick);
+                    ServerPlayNetworking.send(player,
+                        new mailSendResultS2CPayload(payload.requestId(), false,
+                            "You must wait " + name.kingdoms.diplomacy.DiplomacyCooldowns.fmtTicks(rem) +
+                            " before sending " + payload.kind().name() + " again."
+                        )
+                    );
+                    return;
+                }
+
+
+
+
+
+
                 // If it's a player kingdom, only allow if owner is ONLINE
                 ServerPlayer toOwnerOnline = null;
                 if (!toIsAi) {
@@ -564,6 +628,8 @@ public final class networkInit {
                         return;
                     }
                 }
+
+                
 
                 // ----------------------------
                 // Diplomacy policy enforcement (single source of truth)
@@ -629,6 +695,10 @@ public final class networkInit {
                     return;
                 }
 
+                // At this point, the send is accepted (validated + allowed).
+                // Mark cooldown NOW to prevent double-click / same-tick spam.
+                cds.markSent(playerK.id, toK.id, payload.kind(), nowTick, cd);
+
                 
 
                 // ============================================================
@@ -691,7 +761,6 @@ public final class networkInit {
                         toOwnerOnline.sendSystemMessage(Component.literal("[WAR] " + playerK.name + " has declared war on you!"));
 
                         // ALSO deliver a visible WAR_DECLARATION letter to the other player (optional but nice)
-                        var mailLevel = server.overworld(); // keep mailbox dimension consistent
                         var mailbox = DiplomacyMailboxState.get(mailLevel);
                         long now = mailLevel.getGameTime();
 
@@ -715,7 +784,6 @@ public final class networkInit {
 
                     ServerPlayNetworking.send(player,
                             new mailSendResultS2CPayload(payload.requestId(), true, "War declared."));
-                            name.kingdoms.diplomacy.DiplomacyPlayerSendRules.markSentCooldowns(server, playerK.id, toK.id, payload.kind());
                     return; 
                 }
 
@@ -737,7 +805,6 @@ public final class networkInit {
 
                     // Optional: deliver a visible informational letter back (AI only)
                     if (toIsAi) {
-                        ServerLevel mailLevel = server.overworld();
                         var mailbox = DiplomacyMailboxState.get(mailLevel);
 
                         long now = server.getTickCount();
@@ -755,10 +822,11 @@ public final class networkInit {
 
                     ServerPlayNetworking.send(player,
                             new mailSendResultS2CPayload(payload.requestId(), true, "Alliance broken."));
-                            name.kingdoms.diplomacy.DiplomacyPlayerSendRules.markSentCooldowns(server, playerK.id, toK.id, payload.kind());
 
                             return;
                 }
+
+                
 
 
                 // ----------------------------
@@ -781,18 +849,16 @@ public final class networkInit {
                     DiplomacyResponseQueue.processDueNow(server);
                     ServerPlayNetworking.send(player,
                             new mailSendResultS2CPayload(payload.requestId(), true, "Sent (instant)."));
-                            name.kingdoms.diplomacy.DiplomacyPlayerSendRules.markSentCooldowns(server, playerK.id, toK.id, payload.kind());
+                       
 
                             
                 } else {
                     ServerPlayNetworking.send(player,
                             new mailSendResultS2CPayload(payload.requestId(), true, "Message delivered. Awaiting response..."));
-                            name.kingdoms.diplomacy.DiplomacyPlayerSendRules.markSentCooldowns(server, playerK.id, toK.id, payload.kind());
-                            
+                           
                 }
             } else {
                 // PLAYER DELIVERY: store directly in mailbox
-                ServerLevel mailLevel = server.overworld(); // IMPORTANT: consistent mailbox dimension
                 var mailbox = DiplomacyMailboxState.get(mailLevel);
 
                 // Add a helper to DiplomacyMailboxState (next section) and call it here:
@@ -877,6 +943,31 @@ public final class networkInit {
                     return;
                 }
 
+                // ----------------------------
+                // In-person cooldown (same system, reduced)
+                // ----------------------------
+                ServerLevel mailLevel = server.overworld();
+                var cds = name.kingdoms.diplomacy.DiplomacyCooldownState.get(mailLevel);
+
+                long nowTick = server.getTickCount();
+                long cd = name.kingdoms.diplomacy.DiplomacyCooldowns.ticksFor(payload.kind(), true);
+
+                if (cds.isOnCooldown(playerK.id, toK.id, payload.kind(), nowTick)) {
+                    long rem = cds.remaining(playerK.id, toK.id, payload.kind(), nowTick);
+                    ServerPlayNetworking.send(player,
+                        new mailSendResultS2CPayload(payload.requestId(), false,
+                            "You must wait " + name.kingdoms.diplomacy.DiplomacyCooldowns.fmtTicks(rem) +
+                            " before making that proposal again (in person)."
+                        )
+                    );
+                    return;
+                }
+
+
+              
+
+
+
                 // reuse your existing diplomacy policy gate
                 var decision = name.kingdoms.diplomacy.DiplomacyPlayerSendRules.canSend(
                         server,
@@ -927,24 +1018,12 @@ public final class networkInit {
                     return;
                 }
 
-                // -----------------------------------------
-                // DELAY + 2-MIN COOLDOWN (ONLY HERE)
-                // -----------------------------------------
-                long nowTick = server.getTickCount();
-                ServerLevel mailLevel = server.overworld();
+                // Mark reduced cooldown now that send is accepted
+                cds.markSent(playerK.id, toK.id, payload.kind(), nowTick, cd);
+
+                // Delay 10–20s (keep your flavor)
+                int delay = 200 + mailLevel.getRandom().nextInt(201);
                 var mailbox = DiplomacyMailboxState.get(mailLevel);
-
-                // use mailbox's "proposal" cooldown map (or add a new one; this is fine because ONLY this receiver uses it)
-                if (mailbox.isProposalOnCooldown(player.getUUID(), toK.id, nowTick)) {
-                    long rem = mailbox.proposalCooldownRemaining(player.getUUID(), toK.id, nowTick);
-                    int secs = (int) (rem / 20L);
-                    ServerPlayNetworking.send(player,
-                            new mailSendResultS2CPayload(payload.requestId(), false, "Proposal cooldown: " + secs + "s"));
-                    return;
-                }
-                mailbox.startProposalCooldown(player.getUUID(), toK.id, nowTick);
-
-                int delay = 200 + mailLevel.getRandom().nextInt(201); // 10–20s
 
                 // deliver to AI pipeline AFTER delay (not instantly)
                 mailbox.scheduleInPersonToAi(
@@ -962,8 +1041,6 @@ public final class networkInit {
                 ServerPlayNetworking.send(player,
                         new mailSendResultS2CPayload(payload.requestId(), true, "Proposal sent (arrives in " + (delay / 20) + "s)."));
 
-                // keep your existing cooldown marking if you want it for UI gating
-                name.kingdoms.diplomacy.DiplomacyPlayerSendRules.markSentCooldowns(server, playerK.id, toK.id, payload.kind());
             });
         });
 
@@ -2359,6 +2436,29 @@ public final class networkInit {
             };
         }
 
+        private static long baseCooldownTicks(Letter.Kind kind) {
+            return switch (kind) {
+                case OFFER, REQUEST, CONTRACT -> 20L * 60L * 2L;      // 2 min
+                case COMPLIMENT, WARNING      -> 20L * 60 * 4L;           // 1 min
+                case INSULT                   -> 20L * 60L * 2L;      // 3 min
+                case ALLIANCE_PROPOSAL        -> 20L * 60L * 10L;     // 10 min
+                case ALLIANCE_BREAK           -> 20L * 60L * 10L;
+                case ULTIMATUM                -> 20L * 60L * 15L;     // 15 min
+                case WAR_DECLARATION          -> 20L * 60L * 20L;     // 20 min
+                case WHITE_PEACE, SURRENDER   -> 20L * 60L * 3L;
+                default                       -> 20L * 60L * 2L;
+            };
+        }
+
+        private static String fmtCooldown(long ticks) {
+            long sec = (ticks + 19) / 20;
+            if (sec < 60) return sec + "s";
+            long min = sec / 60;
+            long rem = sec % 60;
+            return (rem == 0) ? (min + "m") : (min + "m " + rem + "s");
+        }
+
+
     // -------------------------
     // War consequences
     // -------------------------
@@ -2405,5 +2505,18 @@ public final class networkInit {
             aiState.setDirty();
         }
     }
+
+    private static long cooldownTicksForKind(name.kingdoms.diplomacy.Letter.Kind k) {
+        // Tune these to match whatever you were using before.
+        // 20 ticks = 1 second
+        return switch (k) {
+            case REQUEST, OFFER, CONTRACT, ULTIMATUM -> 20L * 60L; // 60s
+            case COMPLIMENT, INSULT, WARNING -> 20L * 30L;         // 30s
+            case WAR_DECLARATION, ALLIANCE_PROPOSAL, ALLIANCE_BREAK,
+                WHITE_PEACE, SURRENDER -> 20L * 120L;             // 120s
+            default -> 20L * 60L;
+        };
+    }
+
 
 }

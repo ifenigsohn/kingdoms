@@ -34,6 +34,12 @@ import java.util.EnumMap;
 import java.util.Map;
 import java.util.UUID;
 
+import name.kingdoms.ambient.AmbientContext;
+import name.kingdoms.ambient.AmbientEvent;
+import name.kingdoms.ambient.AmbientEvents;
+import name.kingdoms.ambient.ScriptedAmbientEvent;
+
+
 
 
 import java.util.Locale;
@@ -543,6 +549,42 @@ public final class KingdomsCommands {
                                 .executes(ctx -> warTickAi(ctx.getSource()))
                         )
                 )
+
+                .then(Commands.literal("ambient")
+                        .then(Commands.literal("list")
+                                .executes(ctx -> ambientList(ctx.getSource()))
+                        )
+                        .then(Commands.literal("roll")
+                                .executes(ctx -> ambientRoll(ctx.getSource()))
+                        )
+                        .then(Commands.literal("spawn")
+                                .then(Commands.argument("eventId", StringArgumentType.word())
+                                // /kingdoms ambient spawn <eventId>
+                                .executes(ctx -> ambientSpawn(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "eventId"),
+                                        null,
+                                        false
+                                ))
+                                // /kingdoms ambient spawn <eventId> <variantId>
+                                .then(Commands.argument("variantId", StringArgumentType.word())
+                                        .executes(ctx -> ambientSpawn(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "eventId"),
+                                                StringArgumentType.getString(ctx, "variantId"),
+                                                false
+                                        ))
+                                        // /kingdoms ambient spawn <eventId> <variantId> <ignoreGate>
+                                        .then(Commands.argument("ignoreGate", BoolArgumentType.bool())
+                                        .executes(ctx -> ambientSpawn(ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "eventId"),
+                                                StringArgumentType.getString(ctx, "variantId"),
+                                                BoolArgumentType.getBool(ctx, "ignoreGate")
+                                        ))
+                                        )
+                                )
+                                )
+                        )
+                        )
+
 
         );
     }
@@ -1601,7 +1643,7 @@ public final class KingdomsCommands {
                 policyPick = "WAR_MODE (peace-only)";
             } else {
                 var opt = name.kingdoms.diplomacy.DiplomacyLetterPolicy.chooseOutgoing(
-                        level.getRandom(), rel, fromAi.personality, false, allied
+                        level.getRandom(), rel, fromAi.personality, false, allied,false
                 );
                 policyPick = opt.map(Enum::name).orElse("NONE");
             }
@@ -2701,6 +2743,104 @@ private static double clamp01(double v) {
     private static String fmt(double v) {
         return String.format(Locale.US, "%.0f", v);
     }
+
+    private static int ambientList(CommandSourceStack src) {
+        StringBuilder sb = new StringBuilder("Ambient events:\n");
+        for (AmbientEvent e : AmbientEvents.allEvents()) {
+                sb.append("- ").append(e.id()).append("\n");
+                if (e instanceof ScriptedAmbientEvent se) {
+                var ids = se.variantIds();
+                if (!ids.isEmpty()) sb.append("    variants: ").append(String.join(", ", ids)).append("\n");
+                }
+
+        }
+        src.sendSuccess(() -> Component.literal(sb.toString()), false);
+        return 1;
+        }
+
+        private static int ambientRoll(CommandSourceStack src) {
+        ServerPlayer player;
+        try { player = src.getPlayerOrException(); }
+        catch (Exception e) { src.sendFailure(Component.literal("Player only.")); return 0; }
+
+        ServerLevel level = (ServerLevel) player.level();
+        var server = src.getServer();
+        var ks = kingdomState.get(server);
+        var war = WarState.get(server);
+
+        AmbientContext ctx = AmbientContext.build(server, level, player, ks, war);
+
+
+
+        AmbientEvent ev = AmbientEvents.pick(ctx);
+        if (ev == null) {
+                src.sendFailure(Component.literal("No ambient event matched right now (all weights/gates 0)."));
+                return 0;
+        }
+
+        ev.run(ctx);
+
+        // apply effects (same pattern as AmbientManager)
+        var eff = ev.effects(ctx);
+        if (eff != null && !eff.isEmpty()) {
+        for (var a : eff) {
+                try { if (a != null) a.apply(ctx); } catch (Throwable ignored) {}
+        }
+        }
+
+
+        src.sendSuccess(() -> Component.literal("[Ambient] Rolled: " + ev.id()), false);
+        return 1;
+        }
+
+        private static int ambientSpawn(CommandSourceStack src, String eventId, String variantIdOrNull, boolean ignoreGate) {
+        ServerPlayer player;
+        try { player = src.getPlayerOrException(); }
+        catch (Exception e) { src.sendFailure(Component.literal("Player only.")); return 0; }
+
+        ServerLevel level = (ServerLevel) player.level();
+        var server = src.getServer();
+        var ks = kingdomState.get(server);
+        var war = WarState.get(server);
+
+        AmbientContext ctx = AmbientContext.build(server, level, player, ks, war);
+
+
+        ScriptedAmbientEvent ev = AmbientEvents.getScriptedById(eventId);
+        if (ev == null) {
+                src.sendFailure(Component.literal("Unknown eventId: '" + eventId + "'. Try /kingdoms ambient list"));
+                return 0;
+        }
+
+        boolean ok;
+        if (variantIdOrNull == null) {
+                ev.run(ctx);
+                ok = true;
+        } else {
+                ok = ev.runForced(ctx, variantIdOrNull, ignoreGate, false);
+        }
+
+        if (!ok) {
+                src.sendFailure(Component.literal("Failed to spawn event '" + eventId + "' variant '" + variantIdOrNull +
+                        "' (missing variant OR gate failed; try ignoreGate=true)."));
+                return 0;
+        }
+
+        // If runForced already applied effects, you can remove this.
+        // If you want consistent behavior for both paths, keep effects here and remove them from runForced.
+        var eff = ev.effects(ctx);
+        if (eff != null && !eff.isEmpty()) {
+        for (var a : eff) {
+                try { if (a != null) a.apply(ctx); } catch (Throwable ignored) {}
+        }
+        }
+
+
+        src.sendSuccess(() -> Component.literal("[Ambient] Spawned: " + eventId +
+                (variantIdOrNull != null ? (" variant=" + variantIdOrNull + " ignoreGate=" + ignoreGate) : "")), false);
+        return 1;
+        }
+
 
 
 }

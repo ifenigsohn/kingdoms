@@ -201,8 +201,8 @@ public class kingdomWorkerEntity extends PathfinderMob {
         });
 
         // Retinue follow (unique priorities)
-        this.goalSelector.addGoal(3, new FollowOwnerGoal(this, 2.0D, 8.0F, 4.0F));
-        this.goalSelector.addGoal(4, new RetinueSeparationGoal(this, 3.0, 1.0));
+        this.goalSelector.addGoal(3, new FollowOwnerGoal(this, 2.0D, 8.0F, 8.0F));
+        this.goalSelector.addGoal(4, new RetinueSeparationGoal(this, 3.5, 1.0));
 
         this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
 
@@ -577,7 +577,7 @@ public class kingdomWorkerEntity extends PathfinderMob {
         horseCooldown = HORSE_COOLDOWN_TICKS;
     }
 
-    private void forceDespawnRetinueHorse(ServerLevel sl) {
+    public void forceDespawnRetinueHorse(ServerLevel sl) {
         Horse h = getRetinueHorseIfAlive(sl);
         if (h != null) {
             if (this.getVehicle() == h) this.stopRiding();
@@ -615,6 +615,18 @@ public class kingdomWorkerEntity extends PathfinderMob {
     @Override
     public void tick() {
         super.tick();
+
+        if (this.level() instanceof ServerLevel sl) {
+            // Retinue only; workers don't need this map
+            if (!this.isRetinue()) {
+                retinueCollide.clear();
+            } else if ((sl.getGameTime() % 20L) == 0L) { // once per second
+                long now = sl.getGameTime();
+                retinueCollide.entrySet().removeIf(e -> (now - e.getValue().lastSeenTick) > 5L);
+                // (if they haven't collided in ~0.25s, forget the timer)
+            }
+        }
+
 
         // --- Wake logic must run even while sleeping ---
         if (this.level() instanceof ServerLevel level && homePos != null) {
@@ -865,6 +877,42 @@ public class kingdomWorkerEntity extends PathfinderMob {
                 equippedCombatSword = false;
             }
         }
+    }
+
+    // Retinue-only "unstick" collision tracking
+    private final java.util.Map<java.util.UUID, CollideInfo> retinueCollide = new java.util.HashMap<>();
+    private static final int RETINUE_STUCK_TICKS = 40; // 2 seconds @ 20 TPS
+
+    private static final class CollideInfo {
+        int ticks;
+        long lastSeenTick;
+    }
+
+    @Override
+    public void push(Entity other) {
+        // Only retinue-vs-retinue gets special handling
+        if (this.isRetinue() && other instanceof kingdomWorkerEntity kw && kw.isRetinue()) {
+            // Only track on server to avoid client-side weirdness
+            if (this.level() instanceof ServerLevel sl) {
+                UUID oid = other.getUUID();
+                CollideInfo info = retinueCollide.computeIfAbsent(oid, k -> new CollideInfo());
+                info.lastSeenTick = sl.getGameTime();
+
+                // count consecutive "push calls" as collision time
+                info.ticks = Math.min(RETINUE_STUCK_TICKS, info.ticks + 1);
+
+                // If they've been colliding for >= 2 seconds, stop pushing to let them pass through
+                if (info.ticks >= RETINUE_STUCK_TICKS) {
+                    return;
+                }
+            }
+
+            // Before 2 seconds, allow normal pushing so they try to separate
+            super.push(other);
+            return;
+        }
+
+        super.push(other);
     }
 
     

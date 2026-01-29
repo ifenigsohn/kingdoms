@@ -16,12 +16,6 @@ public final class AmbientEvents {
 
     private static final List<AmbientEvent> EVENTS = List.of(
 
-            // ---- scripted (ADD THESE INSIDE THE LIST) ----
-            
-          // =====================================================
-// NEW EVENTS (30): 15 KCD + 15 CK3
-// Each event uses dialogueTag == id (easy mental model)
-// =====================================================
 
 // -----------------
 // KCD (15)
@@ -85,11 +79,11 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         "soldier_patrol_roads",
         List.of(
                 V(ctx -> ctx.inKingdom(), List.of(
-                        new ScriptedAmbientEvent.SpawnPlan("soldier", () -> 3, 22, 48, true, false, false, false, false),
-                        new ScriptedAmbientEvent.SpawnPlan("scout", () -> 1, 22, 48, true, false, false, false, false)
+                        new ScriptedAmbientEvent.SpawnPlan("soldier", () -> 5, 22, 48, true, false, false, false, false),
+                        new ScriptedAmbientEvent.SpawnPlan("scout", () -> 2, 22, 48, true, false, false, false, false)
                 ), "in_kingdom"),
                 V(ctx -> true, List.of(
-                        new ScriptedAmbientEvent.SpawnPlan("soldier", () -> 2, 22, 48, false, false, false, false, false),
+                        new ScriptedAmbientEvent.SpawnPlan("soldier", () -> 5, 22, 48, false, false, false, false, false),
                         new ScriptedAmbientEvent.SpawnPlan("scout", () -> 1, 22, 48, false, false, false, false, false)
                 ), "default")
         ),
@@ -97,6 +91,37 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         null,
         ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING
 )),
+
+
+new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
+        "wilderness_camp_small",
+        18,
+        ctx -> !ctx.inKingdom(),   // wilderness only
+        "peasant",
+        "CAMP_SMALL",
+        List.of(
+                new ScriptedAmbientEvent.SpawnVariant(
+                        null,
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 3, 2, 8,
+                                        false, true, false, false, false),
+                                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 1, 2, 8,
+                                        false, true, false, false, false)
+                        ),
+                        "default"
+                )
+        ),
+        List.of(),
+        null,
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING,
+
+        // prop scene
+        "camp_small",
+        20 * 60 * 5,
+        10,
+        true
+)),
+
 
 new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         "wilderness_traveler",
@@ -106,7 +131,7 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         "wilderness_traveler",
         List.of(
                 V(ctx -> !ctx.inKingdom(), List.of(
-                        new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 1, 24, 60, false, true, false, false, false),
+                        new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 2, 24, 60, false, true, false, false, false),
                         new ScriptedAmbientEvent.SpawnPlan("trader",  () -> 1, 24, 60, false, true, false, false, false)
                 ), "wilderness"),
                 V(ctx -> true, List.of(
@@ -498,20 +523,31 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
 )),
 
 new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
-        "hungry_night_camp",
-        4,
-        ctx -> !ctx.inKingdom() && !ctx.inWarZone() && !ctx.nearWarZone(),
-        "peasant",
-        "hungry_night_camp",
-        List.of(
-                V(ctx -> true,
-                        List.of(new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 2, 22, 55, false, true, false, false, false)),
-                        "default")
-        ),
-        List.of(),
-        null,
-        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING
+    "wilderness_campers",
+    9,
+    ctx -> !ctx.inKingdom(),                 // wilderness-only gate
+    "peasant",
+    "wilderness_campers",
+    List.of(
+        new ScriptedAmbientEvent.SpawnVariant(
+            ctx -> true,
+            List.of(
+                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 3, 0, 2, false, true, false, false, false),
+                new ScriptedAmbientEvent.SpawnPlan("trader",  () -> 1, 0, 2, false, true, false, false, false)
+            ),
+            "default"
+        )
+    ),
+    List.of(),                
+    null,                     
+    ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING,
+    "camp_basic",             
+    20 * 60 * 3,        
+    7,                 
+    true               
+  
 )),
+
 
 new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         "grave_by_the_road",
@@ -683,29 +719,61 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
 )),
 
 new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
-        "plague_cart",
-        2,
-        ctx -> ctx.inKingdom() && !ctx.inWarZone(),
-        "scholar",
-        "plague_cart",
+    "plague_cart",
+    2,
+    ctx -> ctx.inKingdom() && !ctx.inWarZone(),
+    "scholar",
+    "plague_cart",
+    List.of(
+        V(ctx -> ctx.nearWarZone(), List.of(
+            new ScriptedAmbientEvent.SpawnPlan("scholar", () -> 1, 18, 44, true, false, false, false, true),
+            new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 2, 18, 44, true, false, false, false, true)
+        ), "war_adjacent"),
+        V(ctx -> true, List.of(
+            new ScriptedAmbientEvent.SpawnPlan("scholar", () -> 1, 18, 44, true, false, false, false, true),
+            new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 1, 18, 44, true, false, false, false, true)
+        ), "default")
+    ),
+    List.of(),
+    null,
+    ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING,
+
+    
+    "cart",
+    20 * 60 * 2,  
+    6,      
+    true       
+)),
+
+new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
+        "hunter_camp_tent",
+        6,
+        // gate: wilderness, not in/near war
+        ctx -> !ctx.inKingdom() && !ctx.inWarZone() && !ctx.nearWarZone(),
+        "peasant",                 // fallback role if npc role missing
+        "hunter_camp_tent",        // ✅ dialogue tag hook
         List.of(
-                V(ctx -> ctx.nearWarZone(),
-                        List.of(
-                                new ScriptedAmbientEvent.SpawnPlan("scholar", () -> 1, 18, 44, true, false, false, false, true),
-                                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 2, 18, 44, true, false, false, false, true)
-                        ),
-                        "war_adjacent"),
-                V(ctx -> true,
-                        List.of(
-                                new ScriptedAmbientEvent.SpawnPlan("scholar", () -> 1, 18, 44, true, false, false, false, true),
-                                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 1, 18, 44, true, false, false, false, true)
-                        ),
-                        "default")
+                V(ctx -> true, List.of(
+                        // “hunter” role: if you don't have it, leave as peasant for now
+                        new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 1, 8, 20,
+                                false, true, false, false, false),
+
+                        // optional companion
+                        new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 1, 8, 20,
+                                false, true, false, false, false)
+                ), "default")
         ),
         List.of(),
         null,
-        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING,
+
+        // ✅ prop scene
+        "hunter_tent",
+        20 * 60 * 4,   // 4 minutes
+        8,             // NPC loiter radius around tent
+        true           // if tent can't place, cancel scene
 )),
+
 
 new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         "tavern_brawl",
@@ -1081,7 +1149,105 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         List.of(),
         null,
         ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING
+)),
+
+new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
+        "gossip_peasants_about_king",
+        5,
+        ctx -> !ctx.inWarZone(), // allow in player kingdom, foreign kingdom, and wilderness
+        "peasant",
+        "gossip_peasants_about_king",
+        List.of(
+                V(ctx -> ctx.inKingdom() && ctx.playerKingdom() != null && ctx.hereKingdom() != null
+                                && ctx.playerKingdom().id.equals(ctx.hereKingdom().id),
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 3, 16, 36, true, false, false, false, false)
+                        ),
+                        "own_kingdom"
+                ),
+                V(ctx -> ctx.inKingdom(),
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 3, 16, 36, true, false, false, false, false),
+                                new ScriptedAmbientEvent.SpawnPlan("trader",  () -> 1, 16, 36, true, false, false, false, false)
+                        ),
+                        "kingdom"
+                ),
+                V(ctx -> true,
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 2, 24, 60, false, true, false, false, false)
+                        ),
+                        "wilderness"
+                )
+        ),
+        List.of(),
+        ctx -> {
+            // choose which kingdom they're gossiping about
+            // preference: the kingdom you're currently in; else your own; else random
+            var ks = name.kingdoms.kingdomState.get(ctx.server());
+            if (ctx.inKingdom() && ctx.hereKingdom() != null && ctx.hereKingdom().id != null) return ctx.hereKingdom().id;
+            if (ctx.playerKingdom() != null && ctx.playerKingdom().id != null) return ctx.playerKingdom().id;
+
+            var all = ks.getAllKingdoms();
+            if (all == null || all.isEmpty()) return null;
+            var arr = all.toArray(new name.kingdoms.kingdomState.Kingdom[0]);
+            for (int tries = 0; tries < 20; tries++) {
+                var k = arr[ctx.level().random.nextInt(arr.length)];
+                if (k != null && k.id != null) return k.id;
+            }
+            return null;
+        },
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING
+)),
+
+new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
+        "gossip_nobles_about_king",
+        3,
+        ctx -> !ctx.inWarZone(), // allow player kingdom, foreign kingdom, wilderness
+        "noble",
+        "gossip_nobles_about_king",
+        List.of(
+                V(ctx -> ctx.inKingdom() && ctx.nearKingSpawner(160),
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("noble", () -> 1, 16, 36, true, false, false, false, false),
+                                new ScriptedAmbientEvent.SpawnPlan("guard", () -> 2, 16, 36, true, false, false, false, false)
+                        ),
+                        "court"
+                ),
+                V(ctx -> ctx.inKingdom(),
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("noble", () -> 1, 16, 36, true, false, false, false, false),
+                                new ScriptedAmbientEvent.SpawnPlan("guard", () -> 1, 16, 36, true, false, false, false, false)
+                        ),
+                        "kingdom"
+                ),
+                V(ctx -> true,
+                        List.of(
+                                // noble traveling with a guard in the wild
+                                new ScriptedAmbientEvent.SpawnPlan("noble", () -> 1, 24, 60, false, true, false, false, false),
+                                new ScriptedAmbientEvent.SpawnPlan("guard", () -> 1, 24, 60, false, true, false, false, false)
+                        ),
+                        "wilderness"
+                )
+        ),
+        List.of(),
+        ctx -> {
+            // same target selection logic as peasants
+            var ks = name.kingdoms.kingdomState.get(ctx.server());
+            if (ctx.inKingdom() && ctx.hereKingdom() != null && ctx.hereKingdom().id != null) return ctx.hereKingdom().id;
+            if (ctx.playerKingdom() != null && ctx.playerKingdom().id != null) return ctx.playerKingdom().id;
+
+            var all = ks.getAllKingdoms();
+            if (all == null || all.isEmpty()) return null;
+            var arr = all.toArray(new name.kingdoms.kingdomState.Kingdom[0]);
+            for (int tries = 0; tries < 20; tries++) {
+                var k = arr[ctx.level().random.nextInt(arr.length)];
+                if (k != null && k.id != null) return k.id;
+            }
+            return null;
+        },
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING
 ))
+
 
     );
 
@@ -1144,5 +1310,24 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
 
         return null;
     }
+
+
+    public static java.util.List<AmbientEvent> allEvents() {
+        return java.util.Collections.unmodifiableList(EVENTS);
+    }
+
+    public static ScriptedAmbientEvent getScriptedById(String id) {
+        if (id == null) return null;
+        for (var e : EVENTS) {
+            if (e instanceof ScriptedAmbientEvent se) {
+                if (se.id().equalsIgnoreCase(id)) return se;
+            }
+        }
+        return null;
+    }
+
+
+
+
 
 }

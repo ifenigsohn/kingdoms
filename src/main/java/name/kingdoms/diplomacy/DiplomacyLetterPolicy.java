@@ -41,7 +41,8 @@ public final class DiplomacyLetterPolicy {
             int relation,
             aiKingdomState.KingdomPersonality p,
             boolean atWar,
-            boolean allied
+            boolean allied,
+            boolean playerPresent
     ) {
         if (rng == null || p == null) return Optional.empty();
 
@@ -114,6 +115,30 @@ public final class DiplomacyLetterPolicy {
         double generosity  = p.generosity();
         double pragmatism  = p.pragmatism();
         double trustBias   = p.trustBias();
+
+        // If the player is physically present, the king is less likely to escalate via mail.
+        // Think: “you’re in my hall / nearby, so I choose words carefully.”
+        if (playerPresent) {
+            // Reduce aggression influence on hostile outgoing letters
+            aggression *= 0.75;
+
+            // Bias toward “talking” letters
+            scale(w, Letter.Kind.CONTRACT, 1.15);
+            scale(w, Letter.Kind.OFFER, 1.25);
+            scale(w, Letter.Kind.COMPLIMENT, 1.20);
+            scale(w, Letter.Kind.REQUEST, 1.10);
+
+            // Reduce hostile tone—still possible if truly hostile, just less likely
+            scale(w, Letter.Kind.WARNING, 0.75);
+            scale(w, Letter.Kind.ULTIMATUM, 0.55);
+            scale(w, Letter.Kind.INSULT, 0.40);
+
+            // Optional hard rule: don’t send insults if relation isn’t deeply hostile
+            if (relation > -70) {
+                w.remove(Letter.Kind.INSULT);
+            }
+        }
+
 
         // aggression: more warnings/ultimatums/insults
         scale(w, Letter.Kind.WARNING, 1.0 + aggression);
