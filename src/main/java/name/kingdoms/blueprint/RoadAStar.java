@@ -34,16 +34,20 @@ public final class RoadAStar {
     private static final int SEARCH_PADDING = 96; // tune (64..192)
 
     // Penalize turns so road doesn't "stair-step" in XZ.
-    private static final double TURN_PENALTY = 6.0;
+    private static final double TURN_PENALTY = 8.0;
 
     // Strongly prefer flat over climbing/descending
     private static final double GRADE_PENALTY = 12.0;
     private static final double UPHILL_EXTRA = 2.0;
 
     // Smoothness penalties (reduce "jittery" elevation)
-    private static final double DY_CHANGE_PENALTY = 3.0;     // dy differs from lastDy
-    private static final double SIGN_FLIP_PENALTY  = 6.0;    // lastDy and dy opposite signs
+    private static final double DY_CHANGE_PENALTY = 25.0;     // dy differs from lastDy
+    private static final double SIGN_FLIP_PENALTY  = 25.0;    // lastDy and dy opposite signs
     private static final double STEP_RUN_PENALTY   = 1.25;   // extended runs of dy!=0
+    private static final double AXIS_ALTERNATION_PENALTY = 40.0; // tune
+
+
+    
 
     private enum Dir {
         NONE, EAST, WEST, SOUTH, NORTH;
@@ -159,6 +163,20 @@ public final class RoadAStar {
         // base move cost + grade penalty
         double g2 = cur.g + 1.0 + Math.abs(dy) * GRADE_PENALTY;
         if (dy > 0) g2 += UPHILL_EXTRA;
+
+        // Extra anti-diagonal: penalize alternating axis steps (E/N/E/N...)
+        if (cur.prev != null) {
+            int pdx = cur.k.x - cur.prev.k.x;
+            int pdz = cur.k.z - cur.prev.k.z;
+
+            boolean prevAxisX = (pdx != 0);
+            boolean nextAxisX = (mdx != 0);
+
+            if (prevAxisX != nextAxisX) {
+                g2 += AXIS_ALTERNATION_PENALTY;
+            }
+        }
+
 
         // mild water penalty (still allowed)
         if (isWaterAtOrBelow(level, nx, ny, nz)) g2 += 2.0;

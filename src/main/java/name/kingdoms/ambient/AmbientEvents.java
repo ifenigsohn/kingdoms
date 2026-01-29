@@ -98,7 +98,7 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         18,
         ctx -> !ctx.inKingdom(),   // wilderness only
         "peasant",
-        "CAMP_SMALL",
+        "wilderness_camp_small",
         List.of(
                 new ScriptedAmbientEvent.SpawnVariant(
                         null,

@@ -123,104 +123,100 @@ public final class AmbientProps {
     }
 
     private static Map<BlockPos, BlockState> cart(BlockPos g) {
-    Map<BlockPos, BlockState> m = new HashMap<>();
+        Map<BlockPos, BlockState> m = new HashMap<>();
 
-    // ------------------------------------------------------------------
-    // Layout notes:
-    // - Bed is a 3x2 rectangle at y+1 (thin floor)
-    // - We'll treat +X as the "hitch" side for now (you can rotate later)
-    // ------------------------------------------------------------------
+        // --- Dimensions ---
+        // Bed footprint: width 3 (x=-1..1), length 4 (z=0..3)
+        // Move slabs UP by one: bed is now at y=2 (instead of y=1)
+        int y = 2;
+        int minX = -1, maxX = 1;
+        int minZ = 0,  maxZ = 3;
 
-    int y = 1;
-
-    BlockState bed = Blocks.SPRUCE_SLAB.defaultBlockState();
-
-    // Bed floor: x = -1..1, z = 0..1  (3x2)
-    for (int dx = -1; dx <= 1; dx++) {
-        for (int dz = 0; dz <= 1; dz++) {
-            m.put(g.offset(dx, y, dz), bed);
+        // Floor (slabs)
+        BlockState floor = Blocks.SPRUCE_SLAB.defaultBlockState();
+        for (int dx = minX; dx <= maxX; dx++) {
+            for (int dz = minZ; dz <= maxZ; dz++) {
+                m.put(g.offset(dx, y, dz), floor);
+            }
         }
-    }
 
-    // Corner posts (fence posts up 2 high like the screenshot corners)
-    BlockState post = Blocks.SPRUCE_FENCE.defaultBlockState();
-        m.put(g.offset(-1, y, 0), post);
-        m.put(g.offset(-1, y+1, 0), post);
-
-        m.put(g.offset(-1, y, 1), post);
-        m.put(g.offset(-1, y+1, 1), post);
-
-        m.put(g.offset( 1, y, 0), post);
-        m.put(g.offset( 1, y+1, 0), post);
-
-        m.put(g.offset( 1, y, 1), post);
-        m.put(g.offset( 1, y+1, 1), post);
-
-        // Side boards: open trapdoors standing vertical around the bed
-        // When OPEN=true, trapdoors stand up (vertical). Facing is fiddly; this is a good starting point.
-        BlockState tdNorth = Blocks.SPRUCE_TRAPDOOR.defaultBlockState()
+        // Trapdoor side walls (open = vertical)
+        // Rotate trapdoors 180° compared to earlier: swap N<->S and E<->W.
+        BlockState tdN = Blocks.SPRUCE_TRAPDOOR.defaultBlockState()
                 .setValue(TrapDoorBlock.OPEN, true)
                 .setValue(TrapDoorBlock.HALF, Half.BOTTOM)
-                .setValue(TrapDoorBlock.FACING, Direction.NORTH);
+                .setValue(TrapDoorBlock.FACING, Direction.SOUTH); // was NORTH
 
-        BlockState tdSouth = Blocks.SPRUCE_TRAPDOOR.defaultBlockState()
+        BlockState tdS = Blocks.SPRUCE_TRAPDOOR.defaultBlockState()
                 .setValue(TrapDoorBlock.OPEN, true)
                 .setValue(TrapDoorBlock.HALF, Half.BOTTOM)
-                .setValue(TrapDoorBlock.FACING, Direction.SOUTH);
+                .setValue(TrapDoorBlock.FACING, Direction.NORTH); // was SOUTH
 
-        BlockState tdWest = Blocks.SPRUCE_TRAPDOOR.defaultBlockState()
+        BlockState tdW = Blocks.SPRUCE_TRAPDOOR.defaultBlockState()
                 .setValue(TrapDoorBlock.OPEN, true)
                 .setValue(TrapDoorBlock.HALF, Half.BOTTOM)
-                .setValue(TrapDoorBlock.FACING, Direction.WEST);
+                .setValue(TrapDoorBlock.FACING, Direction.EAST); // was WEST
 
-        BlockState tdEast = Blocks.SPRUCE_TRAPDOOR.defaultBlockState()
+        BlockState tdE = Blocks.SPRUCE_TRAPDOOR.defaultBlockState()
                 .setValue(TrapDoorBlock.OPEN, true)
                 .setValue(TrapDoorBlock.HALF, Half.BOTTOM)
-                .setValue(TrapDoorBlock.FACING, Direction.EAST);
+                .setValue(TrapDoorBlock.FACING, Direction.WEST); // was EAST
 
-        // Long sides (north/south edges of the bed rectangle)
-        // north edge is z = -1 line adjacent to bed z=0
-        for (int dx = -1; dx <= 1; dx++) m.put(g.offset(dx, y, -1), tdSouth);
-        // south edge is z = 2 line adjacent to bed z=1
-        for (int dx = -1; dx <= 1; dx++) m.put(g.offset(dx, y,  2), tdNorth);
+        // Back wall (z = maxZ+1)
+        for (int dx = minX; dx <= maxX; dx++) {
+            m.put(g.offset(dx, y, maxZ + 1), tdN);
+        }
 
-        // Short sides (west/east edges)
-        // west edge is x = -2 line adjacent to bed x=-1
-        for (int dz = 0; dz <= 1; dz++) m.put(g.offset(-2, y, dz), tdEast);
-        // east edge is x = 2 line adjacent to bed x=1
-        for (int dz = 0; dz <= 1; dz++) m.put(g.offset( 2, y, dz), tdWest);
+        // Left/right walls
+        for (int dz = minZ; dz <= maxZ; dz++) {
+            m.put(g.offset(minX - 1, y, dz), tdE); // left wall faces inward
+            m.put(g.offset(maxX + 1, y, dz), tdW); // right wall faces inward
+        }
 
-        // Wheels: sideways logs at ground level just under the bed
-        // Put them at y (same as bed) - 1 => ground+0
-        BlockState wheelX = Blocks.STRIPPED_SPRUCE_LOG.defaultBlockState()
-                .setValue(RotatedPillarBlock.AXIS, net.minecraft.core.Direction.Axis.X);
+        // Front wall (z = -1), leave a gap in the middle for shafts
+        m.put(g.offset(minX, y, -1), tdS);
+        m.put(g.offset(maxX, y, -1), tdS);
+        // (no trapdoor at x=0,z=-1)
 
-        // two wheels on each side, roughly centered
-        m.put(g.offset(0, 0, 0), wheelX);
-        m.put(g.offset(0, 0, 1), wheelX);
+        // Replace cauldrons with stripped wood "wheels/axle"
+        // Two logs per side, axis X, at ground-ish level (y=0)
+        BlockState wheel = Blocks.STRIPPED_SPRUCE_LOG.defaultBlockState()
+                .setValue(RotatedPillarBlock.AXIS, Direction.Axis.X);
 
-        // Undercarriage beam (optional, helps sell the cart)
-        BlockState beam = Blocks.SPRUCE_SLAB.defaultBlockState();
-        m.put(g.offset(-1, 0, 0), beam);
-        m.put(g.offset( 0, 0, 0), beam);
-        m.put(g.offset( 1, 0, 0), beam);
+        // Lift logs up under the bed (bed y=2, so under-bed is y=1)
+        m.put(g.offset(minX, 1, 0), wheel);
+        m.put(g.offset(minX, 1, 1), wheel);
+        m.put(g.offset(maxX, 1, 0), wheel);
+        m.put(g.offset(maxX, 1, 1), wheel);
 
-        // Hitch/handle: fences extending out on +X, with a little gate look
-        m.put(g.offset(3, y, 0), post);
-        m.put(g.offset(3, y, 1), post);
 
-        // A "rail" between them (fence gate reads like the screenshot tail/side rail)
-        BlockState gate = Blocks.SPRUCE_FENCE_GATE.defaultBlockState()
-                .setValue(FenceGateBlock.FACING, Direction.EAST)
+
+
+        // Shaft/handles: rotate fence gates 90° (NORTH -> EAST)
+        BlockState shaft = Blocks.SPRUCE_FENCE_GATE.defaultBlockState()
+                .setValue(FenceGateBlock.FACING, Direction.EAST) // was NORTH
                 .setValue(FenceGateBlock.OPEN, false);
-        m.put(g.offset(2, y, 0), gate);
 
-        // Load: hay bales on top of the bed (like the pic)
-        m.put(g.offset(0, y+1, 0), Blocks.HAY_BLOCK.defaultBlockState());
-        m.put(g.offset(0, y+1, 1), Blocks.HAY_BLOCK.defaultBlockState());
+        // Extend out the front (toward -Z)
+        int shaftY = y - 1; // tuck under bed
+        for (int dz = -1; dz >= -2; dz--) { // closer to cart
+            m.put(g.offset(-1, shaftY, dz), shaft);
+            m.put(g.offset( 1, shaftY, dz), shaft);
+        }
+
+        m.put(g.offset(-1, shaftY, 0), shaft);
+        m.put(g.offset( 1, shaftY, 0), shaft);
+
+
+        // (Removed the connector fence post entirely)
+
+        // Load: hay bales 1x2 centered on bed
+        m.put(g.offset(0, y , 1), Blocks.HAY_BLOCK.defaultBlockState());
+        m.put(g.offset(0, y, 2), Blocks.HAY_BLOCK.defaultBlockState());
 
         return m;
     }
+
 
 
     private static Map<BlockPos, BlockState> hunterTent(BlockPos g) {

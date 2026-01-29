@@ -966,6 +966,12 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
         private boolean isWorldgenTrash(ItemStack stack) {
             // Exact known offenders
             if (stack.is(Items.LEAF_LITTER)) return true;
+            if (stack.is(Items.STICK)) return true;
+            if (stack.is(Items.MOSS_CARPET)) return true;
+            if (stack.is(Items.PEONY)) return true;
+            if (stack.is(Items.BROWN_MUSHROOM)) return true;
+            if (stack.is(Items.RED_MUSHROOM)) return true;
+            if (stack.is(Items.WILDFLOWERS)) return true;
 
             // Seeds
             if (stack.is(Items.WHEAT_SEEDS)) return true;
