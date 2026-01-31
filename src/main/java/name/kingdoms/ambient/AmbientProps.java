@@ -3,6 +3,13 @@ package name.kingdoms.ambient;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.Pose;
+import net.minecraft.world.entity.monster.Skeleton;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.RotatedPillarBlock;
@@ -25,7 +32,17 @@ public final class AmbientProps {
     public enum Kind {
         SMALL_CAMP("camp_small"),
         SHRINE("shrine"),
+
+        // old generic
         CART("cart"),
+
+        // new variants
+        FARM_CART("farm_cart"),
+        METAL_CART("metal_cart"),
+        COAL_CART("coal_cart"),
+        GOLD_CART("gold_cart"),
+        PLAGUE_CART("plague_cart"),
+
         HUNTER_TENT("hunter_tent"),
         MILITARY_CAMP("military_camp");
 
@@ -36,17 +53,25 @@ public final class AmbientProps {
             if (id == null) return null;
             String s = id.trim().toLowerCase(Locale.ROOT);
 
-            // aliases so you don’t have to rename old event defs
             return switch (s) {
                 case "camp_basic", "camp_small", "small_camp" -> SMALL_CAMP;
                 case "shrine", "roadside_shrine" -> SHRINE;
+
+                // old + new cart ids
                 case "cart" -> CART;
+                case "farm_cart", "cart_farm" -> FARM_CART;
+                case "metal_cart", "cart_metal", "iron_cart" -> METAL_CART;
+                case "coal_cart", "cart_coal" -> COAL_CART;
+                case "gold_cart", "cart_gold" -> GOLD_CART;
+                case "plague_cart", "cart_plague" -> PLAGUE_CART;
+
                 case "hunter_tent", "tent_hunter" -> HUNTER_TENT;
                 case "military_camp", "mil_camp" -> MILITARY_CAMP;
                 default -> null;
             };
         }
     }
+
 
     public static Kind fromId(String propId) {
         if (propId == null) return null;
@@ -69,11 +94,14 @@ public final class AmbientProps {
         return switch (kind) {
             case SMALL_CAMP -> smallCamp(centerGround);
             case SHRINE -> shrine(centerGround);
-            case CART -> cart(centerGround);
+
+            case CART, FARM_CART, METAL_CART, COAL_CART, GOLD_CART, PLAGUE_CART -> cart(centerGround, kind);
+
             case HUNTER_TENT -> hunterTent(centerGround);
             case MILITARY_CAMP -> militaryCamp(centerGround);
         };
     }
+
 
     // ---- templates ----
 
@@ -122,7 +150,7 @@ public final class AmbientProps {
         return m;
     }
 
-    private static Map<BlockPos, BlockState> cart(BlockPos g) {
+    private static Map<BlockPos, BlockState> cart(BlockPos g, Kind kind) {
         Map<BlockPos, BlockState> m = new HashMap<>();
 
         // --- Dimensions ---
@@ -207,12 +235,44 @@ public final class AmbientProps {
         m.put(g.offset(-1, shaftY, 0), shaft);
         m.put(g.offset( 1, shaftY, 0), shaft);
 
+        // Load: varies by cart kind (these overwrite the two slabs at (0,y,1) and (0,y,2))
+        BlockState load1;
+        BlockState load2;
 
-        // (Removed the connector fence post entirely)
+        switch (kind) {
+            case FARM_CART -> {
+                load1 = Blocks.HAY_BLOCK.defaultBlockState();
+                load2 = Blocks.HAY_BLOCK.defaultBlockState();
+            }
+            case METAL_CART -> {
+                // pick the look you like better; raw iron block reads great as "cargo"
+                load1 = Blocks.IRON_ORE.defaultBlockState();
+                load2 = Blocks.RAW_IRON_BLOCK.defaultBlockState();
+            }
+            case COAL_CART -> {
+                load1 = Blocks.COAL_ORE.defaultBlockState();
+                load2 = Blocks.COAL_BLOCK.defaultBlockState();
+            }
+            case GOLD_CART -> {
+                load1 = Blocks.GOLD_BLOCK.defaultBlockState();
+                load2 = Blocks.GOLD_BLOCK.defaultBlockState();
+            }
+            case PLAGUE_CART -> {
+                // keep bed clear; skeleton will be spawned as an entity (not a block)
+                load1 = Blocks.AIR.defaultBlockState();
+                load2 = Blocks.AIR.defaultBlockState();
+            }
+            default -> {
+                // fallback for generic CART
+                load1 = Blocks.HAY_BLOCK.defaultBlockState();
+                load2 = Blocks.HAY_BLOCK.defaultBlockState();
+            }
+        }
 
-        // Load: hay bales 1x2 centered on bed
-        m.put(g.offset(0, y , 1), Blocks.HAY_BLOCK.defaultBlockState());
-        m.put(g.offset(0, y, 2), Blocks.HAY_BLOCK.defaultBlockState());
+        // Place the load (AIR means "don't place anything")
+        if (!load1.isAir()) m.put(g.offset(0, y, 1), load1);
+        if (!load2.isAir()) m.put(g.offset(0, y, 2), load2);
+
 
         return m;
     }
@@ -336,7 +396,7 @@ public final class AmbientProps {
         Map<BlockPos, BlockState> terrainPatch =
            AmbientPropUtil.buildTerrainGradePatch(level, centerGround, halfX, halfZ, maxVariation, flatY);
 
-        if (!terrainPatch.isEmpty()) {
+        if (terrainPatch != null && !terrainPatch.isEmpty()) {
             System.out.println("[AmbientProps] grading edits=" + terrainPatch.size()
                     + " kind=" + kind + " center=" + centerGround);
         }
@@ -356,6 +416,69 @@ public final class AmbientProps {
         merged.putAll(blocks);
 
         UUID sceneId = AmbientPropManager.place(level, merged, ttlTicks);
+
+        // --- Plague cart corpse (entity) ---
+        if (kind == Kind.PLAGUE_CART) {
+            // Your cart bed is at y=2 relative to ground centerGround.
+            // centerGround is ground level, so bed surface is roughly centerGround.getY() + 2.
+            double sx = centerGround.getX() + 0.5;
+            double sy = centerGround.getY() + 2.05 + 0.5; // slight lift so it rests on the bed
+            double sz = centerGround.getZ() + 1.5;  // centered between your two load tiles (z=1 and z=2)
+            double[] xOffsets = { 0.0, -0.6, 0.6 };
+
+            for (double xo : xOffsets) {
+                Skeleton sk = EntityType.SKELETON.create(level, null);
+                if (sk == null) continue;
+
+                sk.setPos(sx + xo, sy, sz);
+
+                sk.setYRot(90f);
+                sk.setXRot(90f);
+                sk.yHeadRot = sk.getYRot();
+                sk.yBodyRot = sk.getYRot();
+
+                sk.setNoAi(true);
+                sk.noPhysics = true;
+                sk.setNoGravity(true);
+                sk.setSilent(true);
+                sk.setInvulnerable(true);
+                sk.setPersistenceRequired();
+
+                // absolutely stop burning
+                sk.addEffect(new MobEffectInstance(
+                        MobEffects.FIRE_RESISTANCE,
+                        Integer.MAX_VALUE,
+                        0,
+                        true,
+                        false
+                ));
+                sk.setRemainingFireTicks(0);
+
+                // tag to despawn with prop
+                sk.addTag("ambient_scene:" + sceneId);
+
+                // clear equipment
+                sk.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+                sk.setItemSlot(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
+                sk.setItemSlot(EquipmentSlot.HEAD, ItemStack.EMPTY);
+                sk.setItemSlot(EquipmentSlot.CHEST, ItemStack.EMPTY);
+                sk.setItemSlot(EquipmentSlot.LEGS, ItemStack.EMPTY);
+                sk.setItemSlot(EquipmentSlot.FEET, ItemStack.EMPTY);
+
+                sk.setPose(Pose.SLEEPING);
+
+                level.addFreshEntity(sk);
+                AmbientPropManager.registerEntity(sceneId, sk);
+
+                // kill fire tick that happens right after spawn
+                level.getServer().execute(() -> {
+                    if (!sk.isRemoved()) sk.setRemainingFireTicks(0);
+                });
+            }
+
+
+        }
+
 
         // NPC orbit anchor
         BlockPos anchor = centerGround.above(1);

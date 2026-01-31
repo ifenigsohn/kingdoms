@@ -1460,7 +1460,7 @@ public final class WarBattleManager {
             if (!isAiKingdom(server, kid)) continue;
 
             int total = computeTotalSoldiers(server, kid);
-            int deploy = deployForKingdom(kid, battle.friendRootKingdomId, total);
+            int deploy = deployForKingdom(kid, battle.enemyRootKingdomId, total);
             if (deploy <= 0) continue;
 
             BlockPos capPos = spawnNear(level, enemyRally, 6);
@@ -2396,6 +2396,21 @@ public final class WarBattleManager {
         if (contribs == null || contribs.isEmpty()) return null;
         return contribs.get(level.random.nextInt(contribs.size()));
     }
+
+    public static void applySkinToActiveUnits(MinecraftServer server, UUID kingdomId, int skinId) {
+        for (BattleInstance b : ACTIVE.values()) {
+            for (var entry : b.units.entrySet()) {
+                UnitMeta meta = entry.getValue();
+                if (!kingdomId.equals(meta.sourceKingdomId())) continue;
+
+                Entity ent = b.level.getEntity(entry.getKey());
+                if (ent instanceof SoldierEntity se && se.isAlive()) {
+                    se.setSkinId(skinId);
+                }
+            }
+        }
+    }
+
 
 
 }

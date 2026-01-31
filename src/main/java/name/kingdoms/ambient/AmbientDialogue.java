@@ -390,21 +390,57 @@ public final class AmbientDialogue {
             }
     ));
 
-    TAG_POOLS.put("plague_cart", Map.of(
-            "scholar:WAR_EDGE", new String[]{
-                    "War and sickness travel together.",
-                    "Keep distance. Pray from far away.",
-                    "When bodies pile up, disease takes interest."
-            },
-            "peasant:POOR", new String[]{
-                    "Don’t touch him—please…",
-                    "We can’t afford sickness.",
-                    "If God is watching, He’s turned away."
-            },
-            "any", new String[]{
-                    "Some problems don’t care who rules."
-            }
-    ));
+        TAG_POOLS.put("FARM_CART", Map.of(
+        "trader:WILDERNESS", new String[]{
+        "Grain pays—if bandits don’t eat first.",
+        "Hay’s light, but it still draws knives.",
+        "Easy load. Hard road."
+        },
+        "peasant:WILDERNESS", new String[]{
+        "Harvest was thin. We carry what we can.",
+        "Please don’t take it… it’s all we’ve got."
+        },
+        "any:WILDERNESS", new String[]{ "Smells like fields and long days." },
+        "any", new String[]{ "Move on, traveler." }
+        ));
+
+        TAG_POOLS.put("METAL_CART", Map.of(
+        "trader:WILDERNESS", new String[]{
+        "Iron’s heavy. Trouble’s heavier.",
+        "This load’s worth a life—maybe mine."
+        },
+        "any:WILDERNESS", new String[]{ "Hear that? That’s coin clinking in the dark." },
+        "any", new String[]{ "Eyes forward." }
+        ));
+
+        TAG_POOLS.put("COAL_CART", Map.of(
+        "trader:WILDERNESS", new String[]{
+        "Coal dust in the lungs, bandits on the road.",
+        "Black rock keeps the forges alive."
+        },
+        "any:WILDERNESS", new String[]{ "Don’t breathe too deep near the cart." },
+        "any", new String[]{ "Keep moving." }
+        ));
+
+        TAG_POOLS.put("GOLD_CART", Map.of(
+        "trader:WILDERNESS", new String[]{
+        "Gold makes friends fast… and graves faster.",
+        "Don’t stare. It invites bad luck."
+        },
+        "any:WILDERNESS", new String[]{ "That shine draws wolves with two legs." },
+        "any", new String[]{ "Walk on." }
+        ));
+
+        TAG_POOLS.put("PLAGUE_CART", Map.of(
+        "peasant:WILDERNESS", new String[]{
+        "Don’t come close.",
+        "We’ve already lost too many.",
+        "Keep your distance… please."
+        },
+        "any:WILDERNESS", new String[]{ "The air feels wrong near that cart." },
+        "any", new String[]{ "Go." }
+        ));
+
 
     TAG_POOLS.put("tavern_brawl", Map.of(
             "peasant:OWN_KINGDOM", new String[]{

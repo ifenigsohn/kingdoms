@@ -398,7 +398,16 @@ public class jobBlockEntity extends BlockEntity {
 
             worker.setHomePos(jobPos);
             worker.setJobId(job.getId());
-            worker.setSkinId(level.random.nextInt(SKIN_COUNT));
+            
+            // Use kingdom-selected skin for combat jobs; random for others
+            String jid = job.getId();
+            boolean combat = "guard".equals(jid) || "soldier".equals(jid) || "royal_guard".equals(jid);
+
+            if (combat) {
+                worker.setSkinId(name.kingdoms.entity.SoldierSkins.clamp(kingdom.soldierSkinId));
+            } else {
+                worker.setSkinId(level.random.nextInt(SKIN_COUNT));
+            }
             worker.setKingdomUUID(kingdom.id);
 
             String base = randomName(level, level.random);
@@ -414,6 +423,18 @@ public class jobBlockEntity extends BlockEntity {
             worker.setHomePos(jobPos);
             worker.setJobId(job.getId());
             worker.setKingdomUUID(kingdom.id);
+
+            // Keep combat jobs synced to kingdom-selected skin
+            String jid = job.getId();
+            boolean combat = "guard".equals(jid) || "soldier".equals(jid) || "royal_guard".equals(jid);
+
+            if (combat) {
+                int desired = name.kingdoms.entity.SoldierSkins.clamp(kingdom.soldierSkinId);
+                if (worker.getSkinId() != desired) {
+                    worker.setSkinId(desired);
+                }
+            }
+
 
             if (worker.hasCustomName()) {
                 String existing = worker.getCustomName().getString();

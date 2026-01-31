@@ -1977,6 +1977,7 @@ public final class networkInit {
                 );
 
                 pk.soldierSkinId = clamped;
+                name.kingdoms.war.WarBattleManager.applySkinToActiveUnits(server, pk.id, clamped);
                 ks.markDirty();
             });
         });

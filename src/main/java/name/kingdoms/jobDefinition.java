@@ -596,7 +596,7 @@ public class jobDefinition {
 
     public static final jobDefinition SHOP_JOB =
             reg(new jobDefinition("shop", 4000))
-                    .requiresBlock("minecraft:item_frame", 2)
+                    .requiresBlock("minecraft:lantern", 1)
                     .requiresBlock("minecraft:chest", 2)
                     .inputsFood(0, 5, 0, 5, 0, 0, 1, 0, 0)
                     .outputs(5, 0,0,0, 0,

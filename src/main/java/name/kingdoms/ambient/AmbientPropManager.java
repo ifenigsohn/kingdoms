@@ -5,6 +5,8 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.*;
@@ -13,7 +15,8 @@ public final class AmbientPropManager {
     private AmbientPropManager() {}
 
     private record Replaced(ServerLevel level, BlockPos pos, BlockState prev) {}
-    private record ActiveProp(long expireTick, List<Replaced> replaced) {}
+    private record ActiveProp(long expireTick, ServerLevel level, List<Replaced> replaced, List<UUID> entityIds) {}
+
 
     private static final Map<UUID, ActiveProp> ACTIVE = new HashMap<>();
 
@@ -41,9 +44,19 @@ public final class AmbientPropManager {
 
         UUID id = UUID.randomUUID();
         long expire = level.getServer().getTickCount() + Math.max(20, ttlTicks);
-        ACTIVE.put(id, new ActiveProp(expire, replaced));
+        ACTIVE.put(id, new ActiveProp(expire, level, replaced, new ArrayList<>()));
         return id;
+
     }
+
+    /** Register an entity to be cleaned up when the prop scene expires. */
+    public static void registerEntity(UUID sceneId, Entity e) {
+        if (sceneId == null || e == null) return;
+        ActiveProp ap = ACTIVE.get(sceneId);
+        if (ap == null) return;
+        ap.entityIds.add(e.getUUID());
+    }
+
 
     private static void tick(MinecraftServer server) {
         long now = server.getTickCount();
@@ -52,33 +65,55 @@ public final class AmbientPropManager {
         while (it.hasNext()) {
             var entry = it.next();
             ActiveProp ap = entry.getValue();
+
+            // While active: stop any registered living entities from showing on fire
+            for (UUID eid : ap.entityIds) {
+                Entity ent = ap.level.getEntity(eid);
+                if (ent instanceof LivingEntity le) {
+                    le.setRemainingFireTicks(0);
+                }
+            }
+
             if (now < ap.expireTick) continue;
 
-            // restore
+
+            // remove registered entities first
+            for (UUID eid : ap.entityIds) {
+                Entity ent = ap.level.getEntity(eid);
+                if (ent != null) ent.discard();
+            }
+
+            // restore blocks
             for (Replaced r : ap.replaced) {
-                // sanity: ensure level still loaded
                 r.level.setBlockAndUpdate(r.pos, r.prev);
             }
 
             it.remove();
+
         }
     }
 
     private static void onServerStopping(MinecraftServer server) {
         restoreAll();
+        
     }
 
     private static void restoreAll() {
-        // Restore everything we still have tracked, then clear
         for (ActiveProp ap : ACTIVE.values()) {
-            for (Replaced r : ap.replaced) {
-                // Optional safety: only restore if the chunk is loaded
-                // if (!r.level.hasChunkAt(r.pos)) continue;
 
+            // --- REMOVE ENTITIES ---
+            for (UUID eid : ap.entityIds) {
+                Entity ent = ap.level.getEntity(eid);
+                if (ent != null) ent.discard();
+            }
+
+            // --- RESTORE BLOCKS ---
+            for (Replaced r : ap.replaced) {
                 r.level.setBlockAndUpdate(r.pos, r.prev);
             }
         }
         ACTIVE.clear();
     }
+
 
 }

@@ -87,6 +87,18 @@ public class RoadAmbientNPCEntity extends PathfinderMob {
         return false;
     }
 
+    private void applyKingdomMilitarySkinIfNeeded(ServerLevel sl) {
+        String t = getAiTypeId();
+        boolean military = "soldier".equals(t) || "scout".equals(t) || "guard".equals(t);
+        if (!military) return;
+
+        UUID kid = getKingdomUUID();
+        if (kid == null) return;
+
+        setSkinId(militarySkinForKingdom(sl, kid));
+    }
+
+
     private static String titleForType(String type) {
         return switch (type) {
             case "guard", "soldier", "scout" -> "Guard";   // <-- road walkers: all military called Guard
@@ -162,7 +174,10 @@ public class RoadAmbientNPCEntity extends PathfinderMob {
         SpawnGroupData d = super.finalizeSpawn(level, diff, reason, data);
 
         // If spawned by command/egg/etc and still default, randomize a visual type + skin
-        if ("soldier".equals(getAiTypeId()) && getSkinId() == 0) {
+        UUID kid = getKingdomUUID();
+        boolean bound = (kid != null);
+
+        if (!bound && "soldier".equals(getAiTypeId()) && getSkinId() == 0) {
             String[] types = new String[]{"peasant","villager","noble","soldier"};
             String t = types[this.random.nextInt(types.length)];
             setAiTypeId(t);
@@ -175,6 +190,10 @@ public class RoadAmbientNPCEntity extends PathfinderMob {
                 default -> 12;
             };
             setSkinId(this.random.nextInt(Math.max(1, maxExclusive)));
+        }
+
+        if (level instanceof ServerLevel sl) {
+            applyKingdomMilitarySkinIfNeeded(sl);
         }
 
 
@@ -210,4 +229,22 @@ public class RoadAmbientNPCEntity extends PathfinderMob {
         this.entityData.set(TTL, in.getInt("Ttl").orElse(20 * 60 * 6));
         refreshNametag();
     }
+
+    private static int militarySkinForKingdom(ServerLevel sl, UUID kingdomId) {
+        var srv = sl.getServer();
+        if (srv == null || kingdomId == null) return 0;
+
+        var ks = name.kingdoms.kingdomState.get(srv);
+        var k = ks.getKingdom(kingdomId);
+        if (k != null) return name.kingdoms.entity.SoldierSkins.clamp(k.soldierSkinId);
+
+        var ai = name.kingdoms.aiKingdomState.get(srv).getById(kingdomId);
+        if (ai != null) {
+            try { return name.kingdoms.entity.SoldierSkins.clamp(ai.soldierSkinId); }
+            catch (Throwable ignored) { return 0; }
+        }
+
+        return 0;
+    }
+
 }

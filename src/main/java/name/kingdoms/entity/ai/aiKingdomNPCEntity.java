@@ -224,9 +224,20 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             @Override public boolean canUse() { return aiKingdomNPCEntity.this.isCombatant() && super.canUse(); }
         });
 
+        // Bandits attack players (ambush behavior)
+        this.targetSelector.addGoal(3, new NearestAttackableTargetGoal<>(
+                this,
+                Player.class,
+                true,
+                (TargetingConditions.Selector) (LivingEntity e, ServerLevel lvl) -> aiKingdomNPCEntity.this.isBandit()
+        ) {
+            @Override public boolean canUse() { return aiKingdomNPCEntity.this.isBandit() && super.canUse(); }
+        });
+
+
 
         // Attack enemy players (ONLY when at war)
-        this.targetSelector.addGoal(3, new NearestAttackableTargetGoal<>(
+        this.targetSelector.addGoal(4, new NearestAttackableTargetGoal<>(
         this,
         Player.class,
         true,
@@ -237,7 +248,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         });
 
         // Attack enemy soldiers (your war soldiers)
-        this.targetSelector.addGoal(4, new NearestAttackableTargetGoal<>(
+        this.targetSelector.addGoal(5, new NearestAttackableTargetGoal<>(
                 this,
                 SoldierEntity.class,
                 true,
@@ -248,7 +259,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         });
 
         // Attack enemy AI NPC combatants (ambient-only)
-        this.targetSelector.addGoal(5, new NearestAttackableTargetGoal<>(
+        this.targetSelector.addGoal(6, new NearestAttackableTargetGoal<>(
                 this,
                 aiKingdomNPCEntity.class,
                 true,
@@ -336,9 +347,22 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         if (other == null || other == this) return false;
         if (!other.isCombatant()) return false;
 
-        // IMPORTANT: keep it ambient-only so your normal town population doesn't constantly fight
+        // Keep it ambient-only so normal town pop doesn't fight
         if (!(this.isAmbient() || other.isAmbient())) return false;
 
+        // --- Bandit hostility: bandits fight any non-bandit combatant ---
+        boolean meBandit = this.isBandit();
+        boolean themBandit = other.isBandit();
+        if (meBandit != themBandit) {
+            // exactly one is bandit -> hostile
+            return true;
+        }
+        if (meBandit) {
+            // bandit vs bandit -> not hostile
+            return false;
+        }
+
+        // --- Original war-based hostility for kingdom combatants ---
         if (!(this.level() instanceof ServerLevel sl)) return false;
 
         UUID myKid = this.getKingdomUUID();
@@ -349,6 +373,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         var war = WarState.get(sl.getServer());
         return war.isAtWar(myKid, theirKid);
     }
+
 
 
 
@@ -379,6 +404,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             case "envoy" -> "Envoy";
             case "refugee" -> "Refugee";
             case "scholar" -> "Scholar";
+            case "bandit" -> "Bandit";
 
 
             default -> "Villager";
@@ -393,10 +419,16 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         String nm = getNpcName();
         if (nm == null || nm.isBlank()) nm = "Aelfric";
 
-        String built = nm + " [" + job + "]";
+        // Bandits use comma format
+        String built;
+        if ("bandit".equals(type)) {
+            built = nm + ", Bandit";
+        } else {
+            built = nm + " [" + job + "]";
+        }
 
-        // Only append [KING_NAME] for ambient combatants (soldier/scout/guard)
-        if (!this.level().isClientSide() && this.isAmbient() && this.isCombatant()) {
+        // Only append [KING_NAME] for ambient combatants (soldier/scout/guard), NOT bandits
+        if (!this.level().isClientSide() && this.isAmbient() && this.isCombatant() && !this.isBandit()) {
             String king = resolveKingNameForTag((ServerLevel) this.level(), this.getKingdomUUID());
             if (king != null && !king.isBlank()) {
                 built = built + " [" + king + "]";
@@ -404,10 +436,9 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         }
 
         this.setCustomName(Component.literal(built));
-
-        // Ambient/event NPCs show their name; spawner-population stays hidden to prevent clutter
         this.setCustomNameVisible(this.entityData.get(IS_AMBIENT));
     }
+
 
 
 
@@ -461,9 +492,10 @@ public class aiKingdomNPCEntity extends PathfinderMob {
                 case "envoy" -> 8;
                 case "refugee" -> 3;
                 case "villager" -> 12;
-                case "scholar" -> 45; // tune to your actual skin count
+                case "scholar" -> 22; // tune to your actual skin count
                 case "soldier" -> 29;
                 case "scout" -> 29;
+                case "bandit" -> 6;
                 default -> 12;
             };
             if (maxExclusive < 1) maxExclusive = 1;
@@ -486,6 +518,14 @@ public class aiKingdomNPCEntity extends PathfinderMob {
                 this.entityData.set(NPC_NAME, "Aelfric");
             }
         }
+
+        // If this is a military ambient NPC bound to a kingdom, override skin to kingdom's soldierSkinId
+        if (this.level() instanceof ServerLevel sl) {
+            if (skinId < 0) { // only override when caller didn't force a skin
+                applyKingdomMilitarySkin();
+            }
+        }
+
 
         // --- Nametag: "<MedievalName> <JobTitle>" ---
         refreshNametag();
@@ -526,11 +566,17 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
         // Ensure a consistent nametag exists
         refreshNametag();
+
+        if (level instanceof ServerLevel sl) {
+            if (this.isAmbient() && this.isBandit()) {
+                applyBanditLoadoutFromNearestPlayer(sl);
+            }
+        }
         return data;
     }
 
     public void applyKingdomMilitarySkin() {
-        if (this.level().isClientSide()) return;
+        if (!(this.level() instanceof ServerLevel sl)) return;
 
         UUID kid = getKingdomUUID();
         if (kid == null) return;
@@ -539,19 +585,9 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         boolean military = "soldier".equals(t) || "scout".equals(t) || "guard".equals(t);
         if (!military) return;
 
-        // Choose a deterministic skin “family” per kingdom
-        int base = Math.floorMod(kid.hashCode(), 6); // 6 = your soldier/scout skin count
-
-        // Optional: make scouts/guards shift within the same family
-        int offset = switch (t) {
-            case "scout" -> 2;
-            case "guard" -> 4;
-            default -> 0; // soldier
-        };
-
-        int skin = Math.floorMod(base + offset, 6);
-        this.setSkinId(skin);
+        this.setSkinId(militarySkinForKingdom(sl, kid));
     }
+
 
 
     @Override
@@ -622,6 +658,30 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             combatEquipLinger = 0;
             setCombatSword(false);
         }
+
+        // Ambient combat auto-engage (helps scripted battles start immediately)
+        if (this.isAmbient() && this.isCombatant() && !this.isSleeping()) {
+            if (this.getTarget() == null || !this.getTarget().isAlive()) {
+                // Prefer nearby enemy combatants (bandits <-> soldiers)
+                double r = 20.0;
+                var nearby = level.getEntitiesOfClass(
+                        aiKingdomNPCEntity.class,
+                        this.getBoundingBox().inflate(r),
+                        e -> e != this && e.isAlive() && e.isAmbient() && e.isCombatant() && this.isEnemyAiNpc(e)
+                );
+
+                aiKingdomNPCEntity best = null;
+                double bestD2 = Double.MAX_VALUE;
+                for (var e : nearby) {
+                    double d2 = this.distanceToSqr(e);
+                    if (d2 < bestD2) { bestD2 = d2; best = e; }
+                }
+                if (best != null) {
+                    this.setTarget(best);
+                }
+            }
+        }
+
 
 
         // Despawn if spawner destroyed (accept ANY kingdom spawner type)
@@ -960,14 +1020,23 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
     public void setKingdomUUID(@Nullable UUID id) {
         this.entityData.set(KINGDOM_UUID, id == null ? "" : id.toString());
+        if (!this.level().isClientSide() && id != null) {
+            applyKingdomMilitarySkin();
+        }
     }
+
     
     private boolean equippedCombatSword = false;
 
+    private boolean isBandit() {
+        return "bandit".equals(getAiTypeId());
+    }
+
     private boolean isCombatant() {
         String t = getAiTypeId();
-        return "guard".equals(t) || "soldier".equals(t) || "scout".equals(t);
+        return "guard".equals(t) || "soldier".equals(t) || "scout".equals(t) || "bandit".equals(t);
     }
+
 
     private void setCombatSword(boolean equip) {
             if (this.level().isClientSide()) return;
@@ -1141,6 +1210,106 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     public BlockPos getAmbientAnchor() { return ambientLoiterCenter; }
 
     public int getAmbientAnchorRadius() { return ambientLoiterRadius; }
+
+    private static int militarySkinForKingdom(ServerLevel sl, UUID kingdomId) {
+        var srv = sl.getServer();
+        if (srv == null || kingdomId == null) return 0;
+
+        // Player kingdom + (optionally) mirrored AI kingdoms stored in kingdomState
+        var ks = kingdomState.get(srv);
+        var k = ks.getKingdom(kingdomId);
+        if (k != null) {
+            return name.kingdoms.entity.SoldierSkins.clamp(k.soldierSkinId);
+        }
+
+        // AI fallback from aiKingdomState
+        var ai = name.kingdoms.aiKingdomState.get(srv).getById(kingdomId);
+        if (ai != null) {
+            try {
+                return name.kingdoms.entity.SoldierSkins.clamp(ai.soldierSkinId);
+            } catch (Throwable ignored) {
+                return 0;
+            }
+        }
+
+        return 0;
+    }
+
+    private void applyBanditLoadoutFromNearestPlayer(ServerLevel level) {
+        if (!this.isBandit()) return;
+
+        Player nearestP = level.getNearestPlayer(this, 32.0);
+        ServerPlayer nearest = (nearestP instanceof ServerPlayer sp) ? sp : null;
+        int tier = 0;
+
+        if (nearest != null) {
+            tier = estimatePlayerTier(nearest);
+            // bandits slightly weaker than player on average:
+            if (tier > 0 && level.random.nextFloat() < 0.65f) tier -= 1;
+        }
+
+        // Clear armor first
+        this.setItemSlot(EquipmentSlot.HEAD, ItemStack.EMPTY);
+        this.setItemSlot(EquipmentSlot.CHEST, ItemStack.EMPTY);
+        this.setItemSlot(EquipmentSlot.LEGS, ItemStack.EMPTY);
+        this.setItemSlot(EquipmentSlot.FEET, ItemStack.EMPTY);
+
+        // Weapon + armor by tier
+        switch (tier) {
+            default -> { // tier 0
+                this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(level.random.nextBoolean() ? Items.STONE_SWORD : Items.WOODEN_AXE));
+                this.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.LEATHER_CHESTPLATE));
+                this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.LEATHER_LEGGINGS));
+            }
+            case 1 -> {
+                this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.IRON_SWORD));
+                this.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.CHAINMAIL_CHESTPLATE));
+                this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.CHAINMAIL_LEGGINGS));
+            }
+            case 2 -> {
+                this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(level.random.nextFloat() < 0.3f ? Items.IRON_AXE : Items.IRON_SWORD));
+                this.setItemSlot(EquipmentSlot.HEAD, new ItemStack(Items.IRON_HELMET));
+                this.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.IRON_CHESTPLATE));
+                this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.IRON_LEGGINGS));
+            }
+            case 3 -> {
+                this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.DIAMOND_SWORD));
+                this.setItemSlot(EquipmentSlot.HEAD, new ItemStack(Items.DIAMOND_HELMET));
+                this.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.DIAMOND_CHESTPLATE));
+                this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.DIAMOND_LEGGINGS));
+            }
+        }
+    }
+
+    // rough “how geared is the player” tier estimator
+    private static int estimatePlayerTier(ServerPlayer p) {
+        float armor = p.getArmorValue();
+        float tough = (float) p.getAttributeValue(Attributes.ARMOR_TOUGHNESS);
+
+        ItemStack main = p.getMainHandItem();
+
+        // very stable “weapon tier” heuristic
+        int weaponTier = 0;
+        if (main.is(Items.NETHERITE_SWORD) || main.is(Items.NETHERITE_AXE)) weaponTier = 3;
+        else if (main.is(Items.DIAMOND_SWORD) || main.is(Items.DIAMOND_AXE)) weaponTier = 2;
+        else if (main.is(Items.IRON_SWORD) || main.is(Items.IRON_AXE)) weaponTier = 1;
+        else weaponTier = 0;
+
+        // enchant bonus (works in 1.21.x)
+        int ench = 0;
+        try {
+           
+        } catch (Throwable ignored) {}
+
+        // score
+        float score = armor + (tough * 0.75f) + (weaponTier * 6.0f);
+
+        if (score < 14f) return 0;
+        if (score < 22f) return 1;
+        if (score < 30f) return 2;
+        return 3;
+    }
+
 
 
 

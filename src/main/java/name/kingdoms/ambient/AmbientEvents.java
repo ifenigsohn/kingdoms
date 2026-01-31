@@ -2,6 +2,8 @@ package name.kingdoms.ambient;
 
 import java.util.List;
 
+import name.kingdoms.kingdomState;
+
 public final class AmbientEvents {
     private AmbientEvents() {}
 
@@ -13,8 +15,38 @@ public final class AmbientEvents {
         return new ScriptedAmbientEvent.SpawnVariant(gate, spawns, id);
     }
 
+        // -----------------
+        // Bandit tuning (uses Kingdom.securityValue())
+        // -----------------
+        private static final double SECURITY_HIGH = 0.40; // matches your securityBand() "High"
+        private static final double SECURITY_LOW  = kingdomState.Kingdom.REQUIRED_SECURITY; // 0.30
+
+        /** True only if you're standing inside YOUR own player kingdom (not foreign). */
+        private static boolean inOwnKingdom(AmbientContext ctx) {
+        if (!ctx.inKingdom()) return false;
+        if (ctx.playerKingdom() == null || ctx.hereKingdom() == null) return false;
+        return ctx.playerKingdom().id != null && ctx.playerKingdom().id.equals(ctx.hereKingdom().id);
+        }
+
+        /** Hard rule: bandits never spawn in AI kingdoms. */
+        private static boolean inAiKingdom(AmbientContext ctx) {
+        return ctx.aiHere() != null;
+        }
+
+        private static double playerSecurity(AmbientContext ctx) {
+        var pk = ctx.playerKingdom();
+        if (pk == null) return 1.0; // no kingdom -> treat as secure so we don't spawn "inside"
+        return pk.securityValue();
+        }
+
+        private static boolean playerSecurityLow(AmbientContext ctx) {
+        var pk = ctx.playerKingdom();
+        return pk != null && pk.isSecurityLow();
+        }
+
 
     private static final List<AmbientEvent> EVENTS = List.of(
+
 
 
 // -----------------
@@ -698,6 +730,96 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
 )),
 
 new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
+                "bandit_ambush",
+                6,
+
+                // Gate
+                ctx -> {
+        if (ctx.inWarZone()) return false;
+        if (inAiKingdom(ctx)) return false;
+
+        // Never spawn in foreign kingdoms (player or AI). Only wilderness or your own.
+        if (ctx.inKingdom() && !inOwnKingdom(ctx)) return false;
+
+        // If you don't have a kingdom yet, keep bandits to wilderness only
+        if (ctx.playerKingdom() == null) return !ctx.inKingdom();
+
+        double s = playerSecurity(ctx);
+
+        // High security: only outside your kingdom
+        if (s >= SECURITY_HIGH) return !inOwnKingdom(ctx);
+
+        // Low security: can spawn inside your kingdom
+        if (playerSecurityLow(ctx) || s < SECURITY_LOW) return true;
+
+        // Mid security: outside only (tunable)
+        return !inOwnKingdom(ctx);
+        },
+
+
+        "bandit",                 // fallback role
+        "bandit_ambush",          // dialogue tag
+
+        List.of(
+                V(ctx -> !inOwnKingdom(ctx), List.of(
+                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> 3, 22, 55, false, true,  false, false, false),
+                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> 1, 22, 55, false, true,  false, false, false)
+                ), "wilderness"),
+
+                V(ctx -> inOwnKingdom(ctx) && playerSecurityLow(ctx), List.of(
+                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> 2, 18, 44, true,  false, false, false, false),
+                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> 1, 18, 44, true,  false, false, false, false)
+                ), "inside_low_security")
+
+        ),
+
+        List.of(),
+        null,
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING
+)),
+
+new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
+        "soldiers_vs_bandits",
+        4,
+
+        // Gate
+        ctx -> {
+                if (ctx.inWarZone()) return false;
+
+                // Never in YOUR player kingdom (hard rule)
+                if (inOwnKingdom(ctx)) return false;
+
+                // Allow in wilderness OR inside AI kingdom borders
+                if (!ctx.inKingdom()) return true;     // wilderness
+                return inAiKingdom(ctx);              // AI borders only
+        },
+        "soldier",
+        "soldiers_vs_bandits",
+
+        List.of(
+                // 3v3-ish
+                V(ctx -> true, List.of(
+                        new ScriptedAmbientEvent.SpawnPlan("soldier", () -> 3, 18, 44, false, true, false, false, false),
+                        new ScriptedAmbientEvent.SpawnPlan("scout",   () -> 1, 18, 44, false, true, false, false, false),
+                        new ScriptedAmbientEvent.SpawnPlan("bandit",  () -> 4, 18, 44, false, true, false, false, false)
+                ), "4v4"),
+
+                // 5v5-ish (rarer)
+                V(ctx -> ctx.level().random.nextFloat() < 0.40f, List.of(
+                        new ScriptedAmbientEvent.SpawnPlan("soldier", () -> 5, 18, 44, false, true, false, false, false),
+                        new ScriptedAmbientEvent.SpawnPlan("scout",   () -> 1, 18, 44, false, true, false, false, false),
+                        new ScriptedAmbientEvent.SpawnPlan("bandit",  () -> 6, 18, 44, false, true, false, false, false)
+                ), "6v6")
+        ),
+
+        List.of(),
+        null,
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING
+)),
+
+
+
+new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         "mill_breakdown",
         4,
         ctx -> ctx.inKingdom() && !ctx.inWarZone() && ctx.nearJobBlocks(72),
@@ -719,31 +841,122 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
 )),
 
 new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
-    "plague_cart",
-    2,
-    ctx -> ctx.inKingdom() && !ctx.inWarZone(),
-    "scholar",
-    "plague_cart",
-    List.of(
-        V(ctx -> ctx.nearWarZone(), List.of(
-            new ScriptedAmbientEvent.SpawnPlan("scholar", () -> 1, 18, 44, true, false, false, false, true),
-            new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 2, 18, 44, true, false, false, false, true)
-        ), "war_adjacent"),
-        V(ctx -> true, List.of(
-            new ScriptedAmbientEvent.SpawnPlan("scholar", () -> 1, 18, 44, true, false, false, false, true),
-            new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 1, 18, 44, true, false, false, false, true)
-        ), "default")
-    ),
-    List.of(),
-    null,
-    ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING,
-
-    
-    "cart",
-    20 * 60 * 2,  
-    6,      
-    true       
+        "plague_cart",
+        1,
+        ctx -> !ctx.inKingdom() && !ctx.inWarZone(),
+        "peasant",
+        "PLAGUE_CART",
+        List.of(
+                V(ctx -> true,
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 2, 12, 28, false, true, false, false, false)
+                        ),
+                        "default")
+        ),
+        List.of(),
+        null,
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING,
+        "plague_cart",
+        20 * 60 * 5,
+        10,
+        true
 )),
+
+new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
+        "farm_cart",
+        3,
+        ctx -> !ctx.inKingdom() && !ctx.inWarZone(),
+        "trader",
+        "FARM_CART",
+        List.of(
+                V(ctx -> true,
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("trader", () -> 1, 12, 28, false, true, false, false, false),
+                                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 1, 12, 28, false, true, false, false, false)
+                        ),
+                        "default")
+        ),
+        List.of(),
+        null,
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING,
+
+        // prop scene id (MUST match AmbientProps.Kind.fromId)
+        "farm_cart",
+        20 * 60 * 5,
+        10,
+        true
+)),
+
+new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
+        "metal_cart",
+        2,
+        ctx -> !ctx.inKingdom() && !ctx.inWarZone(),
+        "trader",
+        "METAL_CART",
+        List.of(
+                V(ctx -> true,
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("trader", () -> 1, 12, 28, false, true, false, false, false),
+                                new ScriptedAmbientEvent.SpawnPlan("guard",  () -> 1, 12, 28, false, true, false, false, false)
+                        ),
+                        "default")
+        ),
+        List.of(),
+        null,
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING,
+        "metal_cart",
+        20 * 60 * 5,
+        10,
+        true
+)),
+
+new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
+        "coal_cart",
+        2,
+        ctx -> !ctx.inKingdom() && !ctx.inWarZone(),
+        "trader",
+        "COAL_CART",
+        List.of(
+                V(ctx -> true,
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("trader", () -> 1, 12, 28, false, true, false, false, false),
+                                new ScriptedAmbientEvent.SpawnPlan("peasant", () -> 1, 12, 28, false, true, false, false, false)
+                        ),
+                        "default")
+        ),
+        List.of(),
+        null,
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING,
+        "coal_cart",
+        20 * 60 * 5,
+        10,
+        true
+)),
+
+new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
+        "gold_cart",
+        1,
+        ctx -> !ctx.inKingdom() && !ctx.inWarZone(),
+        "guard",
+        "GOLD_CART",
+        List.of(
+                V(ctx -> true,
+                        List.of(
+                                new ScriptedAmbientEvent.SpawnPlan("guard",  () -> 2, 12, 28, false, true, false, false, false),
+                                new ScriptedAmbientEvent.SpawnPlan("trader", () -> 1, 12, 28, false, true, false, false, false)
+                        ),
+                        "default")
+        ),
+        List.of(),
+        null,
+        ScriptedAmbientEvent.SpawnAnchor.PLAYER_RING,
+        "gold_cart",
+        20 * 60 * 5,
+        10,
+        true
+)),
+
+
 
 new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         "hunter_camp_tent",
