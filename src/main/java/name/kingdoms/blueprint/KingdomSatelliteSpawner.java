@@ -35,6 +35,12 @@ public final class KingdomSatelliteSpawner {
     private static final int MOUNTAIN_Y_ABOVE_SEA = 40;
     private static final int WATER_CHECK_RADIUS = 4;
 
+    // --- Y variation penalty relative to castle Y ---
+    private static final int CASTLE_Y_BAND = 30;          // +/- blocks allowed "cheaply"
+    private static final int Y_PENALTY_BASE = 80_000;     // big slap once you leave the band
+    private static final int Y_PENALTY_PER_BLOCK = 4_000; // extra per block beyond band
+
+
     private enum Pass { STRICT, RELAXED, LAST_RESORT }
 
     // --------------------
@@ -293,6 +299,9 @@ public final class KingdomSatelliteSpawner {
         String castleId = (castleBp != null ? castleBp.id : null);
 
         ArrayList<String> pool = new ArrayList<>(blueprintIds.size());
+
+        final int castleRefY = castleOrigin.getY();
+
         for (String id : blueprintIds) {
             if (id == null || id.isBlank()) continue;
 
@@ -333,7 +342,7 @@ public final class KingdomSatelliteSpawner {
         for (Pass pass : Pass.values()) {
             if (planned >= target) break;
 
-            ArrayList<Candidate> candidates = generateCandidates(level, castleOrigin, maxR, rng, pass, CANDIDATES_PER_PASS, clamp);
+           ArrayList<Candidate> candidates = generateCandidates(level, castleOrigin, castleRefY, maxR, rng, pass, CANDIDATES_PER_PASS, clamp);
             candidates.sort(Comparator.comparingInt(c -> c.score));
 
             for (Candidate c : candidates) {
@@ -456,13 +465,14 @@ public final class KingdomSatelliteSpawner {
     private record Candidate(BlockPos pos, int score) {}
 
     private static ArrayList<Candidate> generateCandidates(
-            ServerLevel level,
-            BlockPos castle,
-            int maxR,
-            RandomSource rng,
-            Pass pass,
-            int count,
-            ClampRect clamp
+        ServerLevel level,
+        BlockPos castle,
+        int castleRefY,
+        int maxR,
+        RandomSource rng,
+        Pass pass,
+        int count,
+        ClampRect clamp
     ) {
         ArrayList<Candidate> out = new ArrayList<>(count);
         int sea = level.getSeaLevel();
@@ -484,6 +494,14 @@ public final class KingdomSatelliteSpawner {
             int y = surfaceY(level, x, z);
 
             int score = 0;
+
+            // --- Penalize candidates far above/below castle Y ---
+            int dyAbs = Math.abs(y - castleRefY);
+            if (dyAbs > CASTLE_Y_BAND) {
+                int over = dyAbs - CASTLE_Y_BAND;
+                score += Y_PENALTY_BASE + over * Y_PENALTY_PER_BLOCK;
+            }
+
 
             int dx = x - castle.getX();
             int dz = z - castle.getZ();

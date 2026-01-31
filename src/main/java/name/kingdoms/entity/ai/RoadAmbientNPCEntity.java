@@ -18,6 +18,8 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ServerLevelAccessor;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.level.storage.ValueOutput;
+import net.minecraft.world.phys.Vec3;
+
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Locale;
@@ -45,6 +47,30 @@ public class RoadAmbientNPCEntity extends PathfinderMob {
         super(type, level);
         this.setPersistenceRequired();
     }
+    
+    private void bindToKingdomFromWorldIfNeeded(ServerLevel sl) {
+        // only care about military visuals
+        String t = getAiTypeId();
+        boolean military = "soldier".equals(t) || "scout".equals(t) || "guard".equals(t);
+        if (!military) return;
+
+        // already bound
+        if (getKingdomUUID() != null) return;
+
+        // infer from position
+        var ks = name.kingdoms.kingdomState.get(sl.getServer());
+        var at = ks.getKingdomAt(sl, this.blockPosition());
+        if (at == null) return;
+
+        setKingdomUUID(at.id);
+
+        // apply correct kingdom skin
+        setSkinId(militarySkinForKingdom(sl, at.id));
+
+        // rebuild name with kingdom
+        refreshNametag(sl);
+    }
+
 
     public static AttributeSupplier.Builder createAttributes() {
         return Mob.createMobAttributes()
@@ -114,12 +140,32 @@ public class RoadAmbientNPCEntity extends PathfinderMob {
     }
 
     public void refreshNametag() {
+        // client-safe fallback (no lookups)
+        String type = getAiTypeId();
+        String nm = getNpcName();
+        if (nm == null || nm.isBlank()) nm = "Aelfric";
+        String built = nm + " [" + titleForType(type) + "]";
+        this.setCustomName(Component.literal(built));
+        this.setCustomNameVisible(false);
+    }
+
+    public void refreshNametag(ServerLevel sl) {
         String type = getAiTypeId();
         String nm = getNpcName();
         if (nm == null || nm.isBlank()) nm = "Aelfric";
 
-        // Keep it simple: name + role (you can append kingdom ruler later if you want)
-        String built = nm + " [" + titleForType(type) + "]";
+        String kName = null;
+        UUID kid = getKingdomUUID();
+        if (kid != null) {
+            var ks = name.kingdoms.kingdomState.get(sl.getServer());
+            var k = ks.getKingdom(kid);
+            if (k != null && k.name != null && !k.name.isBlank()) kName = k.name;
+        }
+
+        String built = (kName != null)
+                ? (nm + " [" + kName + " " + titleForType(type) + "]")
+                : (nm + " [" + titleForType(type) + "]");
+
         this.setCustomName(Component.literal(built));
         this.setCustomNameVisible(false); // hover-only
     }
@@ -149,11 +195,17 @@ public class RoadAmbientNPCEntity extends PathfinderMob {
     }
 
     public void setTtlTicks(int ticks) { this.entityData.set(TTL, Math.max(0, ticks)); }
+    private boolean triedAutoBind = false;
 
     @Override
     public void tick() {
         super.tick();
         if (!(this.level() instanceof ServerLevel sl)) return;
+
+        if (!triedAutoBind) {
+            triedAutoBind = true;
+            bindToKingdomFromWorldIfNeeded(sl);
+        }
 
         int ttl = this.entityData.get(TTL);
         if (ttl <= 0) {
@@ -168,45 +220,45 @@ public class RoadAmbientNPCEntity extends PathfinderMob {
         this.entityData.set(TTL, ttl - 1);
     }
 
-    // --- Spawn finalize: ensure name exists + nametag built ---
+    
+    @Override
+    public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
+        Vec3 base = super.getVehicleAttachmentPoint(vehicle);
+
+        if (vehicle instanceof net.minecraft.world.entity.animal.horse.AbstractHorse) {
+                 return base.add(0.0, 0.75, 0.0);
+        }
+
+        return base;
+    }
+
     @Override
     public @Nullable SpawnGroupData finalizeSpawn(ServerLevelAccessor level, DifficultyInstance diff, EntitySpawnReason reason, @Nullable SpawnGroupData data) {
         SpawnGroupData d = super.finalizeSpawn(level, diff, reason, data);
 
-        // If spawned by command/egg/etc and still default, randomize a visual type + skin
-        UUID kid = getKingdomUUID();
-        boolean bound = (kid != null);
-
-        if (!bound && "soldier".equals(getAiTypeId()) && getSkinId() == 0) {
-            String[] types = new String[]{"peasant","villager","noble","soldier"};
-            String t = types[this.random.nextInt(types.length)];
-            setAiTypeId(t);
-
-            int maxExclusive = switch (t) {
-                case "peasant" -> 46;
-                case "villager" -> 12;
-                case "noble" -> 25;
-                case "soldier" -> 29;
-                default -> 12;
-            };
-            setSkinId(this.random.nextInt(Math.max(1, maxExclusive)));
-        }
-
         if (level instanceof ServerLevel sl) {
+            // Ensure military units always bind if possible
+            bindToKingdomFromWorldIfNeeded(sl);
+
+            // If bound (by spawner or by inference), apply correct military skin
             applyKingdomMilitarySkinIfNeeded(sl);
-        }
 
-
-        if (level instanceof ServerLevel sl) {
+            // Ensure we have a name
             if (this.entityData.get(NPC_NAME).isBlank()) {
                 this.entityData.set(NPC_NAME, namePool.randomMedieval(sl.getServer(), sl.random));
             }
-        } else {
-            if (this.entityData.get(NPC_NAME).isBlank()) this.entityData.set(NPC_NAME, "Aelfric");
+
+            // Build tag with kingdom name (server authoritative)
+            refreshNametag(sl);
+            return d;
         }
+
+        // --- client side fallback ---
+        if (this.entityData.get(NPC_NAME).isBlank()) this.entityData.set(NPC_NAME, "Aelfric");
         refreshNametag();
         return d;
     }
+
 
     @Override
     public void addAdditionalSaveData(ValueOutput out) {

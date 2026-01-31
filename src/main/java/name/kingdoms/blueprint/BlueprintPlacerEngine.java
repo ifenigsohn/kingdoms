@@ -12,6 +12,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -885,6 +886,10 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
         private static final int TREE_CLEAR_EXTRA_HEIGHT = 48;
         private static final int TREE_LEAF_CLEAR_RADIUS = 1;
 
+        private static final int TREE_CLEANUP_PASSES = 2;
+        private int treeCleanupPass = 0;
+
+
         private static final int PROTECT_SCAN_ABOVE = 20;
         private static final int PROTECT_SCAN_BELOW = 6;
 
@@ -962,6 +967,33 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
         // we do two passes so we catch both grading debris and placement debris
         private boolean itemsClearedAfterGrade = false;
         private boolean itemsClearedAfterPlace = false;
+
+        // Tree cleanup pass (runs once before grading columns) ===
+        private boolean treeCleanupDone = false;
+
+        // phases
+        private enum TreePhase { FIND_TOPLOGS, LOG_BFS, LEAF_RADIUS_CLEAR, LEAF_GROUP_PRUNE, DONE }
+        private TreePhase treePhase = TreePhase.FIND_TOPLOGS;
+
+        // scanning cursors for toplog search
+        private int treeScanX, treeScanZ;
+        private int treeScanY;
+        private int treeSurfaceY;
+        private boolean treeScanInit = false;
+
+        // BFS queues
+        private final ArrayDeque<BlockPos> logQueue = new ArrayDeque<>();
+        private final ArrayDeque<BlockPos> leafQueue = new ArrayDeque<>();
+
+        // packed-pos sets to avoid repeats
+        private final it.unimi.dsi.fastutil.longs.LongOpenHashSet removedLogs = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+        private final it.unimi.dsi.fastutil.longs.LongOpenHashSet visitedLogs = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+        private final it.unimi.dsi.fastutil.longs.LongOpenHashSet visitedLeaves = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+
+        // removed log iteration cursor for leaf radius clear
+        private long[] removedLogArray = null;
+        private int removedLogIndex = 0;
+
         
         private boolean isWorldgenTrash(ItemStack stack) {
             // Exact known offenders
@@ -999,6 +1031,45 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
             return false;
         }
 
+
+        // Treat a log as "natural trunk" even without leaves, but ONLY if it looks exposed
+        // and not near any protected build blocks (so log houses survive).
+        private boolean isLikelyBareTreeTrunk(int x, int y, int z) {
+            scratch.set(x, y, z);
+            BlockState bs = level.getBlockState(scratch);
+            if (!isLog(bs)) return false;
+
+            // If any protected build block is nearby, assume "structure" and do NOT delete.
+            final int r = 2;
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dy = -r; dy <= r; dy++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        scratch.set(x + dx, y + dy, z + dz);
+                        BlockState nb = level.getBlockState(scratch);
+                        if (isProtectedBuildBlock(nb)) return false;
+                    }
+                }
+            }
+
+            // If leaves still exist nearby, Stage0 already handles it; this is for leaf-less trunks.
+            if (hasLeavesNearby(x, y, z, 6)) return false;
+
+            // Must be part of a vertical column (trunk)
+            BlockState up = level.getBlockState(new BlockPos(x, y + 1, z));
+            BlockState down = level.getBlockState(new BlockPos(x, y - 1, z));
+            if (!(isLog(up) || isLog(down))) return false;
+
+            // Exposed test: how many horizontal neighbors are air/foliage?
+            int open = 0;
+            for (Direction d : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
+                BlockPos p = new BlockPos(x, y, z).relative(d);
+                BlockState n = level.getBlockState(p);
+                if (n.isAir() || isLeaf(n) || n.is(Blocks.VINE) || isFoliageOrSoft(n)) open++;
+            }
+
+            // If it's mostly exposed, it's probably a trunk, not an embedded beam in a house.
+            return open >= 3;
+        }
 
 
         private static final class LongArray {
@@ -1039,6 +1110,23 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
 
             return false;
         }
+
+
+        private void resetTreeCleanupState() {
+            treeScanInit = false;
+            treePhase = TreePhase.FIND_TOPLOGS;
+
+            logQueue.clear();
+            leafQueue.clear();
+
+            visitedLogs.clear();
+            visitedLeaves.clear();
+
+            removedLogs.clear();
+            removedLogArray = null;
+            removedLogIndex = 0;
+        }
+
 
 
         private static final int GRADE_SYNC_LOADS_PER_TICK = 1;
@@ -1625,6 +1713,99 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
         private boolean isLog(BlockState bs) {
             return bs.is(BlockTags.LOGS) || bs.is(BlockTags.LOGS_THAT_BURN) || isLogOrWood(bs);
         }
+
+        private static final Direction[] DIR6 = new Direction[] {
+                Direction.UP, Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST
+        };
+
+        private boolean isAir(BlockState bs) { return bs.isAir(); }
+
+        private boolean isTopLog(BlockPos pos) {
+            // must be a log
+            BlockState center = level.getBlockState(pos);
+            if (!isLog(center)) return false;
+
+            int leafCount = 0;
+            int nonLeafCount = 0;
+            Direction onlyNonLeafDir = null;
+
+            for (Direction d : DIR6) {
+                BlockPos npos = pos.relative(d);
+                BlockState ns = level.getBlockState(npos);
+                if (isLeaf(ns)) leafCount++;
+                else {
+                    nonLeafCount++;
+                    onlyNonLeafDir = d;
+                }
+                if (nonLeafCount > 1) return false;
+            }
+
+            // “surrounded on all sides but 1 by a leaf”
+            boolean leafAbove = isLeaf(level.getBlockState(pos.above()));
+            if (!(leafCount >= 4 || (leafCount >= 3 && leafAbove))) return false;
+
+            // the one non-leaf neighbor must be DOWN, and that must be a log (trunk continues)
+            if (onlyNonLeafDir != Direction.DOWN) {
+                // allow some canopy shapes where the only non-leaf is sideways but below is still log
+                BlockState below = level.getBlockState(pos.below());
+                if (!isLog(below)) return false;
+            }
+
+            BlockState below = level.getBlockState(pos.below());
+            return isLog(below);
+        }
+
+        private void enqueueNeighborLogs(BlockPos p) {
+            for (Direction d : DIR6) {
+                BlockPos n = p.relative(d);
+                long k = n.asLong();
+                if (visitedLogs.contains(k)) continue;
+                // only enqueue if it is currently a log
+                if (isLog(level.getBlockState(n))) {
+                    logQueue.add(n);
+                }
+            }
+        }
+
+        private boolean hasNonRemovedLogNearby(BlockPos pos, int r) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dy = -r; dy <= r; dy++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        scratch.set(pos.getX() + dx, pos.getY() + dy, pos.getZ() + dz);
+                        BlockState s = level.getBlockState(scratch);
+                        if (isLog(s)) {
+                            long k = scratch.asLong();
+                            if (!removedLogs.contains(k)) return true; // other log we didn't delete
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        private boolean touchesOnlyLeavesOrAir(BlockPos leafPos) {
+            for (Direction d : DIR6) {
+                BlockPos n = leafPos.relative(d);
+                BlockState ns = level.getBlockState(n);
+                if (!(isLeaf(ns) || ns.isAir())) return false;
+            }
+            return true;
+        }
+
+        private boolean groupHasAnchorOrNearbyKeptLog(List<BlockPos> group, int keptLogRadius) {
+            // Anchor rule: if any leaf in group touches a solid (non-air, non-leaf), keep it
+            // Also keep if near a non-removed log (adjacent trees)
+            for (BlockPos p : group) {
+                for (Direction d : DIR6) {
+                    BlockPos n = p.relative(d);
+                    BlockState ns = level.getBlockState(n);
+                    if (!ns.isAir() && !isLeaf(ns)) return true;
+                }
+                if (hasNonRemovedLogNearby(p, keptLogRadius)) return true;
+            }
+            return false;
+        }
+
                 
         private boolean isSoilLike(BlockState bs) {
             return bs.is(Blocks.DIRT)
@@ -1684,6 +1865,28 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
                         + " margin=" + PREP_MARGIN
                         + " bounds=(" + prepMinX + "," + prepMinZ + ")->(" + prepMaxX + "," + prepMaxZ + ")");
             }
+
+            // NEW: One-time tree cleanup pass before any column grading starts.
+            if (!treeCleanupDone) {
+                boolean done = stepTreeCleanup(Math.min(budget, 1200), deadlineNanos);
+                if (!done) return false;
+
+                treeCleanupPass++;
+
+                if (treeCleanupPass < TREE_CLEANUP_PASSES) {
+                    // Prepare for another cleanup pass
+                    resetTreeCleanupState();
+                    return false; // yield so next pass runs on next tick
+                }
+
+                treeCleanupDone = true;
+
+                // Reset grading cursors
+                scanX = prepMinX;
+                scanZ = prepMinZ;
+            }
+
+
 
             int ops = 0;
 
@@ -1782,117 +1985,16 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
                     colUnderState = safeSurfaceUnder(colX, colZ);
                     colDeepState = safeDeepFill(colX, colZ);
 
-                    // Always do tree purge first (entire graded area)
-                    colStage = -1;
-                    colY = 0;
+                    // Tree cleanup already done globally via stepTreeCleanup()
+                    colStage = 0;
                     colYInit = false;
+
                 }
 
                 while (ops < budget) {
                     if (System.nanoTime() >= deadlineNanos) return false;
-
-                    // --------------------
-                    // Stage -1: tree purge
-                    // --------------------
-            
-                    if (colStage == -1) {
-                        final int yStart = Math.max(level.getMinY(), colSurfaceY - TREE_SCAN_BELOW_SURFACE);
-                        final int yEnd   = Math.min(level.getMaxY() - 1, colSurfaceY + TREE_CLEAR_EXTRA_HEIGHT);
-
-                        // Initialize starting Y (top-down) once
-                        if (!colYInit) {
-                            colYInit = true;
-                            colY = yEnd;
-                            haloActive = false;
-                        }
-
-                        // Finished tree purge
-                        if (colY < yStart) {
-                            haloActive = false;
-                            colYInit = false; 
-                            if (!colDoTerrain) {
-                                colStage = 4;
-                                continue;
-                            }
-                            colStage = 0;
-                            colY = 0;
-                            continue;
-                        }
-
-                        // --- 1) Clear center cell (colX,colY,colZ) ---
-                        scratch.set(colX, colY, colZ);
-                        BlockState bs = level.getBlockState(scratch);
-
-                        if (isLeaf(bs) || bs.is(Blocks.VINE)) {
-                            colSawLeaves = true;
-                            level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
-                            ops++;
-                        } else if (isLog(bs)) {
-                            // inside grading rectangle: treat logs as tree junk
-                            level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
-                            ops++;
-                        } else if (isSoilLike(bs)) {
-                            // Remove floating soil
-                            scratch.set(colX, colY - 1, colZ);
-                            BlockState below = level.getBlockState(scratch);
-
-                            boolean unsupported = below.isAir() || !below.getFluidState().isEmpty()
-                                    || isLeaf(below) || below.is(Blocks.VINE);
-
-                            if (unsupported) {
-                                scratch.set(colX, colY, colZ);
-                                level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
-                                ops++;
-                            }
-                        }
-
-                        // --- 2) Halo scan around this Y (persistent across ticks) ---
-                        if (!haloActive) {
-                            haloActive = true;
-                            haloDx = -TREE_LEAF_CLEAR_RADIUS;
-                            haloDz = -TREE_LEAF_CLEAR_RADIUS;
-                        }
-
-                        int haloChecks = 0;
-                        while (haloChecks < HALO_CHECKS_PER_TICK && ops < budget) {
-                            // Finished halo for this Y
-                            if (haloDx > TREE_LEAF_CLEAR_RADIUS) {
-                                haloActive = false;
-                                break;
-                            }
-
-                            // Skip center
-                            if (!(haloDx == 0 && haloDz == 0)) {
-                                scratch.set(colX + haloDx, colY, colZ + haloDz);
-                                BlockState near = level.getBlockState(scratch);
-
-                                if (isLeaf(near) || near.is(Blocks.VINE)) {
-                                    colSawLeaves = true;
-                                    level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
-                                    ops++;
-                                }
-                            }
-
-                            // advance halo cursor
-                            haloDz++;
-                            if (haloDz > TREE_LEAF_CLEAR_RADIUS) {
-                                haloDz = -TREE_LEAF_CLEAR_RADIUS;
-                                haloDx++;
-                            }
-
-                            haloChecks++;
-                    }
-
-                    // If halo not finished yet, yield WITHOUT changing colY
-                    if (haloActive) {
-                        return false;
-                    }
-
-                    // Halo finished => now step downward exactly once
-                    colY--;
-                    continue;
-                }
-
+                
+                    
 
                         // -----------------------
                         // Stage 0: clear foliage above
@@ -1925,10 +2027,12 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
                                     ops++;
                                 }
                                 // Clear logs if they still look like tree trunk (leaves nearby)
-                                else if (isLog(bs) && hasLeavesNearby(colX, colY, colZ, LEAF_NEARBY_RADIUS)) {
+                                else if (isLog(bs) && (hasLeavesNearby(colX, colY, colZ, LEAF_NEARBY_RADIUS)
+                                        || isLikelyBareTreeTrunk(colX, colY, colZ))) {
                                     level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
                                     ops++;
                                 }
+
                             }
 
                             colY++;
@@ -2083,9 +2187,12 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
                         }
                         break;
                     }
+                  
                 }
-            }
 
+              // Safety: if colStage somehow gets invalid, bail out of this column
+                colStage = 4; 
+            }
             return false;
         }
 
@@ -2135,7 +2242,7 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
                         + " bounds=(" + prepMinX + "," + prepMinZ + ")->(" + prepMaxX + "," + prepMaxZ + ")");
             }
         }
-
+        
 
 
 
@@ -2427,5 +2534,265 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
             int hi = in.readUnsignedByte();
             return (hi << 8) | lo;
         }
+
+        private boolean stepTreeCleanup(int budget, long deadlineNanos) {
+            int ops = 0;
+
+            // init cursors once
+            if (!treeScanInit) {
+                treeScanInit = true;
+                treePhase = TreePhase.FIND_TOPLOGS;
+
+                treeScanX = prepMinX;
+                treeScanZ = prepMinZ;
+
+                removedLogArray = null;
+                removedLogIndex = 0;
+            }
+
+            while (ops < budget) {
+                if (System.nanoTime() >= deadlineNanos) return false;
+
+                // -------------------------
+                // Phase 1: FIND_TOPLOGS
+                // -------------------------
+                if (treePhase == TreePhase.FIND_TOPLOGS) {
+                    if (treeScanZ > prepMaxZ) {
+                        treePhase = TreePhase.LOG_BFS;
+                        continue;
+                    }
+
+                    int x = treeScanX;
+                    int z = treeScanZ;
+
+                    treeScanX++;
+                    if (treeScanX > prepMaxX) {
+                        treeScanX = prepMinX;
+                        treeScanZ++;
+                    }
+
+                    int cX = x >> 4, cZ = z >> 4;
+                    if (level.getChunkSource().getChunkNow(cX, cZ) == null) return false;
+
+                    // scan from canopy-ish down a bit; top logs are usually above surface
+                    treeSurfaceY = BlueprintPlacerEngine.surfaceY(level, x, z);
+                    int yEnd = Math.min(level.getMaxY() - 1, treeSurfaceY + TREE_CLEAR_EXTRA_HEIGHT);
+                    int yStart = Math.max(level.getMinY(), treeSurfaceY - 4);
+
+                    for (int y = yEnd; y >= yStart; y--) {
+                        scratch.set(x, y, z);
+                        BlockState bs = level.getBlockState(scratch);
+                        if (!isLog(bs)) continue;
+
+                        BlockPos p = scratch.immutable();
+                        if (isTopLog(p)) {
+                            long k = p.asLong();
+                            if (!visitedLogs.contains(k)) {
+                                logQueue.add(p);
+                                treePhase = TreePhase.LOG_BFS;
+                                break;
+                            }
+                        }
+                        
+                        if (hasLeavesNearby(x, y, z, 2)) {
+                            BlockState below = level.getBlockState(p.below());
+                            if (isLog(below)) {
+                                long k = p.asLong();
+                                if (!visitedLogs.contains(k)) {
+                                    logQueue.add(p);
+                                    treePhase = TreePhase.LOG_BFS;
+                                    break;
+                                }
+                            }
+                        }
+                                                
+                    }
+
+                    ops++;
+                    continue;
+                }
+
+                // -------------------------
+                // Phase 2: LOG_BFS
+                // -------------------------
+                if (treePhase == TreePhase.LOG_BFS) {
+                    if (logQueue.isEmpty()) {
+                        // done deleting logs => prep for leaf clear radius
+                        if (removedLogArray == null) {
+                            removedLogArray = removedLogs.toLongArray();
+                            removedLogIndex = 0;
+                        }
+                        treePhase = TreePhase.LEAF_RADIUS_CLEAR;
+                        continue;
+                    }
+
+                    BlockPos p = logQueue.poll();
+                    if (p == null) continue;
+
+                    long pk = p.asLong();
+                    if (visitedLogs.contains(pk)) continue;
+                    visitedLogs.add(pk);
+
+                    BlockState bs = level.getBlockState(p);
+                    if (!isLog(bs)) continue;
+
+                    // delete log
+                    level.setBlock(p, Blocks.AIR.defaultBlockState(), 2);
+                    removedLogs.add(pk);
+
+                    // enqueue connected logs
+                    enqueueNeighborLogs(p);
+
+                    ops++;
+                    continue;
+                }
+
+                // -------------------------
+                // Phase 3: LEAF_RADIUS_CLEAR
+                // -------------------------
+                if (treePhase == TreePhase.LEAF_RADIUS_CLEAR) {
+                    if (removedLogArray == null || removedLogIndex >= removedLogArray.length) {
+                        // Only prune floating leaf groups if we actually removed some logs.
+                        if (removedLogs.isEmpty()) {
+                            treePhase = TreePhase.DONE;
+                        } else {
+                            treePhase = TreePhase.LEAF_GROUP_PRUNE;
+                        }
+                        continue;
+                    }
+
+                    BlockPos logPos = BlockPos.of(removedLogArray[removedLogIndex++]);
+
+                    // delete leaves within 5 blocks of deleted logs,
+                    // but don't touch leaves that are near other non-deleted logs
+                    int r = 5;
+                    for (int dx = -r; dx <= r; dx++) {
+                        for (int dy = -r; dy <= r; dy++) {
+                            for (int dz = -r; dz <= r; dz++) {
+                                if (ops >= budget) break;
+                                if (System.nanoTime() >= deadlineNanos) return false;
+
+                                scratch.set(logPos.getX() + dx, logPos.getY() + dy, logPos.getZ() + dz);
+                                BlockState s = level.getBlockState(scratch);
+                                if (!isLeaf(s)) continue;
+
+                                // If this leaf is close to a kept (non-removed) log, skip it
+                                BlockPos leafPos = scratch.immutable();
+                                if (hasNonRemovedLogNearby(leafPos, 2)) continue;
+
+                                level.setBlock(leafPos, Blocks.AIR.defaultBlockState(), 2);
+                                ops++;
+                            }
+                        }
+                    }
+
+                    ops++;
+                    continue;
+                }
+
+                // -------------------------
+                // Phase 4: LEAF_GROUP_PRUNE
+                // -------------------------
+                if (treePhase == TreePhase.LEAF_GROUP_PRUNE) {
+                    // scan leaves in prep rect; BFS groups; remove if floating & not near kept logs
+                    if (treeScanZ > prepMaxZ) {
+                        treePhase = TreePhase.DONE;
+                        continue;
+                    }
+
+                    int x = treeScanX;
+                    int z = treeScanZ;
+
+                    treeScanX++;
+                    if (treeScanX > prepMaxX) {
+                        treeScanX = prepMinX;
+                        treeScanZ++;
+                    }
+
+                    int cX = x >> 4, cZ = z >> 4;
+                    if (level.getChunkSource().getChunkNow(cX, cZ) == null) return false;
+
+                    int y = BlueprintPlacerEngine.surfaceY(level, x, z) + 20; // canopy-ish band
+                    y = Math.min(level.getMaxY() - 1, y);
+
+                    scratch.set(x, y, z);
+                    BlockPos start = scratch.immutable();
+                    BlockState startState = level.getBlockState(start);
+                    if (!isLeaf(startState)) { ops++; continue; }
+
+                    long sk = start.asLong();
+                    if (visitedLeaves.contains(sk)) { ops++; continue; }
+
+                    // BFS this leaf group
+                    ArrayList<BlockPos> group = new ArrayList<>();
+                    leafQueue.clear();
+                    leafQueue.add(start);
+                    visitedLeaves.add(sk);
+
+                    while (!leafQueue.isEmpty() && ops < budget) {
+                        if (System.nanoTime() >= deadlineNanos) return false;
+
+                        BlockPos p = leafQueue.poll();
+                        if (p == null) continue;
+
+                        BlockState ps = level.getBlockState(p);
+                        if (!isLeaf(ps)) continue;
+
+                        // only consider "floating-style" leaves as candidates
+                        if (!touchesOnlyLeavesOrAir(p)) {
+                            // still mark as in group so we don't revisit, but it anchors => keep group
+                        }
+
+                        group.add(p);
+                        ops++;
+
+                        for (Direction d : DIR6) {
+                            BlockPos n = p.relative(d);
+                            long nk = n.asLong();
+                            if (visitedLeaves.contains(nk)) continue;
+
+                            BlockState ns = level.getBlockState(n);
+                            if (isLeaf(ns)) {
+                                visitedLeaves.add(nk);
+                                leafQueue.add(n);
+                            }
+                        }
+                    }
+
+                    // decide whether to delete this group
+                    boolean hasAnchorOrKeptLog = groupHasAnchorOrNearbyKeptLog(group, 2);
+
+                    if (!hasAnchorOrKeptLog) {
+                        // also require that the group is mostly "floating" leaves
+                        // (if you want stricter: ensure ALL are touchesOnlyLeavesOrAir)
+                        for (BlockPos p : group) {
+                            if (ops >= budget) break;
+                            if (System.nanoTime() >= deadlineNanos) return false;
+
+                            // only remove leaves that are not near kept logs
+                            if (hasNonRemovedLogNearby(p, 2)) continue;
+
+                            if (isLeaf(level.getBlockState(p))) {
+                                level.setBlock(p, Blocks.AIR.defaultBlockState(), 2);
+                                ops++;
+                            }
+                        }
+                    }
+
+                    ops++;
+                    continue;
+                }
+
+                // DONE
+                if (treePhase == TreePhase.DONE) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+
+
     }
 }

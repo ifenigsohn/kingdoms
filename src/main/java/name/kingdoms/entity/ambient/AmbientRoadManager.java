@@ -33,8 +33,8 @@ public final class AmbientRoadManager {
     private static final int TOTAL_CAP_BUFFER = 8;
     private static int TOTAL_LIVE = 0;
     private static final int TOTAL_CAP = 200; // tune for whole server
-    private static final int CAP_PER_PLAYER = 30;     // tune: max road NPCs near player
-    private static final int CAP_PLAYER_RADIUS = 35;  // tune: how far "near" means
+    private static final int CAP_PER_PLAYER = 25;     // tune: max road NPCs near player
+    private static final int CAP_PLAYER_RADIUS = 60;  // tune: how far "near" means
 
     public static void onRoadAmbientDespawn() {
         if (TOTAL_LIVE > 0) TOTAL_LIVE--;
@@ -57,10 +57,10 @@ public final class AmbientRoadManager {
         private static final Map<UUID, Long> NEXT_DUE_KINGDOM = new HashMap<>();
 
         private static final int TICKS_PER_CYCLE = 20 * 20; // 20 seconds = 400 ticks
-        private static final int CAP_PER_INFRA = 3;         // +5 road NPCs per infra point
+        private static final int CAP_PER_INFRA = 2;         // +5 road NPCs per infra point
 
         // how far we count existing road NPCs for cap checks
-        private static final int CAP_COUNT_RADIUS = 30;
+        private static final int CAP_COUNT_RADIUS = 96;
         
 
 
@@ -355,6 +355,7 @@ public final class AmbientRoadManager {
                     npc.refreshNametag();
                     npc.setTtlTicks(isDay ? (20 * 60 * 6) : (20 * 60 * 4));
                     level.addFreshEntity(npc);
+                    npc.refreshNametag(level);
                     TOTAL_LIVE++;
 
                     // Horse: only for military, and only for the first member

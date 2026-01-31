@@ -1589,6 +1589,24 @@ public final class WarBattleManager {
                     role
             ));
         }
+        // Persist ticket loss to player kingdoms too (regen will refill out of war)
+        {
+            var server = battle.level.getServer();
+            if (server != null && sourceKingdomId != null) {
+                var ai = aiKingdomState.get(server).getById(sourceKingdomId);
+                if (ai == null) { // player kingdom
+                    var ks = kingdomState.get(server);
+                    var pk = ks.getKingdom(sourceKingdomId);
+                    if (pk != null) {
+                        int max = kingdomState.computePlayerTicketsMax(pk);
+                        if (pk.ticketsAlive < 0) pk.ticketsAlive = max;
+                        pk.ticketsAlive = Math.max(0, pk.ticketsAlive - 1);
+                        ks.markDirty();
+                    }
+                }
+            }
+        }
+
 
 
     }
@@ -2351,9 +2369,15 @@ public final class WarBattleManager {
         var k = ks.getKingdom(playerKingdomId);
         if (k == null) return 0;
 
-        int garrisons = k.getActive("garrison");
-        return Math.max(0, garrisons * 50);
+        int max = kingdomState.computePlayerTicketsMax(k);
+
+        if (k.ticketsAlive < 0) k.ticketsAlive = max;
+        if (k.ticketsAlive > max) k.ticketsAlive = max;
+
+        ks.markDirty();
+        return Math.max(0, k.ticketsAlive);
     }
+
 
     @SuppressWarnings("unused")
     private static int computeAiTickets(MinecraftServer server, UUID aiKingdomId) {

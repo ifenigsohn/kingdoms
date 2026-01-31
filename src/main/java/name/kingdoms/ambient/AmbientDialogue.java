@@ -474,6 +474,99 @@ public final class AmbientDialogue {
             }
     ));
 
+    TAG_POOLS.put("bandit_ambush", Map.of(
+                // Bandits in the wild (primary)
+                "bandit:WILDERNESS", new String[]{
+                        "Coin or blood—your choice.",
+                        "Road toll’s due, friend.",
+                        "Hand it over and walk away.",
+                        "Nice gear. Be a shame to lose it.",
+                        "Drop the bag. Keep your life."
+                },
+
+                // If this ever fires inside your own kingdom (low security)
+                "bandit:OWN_KINGDOM", new String[]{
+                        "Even kings can’t watch every alley.",
+                        "Your guards are asleep. Bad luck for you.",
+                        "A fat town makes easy picking."
+                },
+
+                // Reactions
+                "peasant:WILDERNESS", new String[]{
+                        "No—please—take it and go!",
+                        "They’re here again…",
+                        "We can’t keep traveling like this."
+                },
+
+                "soldier:WILDERNESS", new String[]{
+                        "Bandits! Stand down!",
+                        "Steel out—now!",
+                        "Hold! You there—stop!"
+                },
+
+                // General ambience
+                "any:WILDERNESS", new String[]{
+                        "Footsteps behind you. Too many.",
+                        "Something’s wrong… keep moving.",
+                        "Quiet road. Bad sign."
+                },
+
+                "any", new String[]{
+                        "Don’t stop here."
+                }
+        ));
+
+        TAG_POOLS.put("soldiers_vs_bandits", Map.of(
+                // Soldier side
+                "soldier:WILDERNESS", new String[]{
+                        "Hold the line!",
+                        "Drive them off!",
+                        "Push! Push!",
+                        "Stay together!",
+                        "For the realm!"
+                },
+
+                "scout:WILDERNESS", new String[]{
+                        "Left flank—now!",
+                        "They’re circling!",
+                        "Eyes on the treeline!"
+                },
+
+                // Bandit side
+                "bandit:WILDERNESS", new String[]{
+                        "Take the shiny one first!",
+                        "They brought soldiers—fine. More loot.",
+                        "Cut them down and run!",
+                        "You can’t guard every road!",
+                        "Get their boots—then go!"
+                },
+
+                // If this happens in AI borders (tone = FOREIGN_* not OWN_KINGDOM)
+                "soldier:FOREIGN_NEUTRAL", new String[]{
+                        "Keep back! Patrol action!",
+                        "Clear the road—now!",
+                        "Not your fight. Move!"
+                },
+
+                "bandit:FOREIGN_NEUTRAL", new String[]{
+                        "This land’s no safer than the wild!",
+                        "Borders don’t scare us!",
+                        "We’ll vanish before reinforcements come!"
+                },
+
+                // General / narration vibes
+                "any:WILDERNESS", new String[]{
+                        "Steel rings out ahead.",
+                        "Shouting—then screaming.",
+                        "Someone’s fighting on the road."
+                },
+
+                "any", new String[]{
+                        "Keep your head down."
+                }
+        ));
+
+
     TAG_POOLS.put("lost_livestock", Map.of(
             "peasant:OWN_KINGDOM", new String[]{
                     "If I don’t find it, I don’t eat.",

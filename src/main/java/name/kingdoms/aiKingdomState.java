@@ -72,14 +72,18 @@ public class aiKingdomState extends SavedData {
         return;
     }
 
-        // Out of wars: slowly refill toward max
+        // tickEconomies runs every 20s => 3 calls/min => 1/3 chance per call ≈ 1/min
         if (k.aliveSoldiers < k.maxSoldiers) {
-                // “random ticks with drift”
-                if (r.nextInt(120) == 0) { // tune: bigger = slower regen
-                int gain = 1 + (r.nextInt(10) == 0 ? 1 : 0); // sometimes +2
+        if (r.nextFloat() < (1.0f / 2.0f)) {
+                int gain = 1;
+
+                // optional small variability: 10% chance of +2
+                if (r.nextFloat() < 0.10f) gain++;
+
                 k.aliveSoldiers = Math.min(k.maxSoldiers, k.aliveSoldiers + gain);
-                }
         }
+        }
+
 
         // Slight negative drift when kingdom is unstable
         if ((k.happiness < 25 || k.security < 25) && r.nextInt(300) == 0) {

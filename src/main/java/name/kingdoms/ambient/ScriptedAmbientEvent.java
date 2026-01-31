@@ -263,16 +263,17 @@ public final class ScriptedAmbientEvent implements AmbientEvent {
                 UUID kidToBind = (bindKid != null) ? bindKid : (at != null ? at.id : null);
                 if (kidToBind != null) {
                     npc.setKingdomUUID(kidToBind);
-                    npc.applyKingdomMilitarySkin();
                 }
+                
+                npc.setAmbientTtl(20 * 60 * 3);
 
                 if (placement != null && def.propSpec() != null) {
                     int r = Math.max(2, def.propSpec().loiterRadius());
                     int ttl = Math.max(20, def.propSpec().ttlTicks());
                     npc.setAmbientLoiter(npcAnchor, r, ttl);
                 }
-
-                npc.setAmbientTtl(20 * 60 * 3);
+                
+                npc.finalizeKingdomVisuals();
 
                 boolean thisNpcMounted = mountedScene && !"peasant".equals(plan.role());
 

@@ -119,6 +119,122 @@ public class Kingdoms implements ModInitializer {
         ks.markDirty();
     }
 
+    private static int playerRegenTickCounter = 0;
+
+    private static void tickPlayerTickets(MinecraftServer server) {
+        // run every 20 ticks = 1 second
+        playerRegenTickCounter++;
+        if (playerRegenTickCounter < 20) return;
+        playerRegenTickCounter = 0;
+
+        var ks = kingdomState.get(server);
+        var ws = WarState.get(server);
+
+        boolean changed = false;
+
+        for (var k : ks.getAllKingdoms()) {
+            if (k == null) continue;
+
+            // only player kingdoms (AI in kingdomState hasTerminal=false; owner is still set, but simplest is: AI exists in aiKingdomState)
+            boolean isAi = (aiKingdomState.get(server).getById(k.id) != null);
+            if (isAi) continue;
+
+            int max = kingdomState.computePlayerTicketsMax(k);
+
+            // initialize if needed
+            if (k.ticketsAlive < 0) {
+                k.ticketsAlive = max;
+                k.ticketsRegenBuf = 0.0;
+                changed = true;
+            }
+
+            // clamp down if max decreased (lost job blocks)
+            if (k.ticketsAlive > max) {
+                k.ticketsAlive = max;
+                if (k.ticketsRegenBuf > 0) k.ticketsRegenBuf = 0.0;
+                changed = true;
+            }
+
+            // no regen during war
+            if (ws.isAtWarWithAny(k.id)) continue;
+
+            // regen rate: 5 per minute = 5/60 per second
+            k.ticketsRegenBuf += (5.0 / 60.0);
+
+            int gain = (int) Math.floor(k.ticketsRegenBuf);
+            if (gain > 0 && k.ticketsAlive < max) {
+                int before = k.ticketsAlive;
+                k.ticketsAlive = Math.min(max, k.ticketsAlive + gain);
+                k.ticketsRegenBuf -= gain;
+                if (k.ticketsAlive != before) changed = true;
+            } else if (gain > 0) {
+                // if already full, don't accumulate infinite buffer
+                k.ticketsRegenBuf = 0.0;
+            }
+        }
+
+        if (changed) ks.markDirty();
+    }
+
+    private static int playerTroopTickCounter = 0;
+
+    private static void tickPlayerTroops(MinecraftServer server) {
+        // run once per second (20 ticks)
+        playerTroopTickCounter++;
+        if (playerTroopTickCounter < 20) return;
+        playerTroopTickCounter = 0;
+
+        var ks = kingdomState.get(server);
+        var ws = WarState.get(server);
+        var ai = aiKingdomState.get(server);
+
+        boolean changed = false;
+
+        for (var k : ks.getAllKingdoms()) {
+            if (k == null) continue;
+
+            // skip AI kingdoms (they have their own pool)
+            if (ai.getById(k.id) != null) continue;
+
+            int max = kingdomState.computePlayerTicketsMax(k);
+
+            // init
+            if (k.ticketsAlive < 0) {
+                k.ticketsAlive = max;
+                k.ticketsRegenBuf = 0.0;
+                changed = true;
+            }
+
+            // clamp if max shrank
+            if (k.ticketsAlive > max) {
+                k.ticketsAlive = max;
+                k.ticketsRegenBuf = 0.0;
+                changed = true;
+            }
+
+            // regen only when not at war
+            if (ws.isAtWarWithAny(k.id)) continue;
+
+            // 5 per minute = 5/60 per second
+            k.ticketsRegenBuf += (5.0 / 60.0);
+
+            int gain = (int) Math.floor(k.ticketsRegenBuf);
+            if (gain > 0) {
+                int before = k.ticketsAlive;
+                k.ticketsAlive = Math.min(max, k.ticketsAlive + gain);
+                k.ticketsRegenBuf -= gain;
+
+                // if full, don't accumulate infinite buffer
+                if (k.ticketsAlive >= max) k.ticketsRegenBuf = 0.0;
+
+                if (k.ticketsAlive != before) changed = true;
+            }
+        }
+
+        if (changed) ks.markDirty();
+    }
+
+
     private static int calendarSyncCooldown = 0;
 
     private static void tickCalendar(MinecraftServer server) {
@@ -235,11 +351,17 @@ public class Kingdoms implements ModInitializer {
         ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickCalendar);
         ServerTickEvents.END_SERVER_TICK.register(name.kingdoms.ambient.AmbientManager::tick);
         AmbientPropManager.init();
+        ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickPlayerTroops);
 
         WarPendingTicker.init();
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents.END_SERVER_TICK.register(server -> {
             WarState.get(server).tickPendingWars(server);
         });
+
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
+            WarState.get(server).tickAiWars(server);
+        });
+
 
         // Blocks/items
         modBlock.initalize();
@@ -400,7 +522,7 @@ public class Kingdoms implements ModInitializer {
             server.execute(() -> RetinueRespawnManager.onDisconnect(player));
         });
 
-
+        
 
 
         // ---- Block entity registration ----

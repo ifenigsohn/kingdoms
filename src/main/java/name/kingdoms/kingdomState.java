@@ -403,6 +403,23 @@ public class kingdomState extends SavedData {
                     ).apply(inst, RetinueData::new));
         }
 
+    private record Extras(
+            boolean royalGuardsEnabled,
+            int ticketsAlive,
+            double ticketsRegenBuf,
+            RetinueData retinue
+    ) {
+        static final Extras DEFAULT = new Extras(false, -1, 0.0, RetinueData.NONE);
+
+        static final Codec<Extras> CODEC =
+                RecordCodecBuilder.create(inst -> inst.group(
+                        Codec.BOOL.optionalFieldOf("royalGuardsEnabled", false).forGetter(Extras::royalGuardsEnabled),
+                        Codec.INT.optionalFieldOf("ticketsAlive", -1).forGetter(Extras::ticketsAlive),
+                        Codec.DOUBLE.optionalFieldOf("ticketsRegenBuf", 0.0).forGetter(Extras::ticketsRegenBuf),
+                        RetinueData.CODEC.optionalFieldOf("retinue", RetinueData.NONE).forGetter(Extras::retinue)
+                ).apply(inst, Extras::new));
+    }
+
 
 
     private static final Codec<ClaimEntry> CLAIM_ENTRY_CODEC =
@@ -542,6 +559,8 @@ public class kingdomState extends SavedData {
             return h;
         }
 
+
+
         public static final double REQUIRED_SECURITY = 0.30;
         public static final double BASE_SECURITY = 0.40;
 
@@ -596,6 +615,8 @@ public class kingdomState extends SavedData {
         
         // Royal Guard toggle (persisted)
         public boolean royalGuardsEnabled = false;
+        public int ticketsAlive = -1;     
+        public double ticketsRegenBuf = 0.0; 
 
         public static final Codec<Kingdom> CODEC =
                 RecordCodecBuilder.create(inst -> inst.group(
@@ -631,21 +652,21 @@ public class kingdomState extends SavedData {
                         Codec.BOOL.optionalFieldOf("hasTerminal", false).forGetter(k -> k.hasTerminal),
                         DIM_KEY_CODEC.optionalFieldOf("terminalDim", Level.OVERWORLD).forGetter(k -> k.terminalDim),
                         BLOCKPOS_CODEC.optionalFieldOf("terminalPos", BlockPos.ZERO).forGetter(k -> k.terminalPos),
-                        Codec.BOOL.optionalFieldOf("royalGuardsEnabled", false)
-                                .forGetter(k -> k.royalGuardsEnabled),
-                        RetinueData.CODEC.optionalFieldOf("retinue", RetinueData.NONE)
-                        .forGetter(k -> new RetinueData(
-                                k.retinueScribe == null ? NIL_UUID : k.retinueScribe,
-                                k.retinueTreasurer == null ? NIL_UUID : k.retinueTreasurer,
-                                k.retinueGeneral == null ? NIL_UUID : k.retinueGeneral
-                        ))
+                       Extras.CODEC.optionalFieldOf("extras", Extras.DEFAULT).forGetter(k -> new Extras(
+                            k.royalGuardsEnabled,
+                            k.ticketsAlive,
+                            k.ticketsRegenBuf,
+                            new RetinueData(
+                                    k.retinueScribe == null ? NIL_UUID : k.retinueScribe,
+                                    k.retinueTreasurer == null ? NIL_UUID : k.retinueTreasurer,
+                                    k.retinueGeneral == null ? NIL_UUID : k.retinueGeneral
+                            )
+                    ))
 
 
                 ).apply(inst, (id, owner, name, origin,
                                activeMap, placedMap, heraldry, soldierSkinId,
-                               eco, border,
-                               hasTerminal, terminalDim, terminalPos, royalGuardsEnabled,
-                               retinue) -> {
+                               eco, border, hasTerminal, terminalDim, terminalPos, extras) -> {
 
                     Kingdom k = new Kingdom(id, owner, name, origin);
 
@@ -666,10 +687,14 @@ public class kingdomState extends SavedData {
                     k.hasTerminal = hasTerminal;
                     k.terminalDim = terminalDim;
                     k.terminalPos = terminalPos;
+                    k.royalGuardsEnabled = (extras != null && extras.royalGuardsEnabled());
+                    k.ticketsAlive = (extras == null) ? -1 : extras.ticketsAlive();
+                    k.ticketsRegenBuf = (extras == null) ? 0.0 : extras.ticketsRegenBuf();
 
-                    k.retinueScribe = (retinue == null || NIL_UUID.equals(retinue.scribe())) ? null : retinue.scribe();
-                    k.retinueTreasurer = (retinue == null || NIL_UUID.equals(retinue.treasurer())) ? null : retinue.treasurer();
-                    k.retinueGeneral = (retinue == null || NIL_UUID.equals(retinue.general())) ? null : retinue.general();
+                    RetinueData r = (extras == null) ? RetinueData.NONE : extras.retinue();
+                    k.retinueScribe = (r == null || NIL_UUID.equals(r.scribe())) ? null : r.scribe();
+                    k.retinueTreasurer = (r == null || NIL_UUID.equals(r.treasurer())) ? null : r.treasurer();
+                    k.retinueGeneral = (r == null || NIL_UUID.equals(r.general())) ? null : r.general();
                     k.heraldry = (heraldry == null) ? ItemStack.EMPTY : heraldry;
                     k.soldierSkinId = net.minecraft.util.Mth.clamp(
                             soldierSkinId,
@@ -971,5 +996,12 @@ public class kingdomState extends SavedData {
     public UUID getKingdomIdFor(UUID playerUuid) {
     return playerKingdom.get(playerUuid); // may return null if player has no kingdom
 }
+
+        public static int computePlayerTicketsMax(kingdomState.Kingdom k) {
+            if (k == null) return 0;
+            int garrisons = k.getActive("garrison"); // matches your existing rule
+            return Math.max(0, garrisons * 50);
+        }
+
 
 }

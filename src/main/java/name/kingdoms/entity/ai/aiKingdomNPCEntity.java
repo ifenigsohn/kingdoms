@@ -296,14 +296,13 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
     public void setAmbient(boolean v) {
         this.entityData.set(IS_AMBIENT, v);
-        refreshNametag(); // so visibility rules apply
     }
 
     public void setAmbientTtl(int ticks) {
         this.entityData.set(IS_AMBIENT, true);
         this.entityData.set(AMBIENT_TTL, Math.max(0, ticks));
-        refreshNametag();
     }
+
 
     @Override
     public boolean isPushable() {
@@ -518,14 +517,6 @@ public class aiKingdomNPCEntity extends PathfinderMob {
                 this.entityData.set(NPC_NAME, "Aelfric");
             }
         }
-
-        // If this is a military ambient NPC bound to a kingdom, override skin to kingdom's soldierSkinId
-        if (this.level() instanceof ServerLevel sl) {
-            if (skinId < 0) { // only override when caller didn't force a skin
-                applyKingdomMilitarySkin();
-            }
-        }
-
 
         // --- Nametag: "<MedievalName> <JobTitle>" ---
         refreshNametag();
@@ -1039,20 +1030,28 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
 
     private void setCombatSword(boolean equip) {
-            if (this.level().isClientSide()) return;
+        if (this.level().isClientSide()) return;
 
-            if (equip) {
-                if (!equippedCombatSword) {
+        if (equip) {
+            if (!equippedCombatSword) {
+                if (!this.isBandit()) {
                     this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.IRON_SWORD));
-                    equippedCombatSword = true;
+                } else {
+                    // bandits keep assigned weapon; do nothing
                 }
-            } else {
-                if (equippedCombatSword) {
+                equippedCombatSword = true;
+            }
+        } else {
+            if (equippedCombatSword) {
+                if (!this.isBandit()) {
                     this.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
-                    equippedCombatSword = false;
                 }
+                equippedCombatSword = false;
             }
         }
+    }
+
+
 
         private boolean isEnemyPlayer(Player p) {
             if (!(this.level() instanceof ServerLevel sl)) return false;
@@ -1240,13 +1239,39 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
         Player nearestP = level.getNearestPlayer(this, 32.0);
         ServerPlayer nearest = (nearestP instanceof ServerPlayer sp) ? sp : null;
-        int tier = 0;
 
-        if (nearest != null) {
-            tier = estimatePlayerTier(nearest);
-            // bandits slightly weaker than player on average:
-            if (tier > 0 && level.random.nextFloat() < 0.65f) tier -= 1;
+        int playerTier = (nearest == null) ? 0 : bestWeaponTierInInventory(nearest);
+
+        // Clear equipment first
+        this.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+        this.setItemSlot(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
+        this.setItemSlot(EquipmentSlot.HEAD, ItemStack.EMPTY);
+        this.setItemSlot(EquipmentSlot.CHEST, ItemStack.EMPTY);
+        this.setItemSlot(EquipmentSlot.LEGS, ItemStack.EMPTY);
+        this.setItemSlot(EquipmentSlot.FEET, ItemStack.EMPTY);
+
+        // Tier 0 (no sword/axe or only wood): bandits have NO melee weapon
+        if (playerTier <= 0) {
+            // Optional: tiny chance to have a bow so they're not totally harmless
+            if (level.random.nextFloat() < 0.08f) {
+                this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.BOW));
+                this.setItemSlot(EquipmentSlot.OFFHAND, new ItemStack(Items.ARROW, 6 + level.random.nextInt(7)));
+            }
+
+            // Light “ragged” armor
+            if (level.random.nextFloat() < 0.50f) this.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.LEATHER_CHESTPLATE));
+            if (level.random.nextFloat() < 0.35f) this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.LEATHER_LEGGINGS));
+            return;
         }
+
+        // Choose bandit bracket based on playerTier:
+        // 1 (stone) => bandits = wood
+        // 2 (iron) => bandits = stone with rare iron
+        // 3 (diamond+) => bandits = iron with rare stone
+        int banditTier;
+        if (playerTier == 1) banditTier = 0;
+        else if (playerTier == 2) banditTier = 1;
+        else banditTier = 2; // playerTier 3 => iron-ish bandits
 
         // Clear armor first
         this.setItemSlot(EquipmentSlot.HEAD, ItemStack.EMPTY);
@@ -1254,32 +1279,110 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         this.setItemSlot(EquipmentSlot.LEGS, ItemStack.EMPTY);
         this.setItemSlot(EquipmentSlot.FEET, ItemStack.EMPTY);
 
-        // Weapon + armor by tier
-        switch (tier) {
-            default -> { // tier 0
-                this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(level.random.nextBoolean() ? Items.STONE_SWORD : Items.WOODEN_AXE));
+        // Decide if this bandit uses bow
+        boolean archer = level.random.nextFloat() < (playerTier >= 2 ? 0.25f : 0.15f);
+
+        if (archer) {
+            this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.BOW));
+            // Optional: a couple arrows so it feels real
+            this.setItemSlot(EquipmentSlot.OFFHAND, new ItemStack(Items.ARROW, 8 + level.random.nextInt(9)));
+        } else {
+            // Sword OR axe
+            boolean axe = level.random.nextFloat() < 0.35f;
+
+            // Pick melee weapon based on banditTier + rare roll rules
+            ItemStack weapon = switch (banditTier) {
+                case 0 -> new ItemStack(axe ? Items.WOODEN_AXE : Items.WOODEN_SWORD);
+
+                case 1 -> { // mostly stone, rare iron
+                    boolean rareIron = level.random.nextFloat() < 0.10f;
+                    yield new ItemStack(rareIron
+                            ? (axe ? Items.IRON_AXE : Items.IRON_SWORD)
+                            : (axe ? Items.STONE_AXE : Items.STONE_SWORD));
+                }
+
+                default -> { // banditTier 2: mostly iron, rare stone
+                    boolean rareStone = level.random.nextFloat() < 0.12f;
+                    yield new ItemStack(rareStone
+                            ? (axe ? Items.STONE_AXE : Items.STONE_SWORD)
+                            : (axe ? Items.IRON_AXE : Items.IRON_SWORD));
+                }
+            };
+
+            this.setItemSlot(EquipmentSlot.MAINHAND, weapon);
+            this.setItemSlot(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
+        }
+
+        // Armor to match tier
+        switch (banditTier) {
+            case 0 -> { // wood-tier bandit
                 this.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.LEATHER_CHESTPLATE));
-                this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.LEATHER_LEGGINGS));
+                if (level.random.nextFloat() < 0.50f) this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.LEATHER_LEGGINGS));
             }
-            case 1 -> {
-                this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.IRON_SWORD));
+            case 1 -> { // stone-tier bandit
                 this.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.CHAINMAIL_CHESTPLATE));
-                this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.CHAINMAIL_LEGGINGS));
+                if (level.random.nextFloat() < 0.60f) this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.LEATHER_LEGGINGS));
+                if (level.random.nextFloat() < 0.25f) this.setItemSlot(EquipmentSlot.HEAD, new ItemStack(Items.LEATHER_HELMET));
             }
-            case 2 -> {
-                this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(level.random.nextFloat() < 0.3f ? Items.IRON_AXE : Items.IRON_SWORD));
-                this.setItemSlot(EquipmentSlot.HEAD, new ItemStack(Items.IRON_HELMET));
+            default -> { // iron-tier bandit
                 this.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.IRON_CHESTPLATE));
                 this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.IRON_LEGGINGS));
-            }
-            case 3 -> {
-                this.setItemSlot(EquipmentSlot.MAINHAND, new ItemStack(Items.DIAMOND_SWORD));
-                this.setItemSlot(EquipmentSlot.HEAD, new ItemStack(Items.DIAMOND_HELMET));
-                this.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.DIAMOND_CHESTPLATE));
-                this.setItemSlot(EquipmentSlot.LEGS, new ItemStack(Items.DIAMOND_LEGGINGS));
+                if (level.random.nextFloat() < 0.40f) this.setItemSlot(EquipmentSlot.HEAD, new ItemStack(Items.IRON_HELMET));
             }
         }
     }
+
+    public void finalizeKingdomVisuals() {
+        if (!(this.level() instanceof ServerLevel sl)) {
+            refreshNametag();
+            return;
+        }
+
+        // If this is a kingdom combatant (not bandit) and bound, force kingdom soldier skin.
+        if (this.isCombatant() && !this.isBandit() && this.getKingdomUUID() != null) {
+            applyKingdomMilitarySkin();
+        }
+
+        // Rebuild tag after everything else (ambient flag + kingdom id) is final.
+        refreshNametag();
+    }
+
+    public static int bestWeaponTierInInventory(ServerPlayer p) {
+        // 0 = wood/none, 1 = stone, 2 = iron, 3 = diamond+, (netherite counts as 3)
+        int best = 0;
+
+        // Main inventory (includes hotbar)
+        var inv = p.getInventory();
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            ItemStack s = inv.getItem(i);
+            int t = weaponTier(s);
+            if (t > best) best = t;
+            if (best >= 3) return 3; // early out: diamond/netherite bracket
+        }
+
+        // Offhand counts too (optional, but nice)
+        best = Math.max(best, weaponTier(p.getOffhandItem()));
+        return Math.min(best, 3);
+    }
+
+    private static int weaponTier(ItemStack s) {
+        if (s == null || s.isEmpty()) return 0;
+
+        // Sword tiers
+        if (s.is(Items.NETHERITE_SWORD) || s.is(Items.DIAMOND_SWORD)) return 3;
+        if (s.is(Items.IRON_SWORD)) return 2;
+        if (s.is(Items.STONE_SWORD)) return 1;
+        if (s.is(Items.WOODEN_SWORD)) return 0;
+
+        // Axe tiers
+        if (s.is(Items.NETHERITE_AXE) || s.is(Items.DIAMOND_AXE)) return 3;
+        if (s.is(Items.IRON_AXE)) return 2;
+        if (s.is(Items.STONE_AXE)) return 1;
+        if (s.is(Items.WOODEN_AXE)) return 0;
+
+        return 0;
+    }
+
 
     // rough “how geared is the player” tier estimator
     private static int estimatePlayerTier(ServerPlayer p) {

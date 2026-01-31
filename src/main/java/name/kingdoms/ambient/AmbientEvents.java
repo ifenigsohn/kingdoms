@@ -1,8 +1,10 @@
 package name.kingdoms.ambient;
 
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
 import name.kingdoms.kingdomState;
+import net.minecraft.server.level.ServerPlayer;
 
 public final class AmbientEvents {
     private AmbientEvents() {}
@@ -14,6 +16,11 @@ public final class AmbientEvents {
     ) {
         return new ScriptedAmbientEvent.SpawnVariant(gate, spawns, id);
     }
+
+    private static int rint(int minInclusive, int maxInclusive) {
+        return ThreadLocalRandom.current().nextInt(minInclusive, maxInclusive + 1);
+        }
+
 
         // -----------------
         // Bandit tuning (uses Kingdom.securityValue())
@@ -44,10 +51,28 @@ public final class AmbientEvents {
         return pk != null && pk.isSecurityLow();
         }
 
+        private static int playerTierForBandits(AmbientContext ctx) {
+                if (!(ctx.player() instanceof ServerPlayer sp)) return 0;
+                // Reuse same tier logic as bandit loadout
+                return name.kingdoms.entity.ai.aiKingdomNPCEntity.bestWeaponTierInInventory(sp);
+        }
+
+                private static int banditGroupCount(AmbientContext ctx) {
+                int t = playerTierForBandits(ctx);
+                var r = ctx.level().random;
+
+                return switch (t) {
+                        case 0 -> 1 + r.nextInt(2);           // 1–2
+                        case 1 -> 1 + r.nextInt(3);           // 1–3
+                        case 2 -> 1 + r.nextInt(5);           // 1–5
+                        default -> 2 + r.nextInt(5);          // 2–6
+                };
+        }
+
 
     private static final List<AmbientEvent> EVENTS = List.of(
 
-
+        
 
 // -----------------
 // KCD (15)
@@ -761,16 +786,25 @@ new ScriptedAmbientEvent(new ScriptedAmbientEvent.Def(
         "bandit_ambush",          // dialogue tag
 
         List.of(
-                V(ctx -> !inOwnKingdom(ctx), List.of(
-                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> 3, 22, 55, false, true,  false, false, false),
-                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> 1, 22, 55, false, true,  false, false, false)
-                ), "wilderness"),
+                // tier 0 => 1–2
+                V(ctx -> playerTierForBandits(ctx) == 0, List.of(
+                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> rint(1, 2), 22, 55, false, true, false, false, false)
+                ), "t0"),
 
-                V(ctx -> inOwnKingdom(ctx) && playerSecurityLow(ctx), List.of(
-                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> 2, 18, 44, true,  false, false, false, false),
-                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> 1, 18, 44, true,  false, false, false, false)
-                ), "inside_low_security")
+                // tier 1 => 1–3
+                V(ctx -> playerTierForBandits(ctx) == 1, List.of(
+                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> rint(1, 3), 22, 55, false, true, false, false, false)
+                ), "t1"),
 
+                // tier 2 => 1–5
+                V(ctx -> playerTierForBandits(ctx) == 2, List.of(
+                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> rint(1, 5), 22, 55, false, true, false, false, false)
+                ), "t2"),
+
+                // tier 3 => 2–6
+                V(ctx -> playerTierForBandits(ctx) >= 3, List.of(
+                        new ScriptedAmbientEvent.SpawnPlan("bandit", () -> rint(2, 6), 22, 55, false, true, false, false, false)
+                ), "t3")
         ),
 
         List.of(),

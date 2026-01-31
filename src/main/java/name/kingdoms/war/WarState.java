@@ -34,7 +34,7 @@ public final class WarState extends SavedData {
     // Simulated war state for AI vs AI (morale per side)
     private final Map<String, AiWarSim> aiSim = new HashMap<>();
 
-    private record AiWarSim(double moraleA, double moraleB) {}
+    private record AiWarSim(double moraleA, double moraleB, int startA, int startB) {}
 
     private static final int AI_WAR_TICK_INTERVAL = 20 * 60 * 1; // 1 MINUTE DEBUG FOR DEV
 
@@ -672,7 +672,8 @@ public final class WarState extends SavedData {
         ));
     }
 
-    public static record AiWarSimSnap(double moraleA, double moraleB) {}
+    public static record AiWarSimSnap(double moraleA, double moraleB, int startA, int startB) {}
+
 
 
     public record WarSnapshot(
@@ -688,7 +689,7 @@ public final class WarState extends SavedData {
         Map<String, AiWarSimSnap> simCopy = new HashMap<>();
         for (var e : this.aiSim.entrySet()) {
             var v = e.getValue();
-            simCopy.put(e.getKey(), new AiWarSimSnap(v.moraleA(), v.moraleB()));
+            simCopy.put(e.getKey(), new AiWarSimSnap(v.moraleA(), v.moraleB(), v.startA(), v.startB()));
         }
         return new WarSnapshot(warsCopy, zonesCopy, simCopy);
     }
@@ -706,7 +707,7 @@ public final class WarState extends SavedData {
             if (snap.aiSim() != null) {
                 for (var e : snap.aiSim().entrySet()) {
                     var v = e.getValue();
-                    this.aiSim.put(e.getKey(), new AiWarSim(v.moraleA(), v.moraleB()));
+                    this.aiSim.put(e.getKey(), new AiWarSim(v.moraleA(), v.moraleB(), v.startA(), v.startB()));
                 }
             }
         }
@@ -801,35 +802,63 @@ public final class WarState extends SavedData {
             var aiB = aiState.getById(b);
             if (aiA == null || aiB == null) continue;
 
-            // --- simulate battle ---
-            int lossA = rng.nextInt(3, 15);
-            int lossB = rng.nextInt(3, 15);
+            // -------------------------
+            // simulate battle (tuned)
+            // Goal: morale collapses faster, casualties slower,
+            // ~40% of STARTING soldiers dead on average by morale=0
+            // -------------------------
 
             int beforeA = aiA.aliveSoldiers;
             int beforeB = aiB.aliveSoldiers;
 
+            // Load sim state (or initialize)
+            AiWarSim sim0 = aiSim.get(key);
+            if (sim0 == null) {
+                sim0 = new AiWarSim(100.0, 100.0, aiA.aliveSoldiers, aiB.aliveSoldiers);
+            }
+
+            // If older save loaded with start=0, fix it once
+            int startA = (sim0.startA() > 0) ? sim0.startA() : aiA.aliveSoldiers;
+            int startB = (sim0.startB() > 0) ? sim0.startB() : aiB.aliveSoldiers;
+
+            // Faster morale drop (was 2..10, now 8..16)
+            double dA = Mth.nextDouble(rng, 8.0, 16.0);
+            double dB = Mth.nextDouble(rng, 8.0, 16.0);
+
+            // Casualties proportional to morale drop so totals ≈ 40% when morale hits 0
+            // expectedLossThisTick ~= start * (0.40 * (d/100))
+            double baseLossA = startA * (0.40 * (dA / 100.0));
+            double baseLossB = startB * (0.40 * (dB / 100.0));
+
+            // add variability (±35%) + small integer jitter
+            double noiseA = Mth.nextDouble(rng, 0.65, 1.35);
+            double noiseB = Mth.nextDouble(rng, 0.65, 1.35);
+
+            int lossA = (int) Math.round(baseLossA * noiseA) + rng.nextInt(-1, 2);
+            int lossB = (int) Math.round(baseLossB * noiseB) + rng.nextInt(-1, 2);
+
+            // clamp: prevent weird spikes (cap ~8% of start per minute)
+            lossA = Mth.clamp(lossA, 0, Math.max(1, startA / 12));
+            lossB = Mth.clamp(lossB, 0, Math.max(1, startB / 12));
+
             aiA.aliveSoldiers = Math.max(0, aiA.aliveSoldiers - lossA);
             aiB.aliveSoldiers = Math.max(0, aiB.aliveSoldiers - lossB);
 
-             if (aiA.aliveSoldiers != beforeA || aiB.aliveSoldiers != beforeB) {
-                changed = true; // NEW
+            if (aiA.aliveSoldiers != beforeA || aiB.aliveSoldiers != beforeB) {
+                changed = true;
             }
 
-            // morale
-            AiWarSim sim = aiSim.get(key);
-            if (sim == null) sim = new AiWarSim(100.0, 100.0);
+            // apply morale
+            double moraleA = Math.max(0.0, sim0.moraleA() - dA);
+            double moraleB = Math.max(0.0, sim0.moraleB() - dB);
 
-            double dA = Mth.nextDouble(rng, 2, 10.0);
-            double dB = Mth.nextDouble(rng, 2, 10.0);
-
-            double moraleA = Math.max(0.0, sim.moraleA() - dA);
-            double moraleB = Math.max(0.0, sim.moraleB() - dB);
-
-            AiWarSim newSim = new AiWarSim(moraleA, moraleB);
-            if (!newSim.equals(sim)) {
-                aiSim.put(key, newSim);
-                changed = true; // NEW
+            // store updated sim
+            AiWarSim sim1 = new AiWarSim(moraleA, moraleB, startA, startB);
+            if (!sim1.equals(sim0)) {
+                aiSim.put(key, sim1);
+                changed = true;
             }
+
 
             // surrender logic (make it exclusive; peace ends the war)
             boolean aSurrenders = (aiA.aliveSoldiers <= 0) || (moraleA <= 0.0);
@@ -1140,10 +1169,14 @@ public final class WarState extends SavedData {
 
 
     private static final Codec<AiWarSim> AI_SIM_CODEC =
-        RecordCodecBuilder.create(inst -> inst.group(
-                Codec.DOUBLE.optionalFieldOf("moraleA", 100.0).forGetter(AiWarSim::moraleA),
-                Codec.DOUBLE.optionalFieldOf("moraleB", 100.0).forGetter(AiWarSim::moraleB)
-        ).apply(inst, AiWarSim::new));
+    RecordCodecBuilder.create(inst -> inst.group(
+            Codec.DOUBLE.optionalFieldOf("moraleA", 100.0).forGetter(AiWarSim::moraleA),
+            Codec.DOUBLE.optionalFieldOf("moraleB", 100.0).forGetter(AiWarSim::moraleB),
+
+            // NEW: starting soldier counts (optional for backwards compatibility)
+            Codec.INT.optionalFieldOf("startA", 0).forGetter(AiWarSim::startA),
+            Codec.INT.optionalFieldOf("startB", 0).forGetter(AiWarSim::startB)
+            ).apply(inst, AiWarSim::new));
 
     private static final Codec<Map<String, AiWarSim>> AI_SIM_MAP_CODEC =
             Codec.unboundedMap(Codec.STRING, AI_SIM_CODEC);

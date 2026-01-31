@@ -2207,9 +2207,9 @@ public final class networkInit {
 
         // player kingdom estimate (garrisons*50)
         if (k != null) {
-            int garrisons = k.active.getOrDefault("garrison", 0);
-            int max = Math.max(0, garrisons * 50);
-            int alive = max;
+            int max = kingdomState.computePlayerTicketsMax(k);
+            int alive = (k.ticketsAlive < 0) ? max : Math.min(k.ticketsAlive, max);
+
             return new name.kingdoms.payload.warOverviewSyncS2CPayload.Entry(kingdomId, name, alive, max);
         }
 
@@ -2226,8 +2226,8 @@ public final class networkInit {
         var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
 
         int garrisons = pk.active.getOrDefault("garrison", 0);
-        int yourMax = Math.max(0, garrisons * 50);
-        int yourAlive = yourMax;
+        int yourMax = kingdomState.computePlayerTicketsMax(pk);
+        int yourAlive = (pk.ticketsAlive < 0) ? yourMax : Math.min(pk.ticketsAlive, yourMax);
 
         double potions = pk.potions;
         int soldierSkinId = pk.soldierSkinId;
