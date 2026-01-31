@@ -389,21 +389,18 @@ public final class AmbientProps {
             default -> { halfX = 4; halfZ = 4; }
         }
 
-        // how flat do we require + how we choose the flat plane
-        int maxVariation = 4;            // your rule
-        int flatY = centerGround.getY(); // flatten to the sampled center ground level
+       // how flat do we require + how we choose the flat plane
+        int maxVariation = 4; // your rule
 
         Map<BlockPos, BlockState> terrainPatch =
-           AmbientPropUtil.buildTerrainGradePatch(level, centerGround, halfX, halfZ, maxVariation, flatY);
+                AmbientPropUtil.buildTerrainGradePatch(level, centerGround, halfX, halfZ, maxVariation, airHeight);
 
-        if (terrainPatch != null && !terrainPatch.isEmpty()) {
+        // null means "reject placement" (too uneven / fluids / block entities / etc.)
+        if (terrainPatch == null) return null;
+
+        if (!terrainPatch.isEmpty()) {
             System.out.println("[AmbientProps] grading edits=" + terrainPatch.size()
                     + " kind=" + kind + " center=" + centerGround);
-        }
-    
-
-        if (terrainPatch != null && !terrainPatch.isEmpty()) {
-            return null;
         }
 
         // Now build the prop blocks as usual

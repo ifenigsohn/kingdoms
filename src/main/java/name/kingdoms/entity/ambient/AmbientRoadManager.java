@@ -28,11 +28,23 @@ public final class AmbientRoadManager {
     private static final int SPAWN_RING_MIN = 18;
     private static final int SPAWN_RING_MAX = 34;
 
+    // total cap (global) to prevent runaway population
+    private static final int TOTAL_CAP_PER_LEVEL = 200; 
+    private static final int TOTAL_CAP_BUFFER = 8;
+    private static int TOTAL_LIVE = 0;
+    private static final int TOTAL_CAP = 200; // tune for whole server
+    private static final int CAP_PER_PLAYER = 30;     // tune: max road NPCs near player
+    private static final int CAP_PLAYER_RADIUS = 35;  // tune: how far "near" means
+
+    public static void onRoadAmbientDespawn() {
+        if (TOTAL_LIVE > 0) TOTAL_LIVE--;
+    }
+
     private static final float HORSE_CHANCE = 0.18f;
 
     // day vs night pacing
-    private static final int DAY_MIN_COOLDOWN = 20 * 3;   // 3s
-    private static final int DAY_MAX_COOLDOWN = 20 * 10;  // 10s
+    private static final int DAY_MIN_COOLDOWN = 20 * 5;   // 5s
+    private static final int DAY_MAX_COOLDOWN = 20 * 30;  // 30s
     private static final int NIGHT_MIN_COOLDOWN = 20 * 40; // 40s
     private static final int NIGHT_MAX_COOLDOWN = 20 * 80; // 80s
 
@@ -45,10 +57,12 @@ public final class AmbientRoadManager {
         private static final Map<UUID, Long> NEXT_DUE_KINGDOM = new HashMap<>();
 
         private static final int TICKS_PER_CYCLE = 20 * 20; // 20 seconds = 400 ticks
-        private static final int CAP_PER_INFRA = 5;         // +5 road NPCs per infra point
+        private static final int CAP_PER_INFRA = 3;         // +5 road NPCs per infra point
 
         // how far we count existing road NPCs for cap checks
-        private static final int CAP_COUNT_RADIUS = 96;
+        private static final int CAP_COUNT_RADIUS = 30;
+        
+
 
         // Key used by AIkingdomNPCSpawnerBlock
         private static final String ROAD_AMBIENT_INFRA_KEY = "road_ambient_infra";
@@ -130,6 +144,15 @@ public final class AmbientRoadManager {
         return Math.max(0, infraPoints * CAP_PER_INFRA);
     }
 
+    private static int countRoadAmbientTotal(ServerLevel level) {
+        // This scans loaded entities only (cheap enough at 20s cycles).
+        return level.getEntitiesOfClass(RoadAmbientNPCEntity.class, new AABB(
+                Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY,
+                Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY
+        ), e -> e != null && e.isAlive()).size();
+    }
+
+
     private static int countRoadAmbientNear(ServerLevel level, BlockPos center, int radius, UUID kingdomId) {
         AABB box = new AABB(
                 center.getX() - radius, center.getY() - radius, center.getZ() - radius,
@@ -143,6 +166,23 @@ public final class AmbientRoadManager {
         }).size();
     }
 
+    private static int countRoadAmbientNearPlayer(ServerLevel level, BlockPos center, int radius, UUID kingdomId) {
+        AABB box = new AABB(
+                center.getX() - radius, center.getY() - 16, center.getZ() - radius,
+                center.getX() + radius + 1, center.getY() + 16, center.getZ() + radius + 1
+        );
+
+        return level.getEntitiesOfClass(RoadAmbientNPCEntity.class, box, e -> {
+            if (e == null || !e.isAlive()) return false;
+            if (kingdomId != null) {
+                UUID ek = e.getKingdomUUID();
+                if (ek == null || !kingdomId.equals(ek)) return false;
+            }
+            return true;
+        }).size();
+    }
+
+
 
     private static boolean isMilitaryVisual(String type) {
         return "soldier".equals(type) || "guard".equals(type) || "scout".equals(type);
@@ -150,6 +190,7 @@ public final class AmbientRoadManager {
 
     public static void tick(MinecraftServer server) {
         long now = server.getTickCount();
+        if (TOTAL_LIVE >= TOTAL_CAP) return;
 
         var ks = kingdomState.get(server);
         var war = WarState.get(server);
@@ -204,6 +245,11 @@ public final class AmbientRoadManager {
             int existing = countRoadAmbientNear(level, playerPos, CAP_COUNT_RADIUS, kid);
             if (existing >= cap) continue;
 
+            // Per-player density cap (prevents crowding near the rep player)
+            int nearPlayer = countRoadAmbientNearPlayer(level, playerPos, CAP_PLAYER_RADIUS, kid);
+            if (nearPlayer >= CAP_PER_PLAYER) continue;
+
+
             // We get "infra" group attempts this cycle
             int groupAttempts = infra;
 
@@ -211,6 +257,9 @@ public final class AmbientRoadManager {
                 // Re-check cap as we add NPCs
                 existing = countRoadAmbientNear(level, playerPos, CAP_COUNT_RADIUS, kid);
                 if (existing >= cap) break;
+                if (TOTAL_LIVE >= TOTAL_CAP) break;
+                nearPlayer = countRoadAmbientNearPlayer(level, playerPos, CAP_PLAYER_RADIUS, kid);
+                if (nearPlayer >= CAP_PER_PLAYER) break;
 
                 // day/night
                 long time = level.getDayTime() % 24000L;
@@ -254,6 +303,11 @@ public final class AmbientRoadManager {
                     // Stop if we're at cap mid-group
                     existing = countRoadAmbientNear(level, playerPos, CAP_COUNT_RADIUS, kid);
                     if (existing >= cap) break;
+                    if (TOTAL_LIVE >= TOTAL_CAP) break;
+
+                    nearPlayer = countRoadAmbientNearPlayer(level, playerPos, CAP_PLAYER_RADIUS, kid);
+                    if (nearPlayer >= CAP_PER_PLAYER) break;
+
 
                     BlockPos candidate = leaderFeet.offset(
                             level.random.nextInt(GROUP_CLUSTER_R * 2 + 1) - GROUP_CLUSTER_R,
@@ -301,6 +355,7 @@ public final class AmbientRoadManager {
                     npc.refreshNametag();
                     npc.setTtlTicks(isDay ? (20 * 60 * 6) : (20 * 60 * 4));
                     level.addFreshEntity(npc);
+                    TOTAL_LIVE++;
 
                     // Horse: only for military, and only for the first member
                     if (military && gi == 0 && level.random.nextFloat() < HORSE_CHANCE) {

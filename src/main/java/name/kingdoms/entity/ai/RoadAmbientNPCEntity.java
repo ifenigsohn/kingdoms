@@ -77,7 +77,7 @@ public class RoadAmbientNPCEntity extends PathfinderMob {
         b.define(SKIN_ID, 0);
         b.define(NPC_NAME, "");
         b.define(KINGDOM_UUID, "");
-        b.define(TTL, 20 * 60 * 6); // default 6 minutes
+        b.define(TTL, 20 * 60 * 2); // default 2 minutes
     }
 
     // --- Nametag hover-only ---
