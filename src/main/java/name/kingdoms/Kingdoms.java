@@ -510,17 +510,45 @@ public class Kingdoms implements ModInitializer {
                 kingdomWorkerEntity.createAttributes()
         );
 
+        // init the respawn manager once entity type exists
         RetinueRespawnManager.init(KINGDOM_WORKER_ENTITY_TYPE);
 
+        // Hook join/quit so retinue is maintained without needing a block interaction
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             ServerPlayer player = handler.player;
-            server.execute(() -> RetinueRespawnManager.onJoin(player));
+            if (!(player.level() instanceof ServerLevel sl)) return;
+
+            // If you want the respawn manager effects/timers to work
+            RetinueRespawnManager.onJoin(player);
+
+            // THIS is the critical fix: ensure retinue on join
+            var ks = kingdomState.get(server);
+            var k = ks.getPlayerKingdom(player.getUUID());
+            if (k != null && RetinueRespawnManager.isEnabled(player.getUUID())) {
+                RetinueSpawner.ensureRetinue(sl, player, k);
+                ks.markDirty();
+            }
         });
 
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             ServerPlayer player = handler.player;
-            server.execute(() -> RetinueRespawnManager.onDisconnect(player));
+
+            // Optional: if you intentionally despawn on disconnect
+            RetinueRespawnManager.onDisconnect(player);
+
+            // IMPORTANT: clear stored UUIDs so you don't keep pointing at dead entities
+            if (player.level() instanceof ServerLevel sl) {
+                var ks = kingdomState.get(server);
+                var k = ks.getPlayerKingdom(player.getUUID());
+                if (k != null) {
+                    k.retinueScribe = null;
+                    k.retinueTreasurer = null;
+                    k.retinueGeneral = null;
+                    ks.markDirty();
+                }
+            }
         });
+
 
         
 

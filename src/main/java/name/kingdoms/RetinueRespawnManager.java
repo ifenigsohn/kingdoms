@@ -17,6 +17,11 @@ import java.util.*;
 import net.minecraft.network.chat.Component;
 
 public final class RetinueRespawnManager {
+
+    // Teleport smoothing (prevents jitter when player moves/teleports)
+    private static final int TELEPORT_COOLDOWN_TICKS = 40; // 2 seconds
+    private static final Map<UUID, Long> LAST_TELEPORT_TICK = new HashMap<>();
+
     private static final Logger LOGGER = LogUtils.getLogger();
 
     private static final int RESPAWN_TICKS = 20 * 120; // 2 minutes
@@ -234,9 +239,18 @@ public final class RetinueRespawnManager {
                 // If far away -> teleport near owner (NO speed gating)
                 double d2 = ent.distanceToSqr(ownerPlayer);
                 if (d2 > (RECALL_DISTANCE * RECALL_DISTANCE)) {
-                    ent.getNavigation().stop();
-                    ent.teleportTo(ownerPlayer.getX() + 1.5, ownerPlayer.getY(), ownerPlayer.getZ() + 1.5);
+                    long last = LAST_TELEPORT_TICK.getOrDefault(ent.getUUID(), -999999L);
+                    if ((now - last) >= TELEPORT_COOLDOWN_TICKS) {
+                        ent.getNavigation().stop();
+
+                        // pick a safe nearby landing spot instead of raw owner coords
+                        BlockPos safe = pickSafeRetinueSpawnPos(sl, ownerPlayer, ent);
+                        ent.teleportTo(safe.getX() + 0.5, safe.getY(), safe.getZ() + 0.5);
+
+                        LAST_TELEPORT_TICK.put(ent.getUUID(), now);
+                    }
                 }
+
                 continue;
             }
 
@@ -448,6 +462,7 @@ public final class RetinueRespawnManager {
                 rememberOwned(owner, w.getJobId(), w.getSkinId(), prettyNameFromJob(w.getJobId()));
 
                 try { w.forceDespawnRetinueHorse(sl); } catch (Throwable ignored) {}
+                LAST_TELEPORT_TICK.remove(w.getUUID());
                 w.discard();
             }
 

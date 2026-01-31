@@ -2315,7 +2315,8 @@ public final class WarBattleManager {
         boolean playerWon = (winner == Side.FRIEND);
 
         WarState ws = WarState.get(server);
-        ws.makePeaceWithAllies(server, battle.friendRootKingdomId, battle.enemyRootKingdomId);
+        ws.makePeace(battle.friendRootKingdomId, battle.enemyRootKingdomId);
+
 
 
        

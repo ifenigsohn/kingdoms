@@ -138,6 +138,12 @@ public class kingdomWorkerEntity extends PathfinderMob {
     private int panicTicks = 0;
     private long lastTaxDay = -1;
 
+    // Retinue emergency teleport tuning
+    private static final int RETINUE_EMERGENCY_TP_RADIUS = 90;      // should be >= FollowOwnerGoal range
+    private static final int RETINUE_TP_COOLDOWN_TICKS = 40;        // 2 seconds
+    private long lastRetinueTeleportTick = -999999L;
+
+
     // -----------------------
     // Retinue horse mount state
     // -----------------------
@@ -482,6 +488,48 @@ public class kingdomWorkerEntity extends PathfinderMob {
         return false;
     }
 
+    private BlockPos pickSafeTeleportNearOwner(ServerLevel level, ServerPlayer owner) {
+        BlockPos base = owner.blockPosition();
+
+        // Try a bunch of offsets around owner
+        for (int attempt = 0; attempt < 32; attempt++) {
+            double ang = level.random.nextDouble() * Math.PI * 2.0;
+            double r = 1.5 + level.random.nextDouble() * 5.0; // 1.5..6.5
+
+            int dx = (int) Math.round(Math.cos(ang) * r);
+            int dz = (int) Math.round(Math.sin(ang) * r);
+
+            BlockPos p = base.offset(dx, 0, dz);
+
+            for (int dy = 2; dy >= -2; dy--) {
+                BlockPos feet = p.offset(0, dy, 0);
+                BlockPos head = feet.above();
+                BlockPos below = feet.below();
+
+                // avoid fluids
+                if (!level.getFluidState(feet).isEmpty()) continue;
+                if (!level.getFluidState(head).isEmpty()) continue;
+
+                // need space for feet/head
+                if (!level.getBlockState(feet).getCollisionShape(level, feet).isEmpty()) continue;
+                if (!level.getBlockState(head).getCollisionShape(level, head).isEmpty()) continue;
+
+                // need support below
+                if (level.getBlockState(below).getCollisionShape(level, below).isEmpty()) continue;
+
+                // full bbox collision check
+                this.setPos(feet.getX() + 0.5, feet.getY(), feet.getZ() + 0.5);
+                if (!level.noCollision(this)) continue;
+
+                return feet;
+            }
+        }
+
+        // fallback: next to owner
+        return base.offset(1, 0, 1);
+    }
+
+
     private boolean canTeleportToOwner(ServerPlayer owner) {
         // Disallow creative flight / spectator-style flying
         if (owner.getAbilities().flying) return false;
@@ -725,15 +773,29 @@ public class kingdomWorkerEntity extends PathfinderMob {
                 return; // still skip worker logic
             }
 
-            // (Optional) any owner-based retinue teleport logic can stay here
-            // e.g. hard teleport if too far:
+           // If owner is in a different dimension, don't try to teleport to their XYZ.
+            // Let the respawn manager handle restoring near the owner.
+            if (owner.level() != sl) {
+                if (retinueHorseUuid != null) {
+                    forceDespawnRetinueHorse(sl);
+                }
+                // Prevent a stranded copy from lingering in the old dimension
+                this.discard();
+                return;
+            }
+
+            // Emergency teleport (entity-side backup) with cooldown + safe landing
             double d2 = this.distanceToSqr(owner);
-            if (d2 > (HARD_TELEPORT_RADIUS * HARD_TELEPORT_RADIUS)) {
-                if (canTeleportToOwner(owner)) {
+            if (d2 > (RETINUE_EMERGENCY_TP_RADIUS * RETINUE_EMERGENCY_TP_RADIUS)) {
+                long now = sl.getGameTime();
+                if (canTeleportToOwner(owner) && (now - lastRetinueTeleportTick) >= RETINUE_TP_COOLDOWN_TICKS) {
                     this.getNavigation().stop();
-                    this.teleportTo(owner.getX() + 1.0, owner.getY(), owner.getZ() + 1.0);
+                    BlockPos safe = pickSafeTeleportNearOwner(sl, owner);
+                    this.teleportTo(safe.getX() + 0.5, safe.getY(), safe.getZ() + 0.5);
+                    lastRetinueTeleportTick = now;
                 }
             }
+
 
             return; // IMPORTANT: don't run home/job logic while retinue
         }
