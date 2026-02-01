@@ -2,6 +2,7 @@ package name.kingdoms.diplomacy;
 
 import name.kingdoms.aiKingdomState;
 import name.kingdoms.kingdomState;
+import name.kingdoms.pressure.PressureUtil;
 import name.kingdoms.war.WarState;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -94,7 +95,9 @@ public final class DiplomacyPlayerSendRules {
         if (toIsAi) {
             // Relation gates (player<->target kingdom)
             var relState = DiplomacyRelationsState.get(server);
-            int rel = relState.getRelation(player.getUUID(), toK.id);
+            int baseRel = relState.getRelation(player.getUUID(), toK.id);
+            int rel = PressureUtil.effectiveRelation(server, baseRel, toK.id);
+
 
             // Deal: rel > -40
             if (isDealKind(kind)) {

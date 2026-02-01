@@ -137,6 +137,29 @@ public class kingdomState extends SavedData {
         var pk = ks.getPlayerKingdom(playerId);
         return hasAnyGarrison(pk);
     }
+
+    public double happinessWithPressure(MinecraftServer server, Kingdom k) {
+        if (k == null) return 0.0;
+        double base = k.happiness();
+        long now = server.getTickCount();
+        var mods = name.kingdoms.pressure.KingdomPressureState.get(server).getMods(k.id, now);
+        double h = base + mods.happinessDelta();
+        if (h < 0) h = 0;
+        if (h > 10) h = 10;
+        return h;
+    }
+
+    public double securityValueWithPressure(MinecraftServer server, Kingdom k) {
+        if (k == null) return 0.0;
+        double base = k.securityValue();
+        long now = server.getTickCount();
+        var mods = name.kingdoms.pressure.KingdomPressureState.get(server).getMods(k.id, now);
+        double s = base + mods.securityDelta();
+        if (s < 0) s = 0;
+        if (s > 1) s = 1;
+        return s;
+    }
+
         
 
 

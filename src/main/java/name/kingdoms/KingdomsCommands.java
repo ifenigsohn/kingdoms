@@ -27,6 +27,8 @@ import name.kingdoms.diplomacy.AiEconomyMutator;
 import name.kingdoms.diplomacy.AiRelationNormalizer;
 import name.kingdoms.diplomacy.AllianceState;
 import name.kingdoms.news.KingdomNewsState;
+import name.kingdoms.pressure.KingdomPressureState;
+import name.kingdoms.pressure.PressureCatalog;
 import name.kingdoms.war.BattleZone;
 import name.kingdoms.war.WarState;
 import name.kingdoms.sim.SimRunWriter;
@@ -96,6 +98,103 @@ public final class KingdomsCommands {
 
 
     private static void register(CommandDispatcher<CommandSourceStack> d) {
+        
+        
+        d.register(
+                Commands.literal("kingdom_event")
+                        .then(Commands.argument("typeId", StringArgumentType.word())
+                        .executes(ctx -> {
+                                ServerPlayer p = ctx.getSource().getPlayerOrException();
+                                var server = ctx.getSource().getServer();
+
+                                var ks = kingdomState.get(server);
+                                var pk = ks.getPlayerKingdom(p.getUUID());
+                                if (pk == null) {
+                                ctx.getSource().sendFailure(Component.literal("You are not in a kingdom."));
+                                return 0;
+                                }
+
+                                String typeId = StringArgumentType.getString(ctx, "typeId");
+                                long now = server.getTickCount();
+
+                                PressureCatalog.Template tpl = switch (typeId) {
+                                case "push_production" -> PressureCatalog.PUSH_PRODUCTION();
+                                case "ease_workload" -> PressureCatalog.EASE_WORKLOAD();
+                                case "increase_patrols" -> PressureCatalog.INCREASE_PATROLS();
+                                case "sow_discontent" -> PressureCatalog.SOW_DISCONTENT();
+                                default -> null;
+                                };
+
+                                if (tpl == null) {
+                                ctx.getSource().sendFailure(Component.literal("Unknown template: " + typeId));
+                                return 0;
+                                }
+
+                                KingdomPressureState.get(server).addEvent(
+                                pk.id, pk.id,
+                                tpl.typeId(),
+                                tpl.effects(),
+                                KingdomPressureState.RelScope.GLOBAL,
+                                now,
+                                tpl.durationTicks()
+                                );
+
+                                ctx.getSource().sendSuccess(() -> Component.literal("Applied event: " + tpl.typeId()), false);
+                                return 1;
+                        })
+                        .then(Commands.argument("minutes", IntegerArgumentType.integer(1, 120))
+                                .executes(ctx -> {
+                                ServerPlayer p = ctx.getSource().getPlayerOrException();
+                                var server = ctx.getSource().getServer();
+
+                                var ks = kingdomState.get(server);
+                                var pk = ks.getPlayerKingdom(p.getUUID());
+                                if (pk == null) {
+                                        ctx.getSource().sendFailure(Component.literal("You are not in a kingdom."));
+                                        return 0;
+                                }
+
+                                String typeId = StringArgumentType.getString(ctx, "typeId");
+                                int minutes = IntegerArgumentType.getInteger(ctx, "minutes");
+                                long duration = minutes * PressureCatalog.MINUTE;
+
+                                PressureCatalog.Template tpl = switch (typeId) {
+                                        case "push_production" -> PressureCatalog.PUSH_PRODUCTION();
+                                        case "ease_workload" -> PressureCatalog.EASE_WORKLOAD();
+                                        case "increase_patrols" -> PressureCatalog.INCREASE_PATROLS();
+                                        case "sow_discontent" -> PressureCatalog.SOW_DISCONTENT();
+                                        default -> null;
+                                };
+
+                                if (tpl == null) {
+                                        ctx.getSource().sendFailure(Component.literal("Unknown template: " + typeId));
+                                        return 0;
+                                }
+
+                                long now = server.getTickCount();
+
+                                KingdomPressureState.get(server).addEvent(
+                                        pk.id, pk.id,
+                                        tpl.typeId(),
+                                        tpl.effects(),
+                                        KingdomPressureState.RelScope.GLOBAL,
+                                        now,
+                                        duration
+                                );
+
+                                ctx.getSource().sendSuccess(() -> Component.literal("Applied event: " + tpl.typeId() + " for " + minutes + "m"), false);
+                                return 1;
+                                })
+                        )
+                        )
+                );
+
+        
+        
+        
+        
+        
+        
         d.register(Commands.literal("kingdoms")
                 .requires(src -> src.hasPermission(2)) // OP only
                 .then(Commands.literal("listai")
@@ -115,6 +214,8 @@ public final class KingdomsCommands {
                                 .executes(ctx -> worldgenToggle(ctx.getSource()))
                         )
                 )
+
+                
 
                 .then(Commands.literal("tpai")
                         .then(Commands.argument("name", StringArgumentType.greedyString())

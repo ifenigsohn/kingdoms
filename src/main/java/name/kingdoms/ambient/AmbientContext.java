@@ -7,7 +7,7 @@ import name.kingdoms.kingdomState;
 import name.kingdoms.war.WarState;
 import name.kingdoms.diplomacy.AllianceState;
 import name.kingdoms.diplomacy.DiplomacyRelationsState;
-
+import name.kingdoms.pressure.PressureUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -108,8 +108,13 @@ public record AmbientContext(
 
         if (here != null && pk != null && !here.id.equals(pk.id)) {
             alliedHere = AllianceState.get(server).isAllied(pk.id, here.id);
-            relationHere = DiplomacyRelationsState.get(server).getRelation(player.getUUID(), here.id);
+
+            int baseRel = DiplomacyRelationsState.get(server).getRelation(player.getUUID(), here.id);
+            UUID fromId = (pk == null) ? null : pk.id; // player's kingdom id, used for pair-scoped pressure if enabled
+            relationHere = PressureUtil.effectiveRelation(server, baseRel, fromId, here.id);
+
         }
+
         if (here != null) {
             aiHere = aiKingdomState.get(server).getById(here.id);
         }

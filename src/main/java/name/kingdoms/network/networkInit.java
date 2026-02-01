@@ -17,6 +17,7 @@ import name.kingdoms.kingdomState.Kingdom;
 import name.kingdoms.modItem;
 import name.kingdoms.payload.CreateKingdomPayload;
 import name.kingdoms.payload.OpenTreasuryS2CPayload;
+import name.kingdoms.payload.WorkerActionC2SPayload;
 import name.kingdoms.payload.aiTradeInfoS2CPayload;
 import name.kingdoms.payload.aiTradeQueryC2SPayload;
 import name.kingdoms.payload.bordersRequestPayload;
@@ -44,6 +45,9 @@ import name.kingdoms.payload.treasuryOpenResultPayload;
 import name.kingdoms.payload.treasuryShopSyncPayload;
 import name.kingdoms.payload.warCommandCycleGroupC2SPayload;
 import name.kingdoms.payload.warCommandMoveOrderC2SPayload;
+import name.kingdoms.pressure.KingdomPressureState;
+import name.kingdoms.pressure.PressureCatalog;
+import name.kingdoms.pressure.PressureUtil;
 import name.kingdoms.war.WarBattleManager;
 import name.kingdoms.payload.mailActionC2SPayload;
 import name.kingdoms.payload.mailInboxRequestC2SPayload;
@@ -111,6 +115,9 @@ public final class networkInit {
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.toggleRetinueC2SPayload.TYPE,name.kingdoms.payload.toggleRetinueC2SPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.inPersonProposalSendC2SPayload.TYPE,name.kingdoms.payload.inPersonProposalSendC2SPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.requestProposalC2SPayload.TYPE,name.kingdoms.payload.requestProposalC2SPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.WorkerActionC2SPayload.TYPE, name.kingdoms.payload.WorkerActionC2SPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.KingdomEventsRequestC2SPayload.TYPE,name.kingdoms.payload.KingdomEventsRequestC2SPayload.STREAM_CODEC);
+
 
         // ----- S2C -----
         PayloadTypeRegistry.playS2C().register(aiTradeInfoS2CPayload.TYPE, aiTradeInfoS2CPayload.CODEC);
@@ -138,6 +145,9 @@ public final class networkInit {
         PayloadTypeRegistry.playS2C().register(mailPolicySyncS2CPayload.TYPE, mailPolicySyncS2CPayload.STREAM_CODEC);
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.newsSyncS2CPayload.TYPE,name.kingdoms.payload.newsSyncS2CPayload.STREAM_CODEC);
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.calendarSyncPayload.TYPE,name.kingdoms.payload.calendarSyncPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.OpenWorkerActionsS2CPayload.TYPE, name.kingdoms.payload.OpenWorkerActionsS2CPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.KingdomEventsSyncS2CPayload.TYPE,name.kingdoms.payload.KingdomEventsSyncS2CPayload.STREAM_CODEC);
+
     }
 
     public static void registerServerReceivers() {
@@ -156,6 +166,21 @@ public final class networkInit {
                 name.kingdoms.entity.RoyalGuardManager.setEnabled(player, k.royalGuardsEnabled);
             });
         });
+
+        ServerPlayNetworking.registerGlobalReceiver(
+            name.kingdoms.payload.WorkerActionC2SPayload.TYPE,
+            (payload, ctx) -> ctx.server().execute(() ->
+                name.kingdoms.pressure.WorkerActionHandler.handle(ctx.server(), ctx.player(), payload)
+            )
+        );
+
+        ServerPlayNetworking.registerGlobalReceiver(
+            name.kingdoms.payload.KingdomEventsRequestC2SPayload.TYPE,
+            (payload, ctx) -> ctx.server().execute(() ->
+                name.kingdoms.pressure.KingdomEventsNet.sendMyKingdomEvents(ctx.server(), ctx.player())
+            )
+        );
+
 
         ServerPlayNetworking.registerGlobalReceiver(
             name.kingdoms.payload.toggleRetinueC2SPayload.TYPE,
@@ -286,7 +311,9 @@ public final class networkInit {
 
                     // relation (you already use this elsewhere)
                     var relState = name.kingdoms.diplomacy.DiplomacyRelationsState.get(server);
-                    int relation = relState.getRelation(player.getUUID(), k.id);
+                    int baseRel = relState.getRelation(player.getUUID(), k.id);
+                    int relation = PressureUtil.effectiveRelation(server, baseRel, k.id);
+
 
                     // soldiers + tickets
                     int soldiersAlive = 0, soldiersMax = 0;
@@ -296,6 +323,8 @@ public final class networkInit {
                     if (aiK != null) {
                         soldiersAlive = Math.max(0, aiK.aliveSoldiers);
                         soldiersMax   = Math.max(0, aiK.maxSoldiers);
+
+                        name.kingdoms.pressure.KingdomPressureState.get(server).markKnownAi(k.id);
 
                         // Tickets: if you don’t have AI tickets yet, mirror soldiers for now.
                         ticketsMax = soldiersMax;
@@ -1089,7 +1118,9 @@ public final class networkInit {
                     String kName = (k.name == null || k.name.isBlank()) ? "Kingdom" : k.name;
                     String nm = kName + " (" + ownerOnline.getName().getString() + ")";
 
-                    int rel = relState.getRelation(player.getUUID(), k.id);
+                    int baseRel = relState.getRelation(player.getUUID(), k.id);
+                    int rel = PressureUtil.effectiveRelation(server, baseRel, k.id);
+
 
                     // only used for AI heads (keep 0 for players)
                     int headSkinId = 0;
@@ -1115,6 +1146,9 @@ public final class networkInit {
                     UUID id = aiK.id;
                     if (id == null) continue;
 
+                    name.kingdoms.pressure.KingdomPressureState.get(server).markKnownAi(id);
+
+
                     // skip duplicates if already added via ks loop
                     if (seen.contains(id)) continue;
 
@@ -1123,7 +1157,9 @@ public final class networkInit {
 
                     String nm = (aiK.name == null || aiK.name.isBlank()) ? "Unknown" : aiK.name;
 
-                    int rel = relState.getRelation(player.getUUID(), id);
+                    int baseRel = relState.getRelation(player.getUUID(), id);
+                    int rel = PressureUtil.effectiveRelation(server, baseRel, id);
+
 
                     int headSkinId = Mth.clamp(aiK.skinId, 0, kingSkinPoolState.MAX_SKIN_ID);
 
@@ -1810,7 +1846,7 @@ public final class networkInit {
                 }
 
                 if (k == null) ServerPlayNetworking.send(player, ecoSyncPayload.zeros());
-                else ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(k));
+                else ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(ctx.server(), k));
             });
         });
 
@@ -1853,7 +1889,7 @@ public final class networkInit {
                 // IMPORTANT: resolve by BLOCK POSITION, not player UUID
                 var k = ks.getKingdomAt(level, pos);
 
-                if (k != null) ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(k));
+                if (k != null) ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(ctx.server(), k));
                 else ServerPlayNetworking.send(player, ecoSyncPayload.zeros());
             });
         });
@@ -2458,6 +2494,8 @@ public final class networkInit {
             long rem = sec % 60;
             return (rem == 0) ? (min + "m") : (min + "m " + rem + "s");
         }
+
+        
 
 
     // -------------------------

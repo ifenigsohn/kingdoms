@@ -7,6 +7,7 @@ import name.kingdoms.namePool;
 import name.kingdoms.entity.ai.FindBedAtNightGoalAI;
 import name.kingdoms.entity.ai.ReturnHomeDayGoalAI;
 import name.kingdoms.payload.opendiplomacyS2CPayload;
+import name.kingdoms.pressure.PressureUtil;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
@@ -352,21 +353,26 @@ private int ambientAnchorRadius = 0;
 
         ServerLevel sl = (ServerLevel) this.level();
 
-        // relations now come from DiplomacyRelationsState (server-wide)
-        int rel = name.kingdoms.diplomacy.DiplomacyRelationsState
-                .get(sl.getServer())
-                .getRelation(sp.getUUID(), this.getUUID());
-
         // Ensure this king has an AI kingdom entry (creates it if missing)
         aiKingdomState ai = aiKingdomState.get(sl.getServer());
-        ai.getOrCreateForKing(sl, this);
+        aiKingdomState.AiKingdom aiK = ai.getOrCreateForKing(sl, this);
 
-        UUID kingdomId = this.getUUID();
+        // IMPORTANT: diplomacy targets the KINGDOM ID, not the entity UUID
+        UUID kingdomId = (aiK != null) ? aiK.id : this.getUUID();
+        name.kingdoms.pressure.KingdomPressureState.get(sl.getServer()).markKnownAi(kingdomId);
+
+
+        // base relation from player -> kingdom
+        var relState = name.kingdoms.diplomacy.DiplomacyRelationsState.get(sl.getServer());
+        int baseRel = relState.getRelation(sp.getUUID(), kingdomId);
+
+        // effective relation for UI/evals
+        int rel = PressureUtil.effectiveRelation(sl.getServer(), baseRel, kingdomId);
 
         ServerPlayNetworking.send(sp, new opendiplomacyS2CPayload(
                 this.getId(),
-                this.getUUID(),
-                kingdomId,
+                this.getUUID(),   // entity UUID (for client lookup / portrait)
+                kingdomId,        // kingdom UUID (for diplomacy targeting)
                 getKingName(),
                 rel
         ));

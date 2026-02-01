@@ -18,6 +18,15 @@ import net.minecraft.world.entity.EntityType;
 
 public final class WarOverviewScreen extends Screen {
 
+    private enum Tab { WAR, EVENTS }
+    private Tab tab = Tab.WAR;
+
+    private Button warTabBtn;
+    private Button eventsTabBtn;
+
+    private java.util.List<name.kingdoms.payload.KingdomEventsSyncS2CPayload.Entry> activeEvents = java.util.List.of();
+
+
     private final warOverviewSyncS2CPayload data;
 
     private Button royalToggleBtn;
@@ -27,6 +36,11 @@ public final class WarOverviewScreen extends Screen {
     private Button skinNextBtn;
     private Button skinApplyBtn;
     private int selectedSoldierSkinId;
+
+    public void onEventsSync(name.kingdoms.payload.KingdomEventsSyncS2CPayload payload) {
+        this.activeEvents = (payload == null || payload.events() == null) ? java.util.List.of() : payload.events();
+    }
+
 
     // 3D preview
     private name.kingdoms.entity.SoldierEntity previewSoldier;
@@ -39,6 +53,22 @@ public final class WarOverviewScreen extends Screen {
     @Override
     protected void init() {
         super.init();
+
+        int x0 = 20;
+        int y0 = 6;
+
+        warTabBtn = Button.builder(Component.literal("War"), b -> {
+            tab = Tab.WAR;
+        }).bounds(x0, y0, 60, 18).build();
+
+        eventsTabBtn = Button.builder(Component.literal("Events"), b -> {
+            tab = Tab.EVENTS;
+            ClientPlayNetworking.send(new name.kingdoms.payload.KingdomEventsRequestC2SPayload());
+        }).bounds(x0 + 66, y0, 70, 18).build();
+
+        addRenderableWidget(warTabBtn);
+        addRenderableWidget(eventsTabBtn);
+
 
         selectedSoldierSkinId = data.soldierSkinId();
 
@@ -118,6 +148,9 @@ public final class WarOverviewScreen extends Screen {
         this.addRenderableWidget(skinPrevBtn);
         this.addRenderableWidget(skinApplyBtn);
         this.addRenderableWidget(skinNextBtn);
+
+        ClientPlayNetworking.send(new name.kingdoms.payload.KingdomEventsRequestC2SPayload());
+
     }
 
     private void buildPreviewSoldier() {
@@ -157,6 +190,12 @@ public final class WarOverviewScreen extends Screen {
 
         this.renderTransparentBackground(g);
         
+        if (tab == Tab.EVENTS) {
+            renderEventsTab(g, mouseX, mouseY, partialTick);
+            super.render(g, mouseX, mouseY, partialTick);
+            return;
+        }
+
 
         int colW = Math.min(this.width - 20, 360);
         int x = (this.width - colW) / 2;
@@ -255,4 +294,45 @@ public final class WarOverviewScreen extends Screen {
     public boolean isPauseScreen() {
         return false;
     }
+
+    private void renderEventsTab(GuiGraphics g, int mouseX, int mouseY, float pt) {
+        int x = 20;
+        int y = 30;
+
+        g.drawString(this.font, "Active Kingdom Events", x, y, 0xFFFFFFFF);
+        y += 16;
+
+        if (activeEvents == null || activeEvents.isEmpty()) {
+            g.drawString(this.font, "None.", x, y, 0xFFCCCCCC);
+            return;
+        }
+
+        int maxLines = 14;
+        int lines = 0;
+
+        for (var e : activeEvents) {
+            if (e == null) continue;
+            if (lines >= maxLines) break;
+
+            String name = e.typeId();
+            int secs = e.secondsRemaining();
+            String time = (secs >= 60) ? ((secs / 60) + "m") : (secs + "s");
+
+            // compact effect summary
+            String eff =
+                    "econ x" + String.format(java.util.Locale.US, "%.2f", e.econMult())
+                            + " hap " + String.format(java.util.Locale.US, "%+.1f", e.happinessDelta())
+                            + " sec " + String.format(java.util.Locale.US, "%+.2f", e.securityDelta())
+                            + " rel " + (e.relationsDelta() >= 0 ? "+" : "") + e.relationsDelta();
+
+            g.drawString(this.font, name + " (" + time + ")", x, y, 0xFFFFFFFF);
+            y += 10;
+            g.drawString(this.font, "  " + eff + " [" + e.scope() + "]", x, y, 0xFFAAAAAA);
+            y += 12;
+            lines++;
+        }
+
+        g.drawString(this.font, "(Refresh: click Events tab again)", x, this.height - 16, 0xFF777777);
+    }
+
 }

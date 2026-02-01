@@ -344,8 +344,10 @@ public final class AiDiplomacyTicker {
                 if (fromAi == null || toAi == null) continue;
 
                 // Recipient perspective: recipient is "decider"
-                int relBefore = net.minecraft.util.Mth.clamp(aiRel.get(fromId, toId), -100, 100);
+                int baseRel = aiRel.get(fromId, toId);
+                int relBefore = name.kingdoms.pressure.PressureUtil.effectiveRelation(server, baseRel, toId);
                 int rel = relBefore;
+
                 String execOutcome = null; // set only if something actually executes
 
                 boolean alliedNow = alliance.isAllied(fromId, toId);
@@ -812,20 +814,17 @@ public final class AiDiplomacyTicker {
                     }
 
                     // event capture (REL BEFORE/AFTER)
-                    int relAfter = aiRel.get(fromId, toId);
-                    int relDelta = relAfter - relBefore;
+                    int relAfterBase = aiRel.get(fromId, toId);
+                    int relAfterEff  = name.kingdoms.pressure.PressureUtil.effectiveRelation(server, relAfterBase, toId);
+                    int relDeltaEff  = relAfterEff - relBefore;
+
 
                     if (events != null) {
                         events.add(new SimDiploEvent(
-                                nowTick,
-                                kind,
-                                fromId,
-                                toId,
-                                execOutcome,
-                                relBefore,
-                                relAfter,
-                                relDelta
+                            nowTick, kind, fromId, toId, execOutcome,
+                            relBefore, relAfterEff, relDeltaEff
                         ));
+
                     }
 
                     // limit bursts

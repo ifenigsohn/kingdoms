@@ -1,7 +1,7 @@
 {
   "variants": {
     "": {
-      "model": "kingdoms:block/fish_block"
+      "model": "kingdoms:block/fishbarrel"
     }
   }
 }

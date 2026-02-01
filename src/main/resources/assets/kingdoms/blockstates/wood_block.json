@@ -1,7 +1,7 @@
 {
   "variants": {
     "": {
-      "model": "kingdoms:block/wood_block"
+      "model": "kingdoms:block/woodstump"
     }
   }
 }

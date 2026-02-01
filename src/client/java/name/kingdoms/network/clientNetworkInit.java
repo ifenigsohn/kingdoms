@@ -14,8 +14,10 @@ import name.kingdoms.client.ClientMailRecipientsCache;
 import name.kingdoms.client.KingdomTransitionHUD;
 import name.kingdoms.client.diploScreen;
 import name.kingdoms.menu.diploMenu;
+import name.kingdoms.payload.KingdomEventsSyncS2CPayload;
 import name.kingdoms.payload.OpenMailS2CPayload;
 import name.kingdoms.payload.OpenTreasuryS2CPayload;
+import name.kingdoms.payload.OpenWorkerActionsS2CPayload;
 import name.kingdoms.payload.aiTradeInfoS2CPayload;
 import name.kingdoms.payload.bordersSyncPayload;
 import name.kingdoms.payload.createKingdomResultPayload;
@@ -40,6 +42,7 @@ import name.kingdoms.payload.warZonesSyncPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.core.BlockPos;
 import name.kingdoms.client.ScribeLines;
+import name.kingdoms.client.WorkerActionsScreen;
 
 public final class clientNetworkInit {
     private clientNetworkInit() {}
@@ -296,6 +299,20 @@ public final class clientNetworkInit {
                 // if the mail screen is open, refresh it immediately (optional but nice)
                 if (ctx.client().screen instanceof name.kingdoms.client.mailScreen ms) {
                     ms.requestPolicyForSelectedRecipientPublic(); // optional (you already have this method)
+                }
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(OpenWorkerActionsS2CPayload.TYPE, (payload, ctx) -> {
+            ctx.client().execute(() -> {
+                Minecraft.getInstance().setScreen(new WorkerActionsScreen(payload));
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(KingdomEventsSyncS2CPayload.TYPE, (payload, ctx) -> {
+            ctx.client().execute(() -> {
+                if (Minecraft.getInstance().screen instanceof name.kingdoms.client.WarOverviewScreen s) {
+                    s.onEventsSync(payload);
                 }
             });
         });

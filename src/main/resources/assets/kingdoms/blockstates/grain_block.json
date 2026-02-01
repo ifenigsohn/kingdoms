@@ -1,7 +1,7 @@
 {
   "variants": {
     "": {
-      "model": "kingdoms:block/grain_block"
+      "model": "kingdoms:block/grainfarm"
     }
   }
 }

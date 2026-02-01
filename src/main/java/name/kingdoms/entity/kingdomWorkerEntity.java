@@ -47,6 +47,13 @@ import net.minecraft.world.entity.monster.Creeper;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.EntitySpawnReason;
 
+import java.util.List;
+import java.util.ArrayList;
+
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import name.kingdoms.payload.OpenWorkerActionsS2CPayload;
+
+
 import java.util.UUID;
 
 public class kingdomWorkerEntity extends PathfinderMob {
@@ -283,6 +290,35 @@ public class kingdomWorkerEntity extends PathfinderMob {
         });
     }
 
+    public boolean tryPayTaxTo(ServerLevel sl, ServerPlayer sp, kingdomState.Kingdom kingdom) {
+        if (sl == null || sp == null || kingdom == null) return false;
+
+        // Only the KING can collect (owner)
+        if (kingdom.owner == null || !sp.getUUID().equals(kingdom.owner)) {
+            return false;
+        }
+
+        long today = sl.getDayTime() / 24000L;
+
+        // If we've already collected today, they can't pay again.
+        if (lastTaxDay == today) {
+            sp.sendSystemMessage(name.kingdoms.KingdomTaxTables.rollPayLine(this.getRandom(), ItemStack.EMPTY));
+            return false;
+        }
+
+        // Otherwise, they can pay now.
+        String job = this.getJobId();
+        ItemStack tax = name.kingdoms.KingdomTaxTables.rollTax(job, this.getRandom());
+
+        boolean added = sp.getInventory().add(tax.copy());
+        if (!added) dropStack(sl, tax.copy());
+
+        lastTaxDay = today;
+
+        sp.sendSystemMessage(name.kingdoms.KingdomTaxTables.rollNoPayLine(this.getRandom()));
+        return true;
+    }
+
 
     @Override
     protected void defineSynchedData(SynchedEntityData.Builder builder) {
@@ -376,15 +412,15 @@ public class kingdomWorkerEntity extends PathfinderMob {
         
 
         // -------------------------
-        // NON-RETINUE: TAX COLLECTION
+        // NON-RETINUE: OPEN ACTION UI
         // -------------------------
         UUID workerKingdomId = this.getKingdomUUID();
         if (workerKingdomId == null) {
             var ks2 = kingdomState.get(sl.getServer());
-            var at = ks2.getKingdomAt(sl, this.blockPosition()); // uses claims grid
+            var at = ks2.getKingdomAt(sl, this.blockPosition());
             if (at != null) {
                 workerKingdomId = at.id;
-                this.setKingdomUUID(workerKingdomId); // heal the entity
+                this.setKingdomUUID(workerKingdomId);
             } else {
                 sp.sendSystemMessage(Component.literal("This worker is not assigned to a kingdom."));
                 return InteractionResult.CONSUME;
@@ -392,40 +428,57 @@ public class kingdomWorkerEntity extends PathfinderMob {
         }
 
         var ks = kingdomState.get(sl.getServer());
-        var kingdom = ks.getKingdom(workerKingdomId);
-        if (kingdom == null) {
+        var workerKingdom = ks.getKingdom(workerKingdomId);
+        if (workerKingdom == null) {
             sp.sendSystemMessage(Component.literal("This worker's kingdom no longer exists."));
             return InteractionResult.CONSUME;
         }
 
-        // Only the KING can collect (owner)
-        if (!sp.getUUID().equals(kingdom.owner)) {
+        // Only the king of THIS kingdom can manage actions/taxes
+        boolean isOwner = (workerKingdom.owner != null && workerKingdom.owner.equals(sp.getUUID()));
+        if (!isOwner) {
             return InteractionResult.PASS;
         }
 
+        // Decide if TAX is available today
         long today = sl.getDayTime() / 24000L;
+        boolean canTax = (lastTaxDay != today);
 
-        // If we've already collected today, they can't pay again.
-        if (lastTaxDay == today) {
-            sp.sendSystemMessage(name.kingdoms.KingdomTaxTables.rollPayLine(this.getRandom(), ItemStack.EMPTY));
-            return InteractionResult.CONSUME;
+        // Build action list based on job type
+        List<String> actionIds = new ArrayList<>();
+        String job = this.getJobId();
+
+        // Workers: economy/happiness levers
+        if ("farmer".equals(job) || "blacksmith".equals(job) || "fisherman".equals(job)
+                || "woodcutter".equals(job) || "miner".equals(job) || "trader".equals(job)
+                || "unknown".equals(job)) {
+            actionIds.add("PUSH_PRODUCTION");
+            actionIds.add("EASE_WORKLOAD");
         }
 
-        // Otherwise, they can pay now.
-        String job = this.getJobId();
-        ItemStack tax = name.kingdoms.KingdomTaxTables.rollTax(job, this.getRandom());
+        // Guards/soldiers: security lever
+        if ("guard".equals(job) || "soldier".equals(job)) {
+            actionIds.add("INCREASE_PATROLS");
+        }
 
-        boolean added = sp.getInventory().add(tax.copy());
-        if (!added) dropStack(sl, tax.copy());
+        // Retinue buttons are false here (non-retinue)
+        ServerPlayNetworking.send(sp, new OpenWorkerActionsS2CPayload(
+                this.getId(),
+                this.getUUID(),
+                workerKingdomId,
+                job,
+                false,
+                canTax,
+                false,
+                false,
+                false,
+                actionIds
+        ));
 
-        lastTaxDay = today;
-
-        sp.sendSystemMessage(name.kingdoms.KingdomTaxTables.rollNoPayLine(this.getRandom()));
         return InteractionResult.CONSUME;
 
+
     }
-
-
     
 
     // -----------------------

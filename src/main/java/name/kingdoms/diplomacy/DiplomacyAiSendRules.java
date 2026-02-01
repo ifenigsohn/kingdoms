@@ -56,7 +56,9 @@ public final class DiplomacyAiSendRules {
         }
 
         // Relation gates (AI↔AI)
-        int rel = AiRelationsState.get(server).get(fromAiId, toAiId);
+        int baseRel = AiRelationsState.get(server).get(fromAiId, toAiId);
+        int rel = name.kingdoms.pressure.PressureUtil.effectiveRelation(server, baseRel, toAiId);
+
 
         // Keep the same gates you want for AI diplomacy:
         if (isDealKind(kind)) {

@@ -5,6 +5,7 @@ import name.kingdoms.kingdomState;
 import name.kingdoms.network.serverMail;
 import name.kingdoms.network.networkInit;
 import name.kingdoms.payload.ecoSyncPayload;
+import name.kingdoms.pressure.PressureUtil;
 import name.kingdoms.news.KingdomNewsState;
 
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
@@ -244,7 +245,9 @@ public final class DiplomacyResponseQueue {
             // -----------------------------
             // Get relation + personality
             // -----------------------------
-            int rel = relState.getRelation(p.playerId, p.aiId);
+            int baseRel = relState.getRelation(p.playerId, p.aiId);
+            int rel = PressureUtil.effectiveRelation(server, baseRel, p.aiId);
+
             var pers = aiK.personality;
 
             // -----------------------------

@@ -28,8 +28,10 @@ public final class WarState extends SavedData {
 
     // battle zone per war pair (key is same min|max)
     private final Map<String, BattleZone> zones = new HashMap<>();
-    
+    private final Map<String, BattleZone> siegeZones = new HashMap<>();
     private final Map<String, String> pairToRoot = new HashMap<>();
+
+    
 
     // Simulated war state for AI vs AI (morale per side)
     private final Map<String, AiWarSim> aiSim = new HashMap<>();
@@ -1156,6 +1158,10 @@ public final class WarState extends SavedData {
 
     private static final Codec<Map<String, BattleZone>> ZONES_CODEC =
             Codec.unboundedMap(Codec.STRING, BattleZone.CODEC);
+
+    private static final Codec<Map<String, BattleZone>> SIEGE_ZONES_CODEC =
+            Codec.unboundedMap(Codec.STRING, BattleZone.CODEC);
+
 
     private static final Codec<PendingRootWar> PENDING_ROOT_CODEC =
         RecordCodecBuilder.create(inst -> inst.group(

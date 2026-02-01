@@ -115,7 +115,7 @@ public class Kingdoms implements ModInitializer {
         ecoTickCounter = 0;
 
         var ks = kingdomState.get(server);
-        for (var k : ks.getAllKingdoms()) applyEconomyStep(k, 10.0);
+        for (var k : ks.getAllKingdoms()) applyEconomyStep(server, k, 10.0);
         ks.markDirty();
     }
 
@@ -301,24 +301,28 @@ public class Kingdoms implements ModInitializer {
         }
     }
 
-    private static void applyEconomyStep(kingdomState.Kingdom k, double seconds) {
+    private static void applyEconomyStep(MinecraftServer server, kingdomState.Kingdom k, double seconds) {
         var eco = name.kingdoms.payload.ecoSyncPayload.fromKingdomWithProjected(k);
 
-        k.gold    += eco.dGold()    * seconds;
-        k.meat    += eco.dMeat()    * seconds;
-        k.grain   += eco.dGrain()   * seconds;
-        k.fish    += eco.dFish()    * seconds;
+        long now = server.getTickCount();
+        var mods = name.kingdoms.pressure.KingdomPressureState.get(server).getMods(k.id, now);
+        double m = mods.economyMult();
 
-        k.wood    += eco.dWood()    * seconds;
-        k.metal   += eco.dMetal()   * seconds;
-        k.armor   += eco.dArmor()   * seconds;
-        k.weapons += eco.dWeapons() * seconds;
+        k.gold    += eco.dGold()    * seconds * m;
+        k.meat    += eco.dMeat()    * seconds * m;
+        k.grain   += eco.dGrain()   * seconds * m;
+        k.fish    += eco.dFish()    * seconds * m;
 
-        k.gems    += eco.dGems()    * seconds;
-        k.horses  += eco.dHorses()  * seconds;
-        k.potions += eco.dPotions() * seconds;
+        k.wood    += eco.dWood()    * seconds * m;
+        k.metal   += eco.dMetal()   * seconds * m;
+        k.armor   += eco.dArmor()   * seconds * m;
+        k.weapons += eco.dWeapons() * seconds * m;
 
-        // optional clamp
+        k.gems    += eco.dGems()    * seconds * m;
+        k.horses  += eco.dHorses()  * seconds * m;
+        k.potions += eco.dPotions() * seconds * m;
+
+        // clamps
         k.gold = Math.max(0, k.gold);
         k.meat = Math.max(0, k.meat);
         k.grain = Math.max(0, k.grain);
@@ -331,6 +335,8 @@ public class Kingdoms implements ModInitializer {
         k.horses = Math.max(0, k.horses);
         k.potions = Math.max(0, k.potions);
     }
+
+
 
     @Override
     public void onInitialize() {
@@ -415,6 +421,13 @@ public class Kingdoms implements ModInitializer {
        ServerTickEvents.END_SERVER_TICK.register(server -> {
         name.kingdoms.entity.ambient.AmbientRoadManager.tick(server);
     });
+
+    ServerTickEvents.END_SERVER_TICK.register(server -> {
+        long t = server.getTickCount();
+        if (t % 20 != 0) return; // once per second
+        name.kingdoms.pressure.KingdomPressureState.get(server).tick(t);
+    });
+
 
 
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {

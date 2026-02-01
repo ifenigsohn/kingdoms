@@ -3,7 +3,7 @@ package name.kingdoms.diplomacy;
 import name.kingdoms.aiKingdomState;
 import name.kingdoms.kingdomState;
 import name.kingdoms.network.serverMail;
-
+import name.kingdoms.pressure.PressureUtil;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -278,7 +278,9 @@ public final class DiplomacyMailGenerator {
                 aiKingdomState.AiKingdom aiK = ai.getById(from.id);
                 if (aiK == null) continue;
 
-                int rel = relState.getRelation(player.getUUID(), from.id);
+                int baseRel = relState.getRelation(player.getUUID(), from.id);
+                int rel = PressureUtil.effectiveRelation(server, baseRel, from.id);
+
                 
                 boolean atWar = warState.isAtWar(playerKingdom.id, from.id);
                 boolean allied = alliance.isAllied(playerKingdom.id, from.id);
@@ -588,7 +590,9 @@ public final class DiplomacyMailGenerator {
         // Use relations + personality policy here too
         // Use relations + personality policy here too
         DiplomacyRelationsState relState = DiplomacyRelationsState.get(server);
-        int rel = relState.getRelation(toPlayer, fromAiId);
+        int baseRel = relState.getRelation(toPlayer, fromAiId);
+        int rel = PressureUtil.effectiveRelation(server, baseRel, fromAiId);
+
 
         var warState = name.kingdoms.war.WarState.get(server);
         var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
