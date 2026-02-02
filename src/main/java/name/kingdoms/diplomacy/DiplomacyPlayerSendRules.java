@@ -96,7 +96,8 @@ public final class DiplomacyPlayerSendRules {
             // Relation gates (player<->target kingdom)
             var relState = DiplomacyRelationsState.get(server);
             int baseRel = relState.getRelation(player.getUUID(), toK.id);
-            int rel = PressureUtil.effectiveRelation(server, baseRel, toK.id);
+            int rel = PressureUtil.effectiveRelation(server, baseRel, fromK.id, toK.id);
+
 
 
             // Deal: rel > -40

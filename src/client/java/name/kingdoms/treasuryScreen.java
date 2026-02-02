@@ -50,7 +50,7 @@ public class treasuryScreen extends Screen {
     private static final int GROUP_H = 16;
 
     // Display window for deltas
-    private static final double DELTA_SECONDS = 10.0;
+    private static final double DELTA_SECONDS = 240;
 
     // Pixel scrolling for mixed-height list
     private int scrollPx = 0;
@@ -163,6 +163,8 @@ public class treasuryScreen extends Screen {
     @Override
     public void init() {
         super.init();
+
+        ClientPlayNetworking.send(new name.kingdoms.payload.KingdomEventsRequestC2SPayload());
 
         closeBtn = Button.builder(Component.literal("Close"), b -> onClose())
                 .bounds(this.width - 62, 8, 54, 18)
@@ -567,7 +569,7 @@ public class treasuryScreen extends Screen {
     /** per10s is already scaled to DELTA_SECONDS. */
     private int drawLine(GuiGraphics g, int x, int y, String label, double value, double per10s) {
         String v = fmt(value);
-        String d = fmtSigned(per10s) + "/10s";
+        String d = fmtSigned(per10s) + "/4 minutes";
 
         String left = label + ": " + v + " (";
         String right = ")";

@@ -307,19 +307,37 @@ public final class networkInit {
                         heraldry.setCount(1);
                     }
 
+                    
 
-
-                    // relation (you already use this elsewhere)
+                    // relation (initialize on first AI discovery, then compute effective)
                     var relState = name.kingdoms.diplomacy.DiplomacyRelationsState.get(server);
+
+                    var aiK = aiState.getById(k.id); 
+                    if (aiK != null) {
+                        name.kingdoms.pressure.KingdomPressureState.get(server).markKnownAi(k.id);
+
+                        // initialize base relation only once
+                        if (!relState.hasRelation(player.getUUID(), k.id)) {
+                            double tb = (aiK.personality == null) ? 0.50 : aiK.personality.trustBias();
+                            int init = (int) Math.round((tb - 0.50) * 40.0); // ~ -20..+20
+                            relState.setRelation(player.getUUID(), k.id, init);
+                        }
+                    }
+
                     int baseRel = relState.getRelation(player.getUUID(), k.id);
-                    int relation = PressureUtil.effectiveRelation(server, baseRel, k.id);
+                    UUID fromKid = null;
+                    var pk = kingdomState.get(server).getPlayerKingdom(player.getUUID());
+                    if (pk != null) fromKid = pk.id;
+
+                    int relation = PressureUtil.effectiveRelation(server, baseRel, fromKid, k.id);
+
+
 
 
                     // soldiers + tickets
                     int soldiersAlive = 0, soldiersMax = 0;
                     int ticketsMax, ticketsAlive;
 
-                    var aiK = aiState.getById(k.id);
                     if (aiK != null) {
                         soldiersAlive = Math.max(0, aiK.aliveSoldiers);
                         soldiersMax   = Math.max(0, aiK.maxSoldiers);
@@ -1102,6 +1120,10 @@ public final class networkInit {
                 var out = new java.util.ArrayList<mailRecipientsSyncS2CPayload.Entry>();
                 var seen = new java.util.HashSet<java.util.UUID>();
 
+                        // "from" kingdom for CAUSER_ONLY pressure relation effects
+
+
+
                 // -------------------------
                 // PLAYER KINGDOMS (online only)
                 // -------------------------
@@ -1119,7 +1141,12 @@ public final class networkInit {
                     String nm = kName + " (" + ownerOnline.getName().getString() + ")";
 
                     int baseRel = relState.getRelation(player.getUUID(), k.id);
-                    int rel = PressureUtil.effectiveRelation(server, baseRel, k.id);
+                    var pk = ks.getPlayerKingdom(player.getUUID());
+                    UUID fromKid = (pk == null) ? null : pk.id;
+
+                    // later...
+                    int rel = PressureUtil.effectiveRelation(server, baseRel, fromKid, k.id);
+
 
 
                     // only used for AI heads (keep 0 for players)
@@ -1144,7 +1171,10 @@ public final class networkInit {
                     if (aiK == null) continue;
 
                     UUID id = aiK.id;
+                    var pk = ks.getPlayerKingdom(player.getUUID());
+                    UUID fromKid = (pk == null) ? null : pk.id;
                     if (id == null) continue;
+                    
 
                     name.kingdoms.pressure.KingdomPressureState.get(server).markKnownAi(id);
 
@@ -1157,8 +1187,18 @@ public final class networkInit {
 
                     String nm = (aiK.name == null || aiK.name.isBlank()) ? "Unknown" : aiK.name;
 
+                    // --- ensure player has a base relation entry for this AI (first discovery) ---
+                    if (!relState.hasRelation(player.getUUID(), id)) {
+                        // personality-based baseline
+                        double tb = (aiK.personality == null) ? 0.50 : aiK.personality.trustBias();
+                        int init = (int) Math.round((tb - 0.50) * 40.0); // ~ -20..+20
+                        relState.setRelation(player.getUUID(), id, init);
+                    }
+
                     int baseRel = relState.getRelation(player.getUUID(), id);
-                    int rel = PressureUtil.effectiveRelation(server, baseRel, id);
+                    int rel = PressureUtil.effectiveRelation(server, baseRel, fromKid, id);
+
+
 
 
                     int headSkinId = Mth.clamp(aiK.skinId, 0, kingSkinPoolState.MAX_SKIN_ID);
@@ -1431,7 +1471,7 @@ public final class networkInit {
                                             addAi(aiFrom, letter.aType(), +letter.aAmount());
                                             kState.markDirty();
                                             aiState.setDirty();
-                                            ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(playerK));
+                                            ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(server, playerK));
                                         }
                                     } else {
                                         // (rare) player->AI ultimatum in inbox: AI pays player
@@ -1442,7 +1482,7 @@ public final class networkInit {
                                             EconomyMutator.add(playerK, letter.aType(), +letter.aAmount());
                                             kState.markDirty();
                                             aiState.setDirty();
-                                            ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(playerK));
+                                            ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(server, playerK));
                                         }
                                     }
                                 }
@@ -1631,7 +1671,8 @@ public final class networkInit {
 
 
                 ServerPlayNetworking.send(player, new mailInboxSyncPayload(mailbox.getInbox(player.getUUID())));
-                ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(playerK));
+                ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(ctx.server(), playerK));
+
             });
         });
 
@@ -1854,7 +1895,9 @@ public final class networkInit {
         ServerPlayNetworking.registerGlobalReceiver(treasuryBuyJobPayload.TYPE, (payload, ctx) -> {
             ctx.server().execute(() -> {
                 var player = ctx.player();
-                var state = kingdomState.get(ctx.server());
+                var server = ctx.server(); 
+
+                var state = kingdomState.get(server);
                 var kk = state.getPlayerKingdom(player.getUUID());
                 if (kk == null) return;
 
@@ -1862,17 +1905,23 @@ public final class networkInit {
                 if (job == null) return;
 
                 int qty = Math.max(1, Math.min(payload.qty(), 64));
-                if (!canAfford(kk, job, qty)) return;
 
-                spend(kk, job, qty);
+      
+                if (!canAfford(server, kk, job, qty)) return;
+
+              
+                spend(server, kk, job, qty);
+
                 state.markDirty();
 
                 var stack = jobBlocks.stackFor(job.getId(), qty);
                 if (!player.getInventory().add(stack)) player.drop(stack, false);
 
-                ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(kk));
+                ServerPlayNetworking.send(player, ecoSyncPayload.fromKingdomWithProjected(server, kk));
+
             });
         });
+
 
         // --- TREASURY OPEN ---
         ServerPlayNetworking.registerGlobalReceiver(treasuryOpenPayload.TYPE, (payload, ctx) -> {
@@ -2374,8 +2423,22 @@ public final class networkInit {
 
 
 
-    private static boolean canAfford(kingdomState.Kingdom k, jobDefinition j, int qty) {
-        return  k.gold    >= j.costGold()    * qty &&
+    private static boolean canAfford(
+            MinecraftServer server,
+            kingdomState.Kingdom k,
+            jobDefinition j,
+            int qty
+    ) {
+        double goldCost = j.costGold() * qty;
+
+        if ("guard".equals(j.getId())) {
+            double mult = name.kingdoms.pressure.KingdomModifiers
+                      .compute(server, k.id, null)
+                      .guardGoldCostMult();
+            goldCost *= mult;
+        }
+
+        return  k.gold    >= goldCost &&
                 k.meat    >= j.costMeat()    * qty &&
                 k.grain   >= j.costGrain()   * qty &&
                 k.fish    >= j.costFish()    * qty &&
@@ -2388,19 +2451,32 @@ public final class networkInit {
                 k.potions >= j.costPotions() * qty;
     }
 
-    private static void spend(kingdomState.Kingdom k, jobDefinition j, int qty) {
-        k.gold    -= j.costGold()    * qty;
-        k.meat    -= j.costMeat()    * qty;
-        k.grain   -= j.costGrain()   * qty;
-        k.fish    -= j.costFish()    * qty;
-        k.wood    -= j.costWood()    * qty;
-        k.metal   -= j.costMetal()   * qty;
-        k.armor   -= j.costArmor()   * qty;
-        k.weapons -= j.costWeapons() * qty;
-        k.gems    -= j.costGems()    * qty;
-        k.horses  -= j.costHorses()  * qty;
-        k.potions -= j.costPotions() * qty;
-    }
+
+        private static void spend(MinecraftServer server, kingdomState.Kingdom k, jobDefinition j, int qty) {
+
+            double goldCost = j.costGold() * qty;
+
+            // Guard patrol policy modifier (increase/decrease patrols)
+            if ("guard".equals(j.getId())) {
+                double mult = name.kingdoms.pressure.KingdomModifiers
+                    .compute(server, k.id, null)
+                    .guardGoldCostMult();
+                goldCost *= mult;
+            }
+
+            k.gold    -= goldCost;
+            k.meat    -= j.costMeat()    * qty;
+            k.grain   -= j.costGrain()   * qty;
+            k.fish    -= j.costFish()    * qty;
+            k.wood    -= j.costWood()    * qty;
+            k.metal   -= j.costMetal()   * qty;
+            k.armor   -= j.costArmor()   * qty;
+            k.weapons -= j.costWeapons() * qty;
+            k.gems    -= j.costGems()    * qty;
+            k.horses  -= j.costHorses()  * qty;
+            k.potions -= j.costPotions() * qty;
+        }
+
 
     private static name.kingdoms.payload.bordersSyncPayload buildBordersPayloadFor(ServerPlayer viewer, kingdomState state) {
         java.util.List<name.kingdoms.payload.bordersSyncPayload.Entry> out = new java.util.ArrayList<>();

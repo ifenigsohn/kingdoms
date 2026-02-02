@@ -159,7 +159,13 @@ public class Kingdoms implements ModInitializer {
             if (ws.isAtWarWithAny(k.id)) continue;
 
             // regen rate: 5 per minute = 5/60 per second
-            k.ticketsRegenBuf += (5.0 / 60.0);
+            double basePerSec = (5.0 / 60.0);
+            double mult = name.kingdoms.pressure.KingdomModifiers
+                    .compute(server, k.id, null)
+                    .soldierRegenMult();
+
+            k.ticketsRegenBuf += basePerSec * mult;
+
 
             int gain = (int) Math.floor(k.ticketsRegenBuf);
             if (gain > 0 && k.ticketsAlive < max) {
@@ -302,27 +308,23 @@ public class Kingdoms implements ModInitializer {
     }
 
     private static void applyEconomyStep(MinecraftServer server, kingdomState.Kingdom k, double seconds) {
-        var eco = name.kingdoms.payload.ecoSyncPayload.fromKingdomWithProjected(k);
+        var d = KingdomEconomyCalc.compute(server, k);
 
-        long now = server.getTickCount();
-        var mods = name.kingdoms.pressure.KingdomPressureState.get(server).getMods(k.id, now);
-        double m = mods.economyMult();
+        k.gold    += d.dGold()    * seconds;
+        k.meat    += d.dMeat()    * seconds;
+        k.grain   += d.dGrain()   * seconds;
+        k.fish    += d.dFish()    * seconds;
 
-        k.gold    += eco.dGold()    * seconds * m;
-        k.meat    += eco.dMeat()    * seconds * m;
-        k.grain   += eco.dGrain()   * seconds * m;
-        k.fish    += eco.dFish()    * seconds * m;
+        k.wood    += d.dWood()    * seconds;
+        k.metal   += d.dMetal()   * seconds;
+        k.armor   += d.dArmor()   * seconds;
+        k.weapons += d.dWeapons() * seconds;
 
-        k.wood    += eco.dWood()    * seconds * m;
-        k.metal   += eco.dMetal()   * seconds * m;
-        k.armor   += eco.dArmor()   * seconds * m;
-        k.weapons += eco.dWeapons() * seconds * m;
+        k.gems    += d.dGems()    * seconds;
+        k.horses  += d.dHorses()  * seconds;
+        k.potions += d.dPotions() * seconds;
 
-        k.gems    += eco.dGems()    * seconds * m;
-        k.horses  += eco.dHorses()  * seconds * m;
-        k.potions += eco.dPotions() * seconds * m;
-
-        // clamps
+        // clamp
         k.gold = Math.max(0, k.gold);
         k.meat = Math.max(0, k.meat);
         k.grain = Math.max(0, k.grain);
@@ -335,6 +337,8 @@ public class Kingdoms implements ModInitializer {
         k.horses = Math.max(0, k.horses);
         k.potions = Math.max(0, k.potions);
     }
+
+
 
 
 
@@ -358,6 +362,8 @@ public class Kingdoms implements ModInitializer {
         ServerTickEvents.END_SERVER_TICK.register(name.kingdoms.ambient.AmbientManager::tick);
         AmbientPropManager.init();
         ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickPlayerTroops);
+        name.kingdoms.pressure.GlobalPressureEvents.init();
+
 
         WarPendingTicker.init();
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents.END_SERVER_TICK.register(server -> {

@@ -38,10 +38,63 @@ public class KingdomPressureState extends SavedData {
         CAUSER_ONLY
     }
 
+    private static final UUID ZERO_UUID = new UUID(0L, 0L);
+
+    /** Global cooldown check: does this causer currently have this typeId active anywhere (any causee)? */
+    public boolean hasActiveByCauser(UUID causer, String typeId, long nowTick) {
+        if (causer == null || typeId == null) return false;
+
+        for (var entry : eventsByKingdom.entrySet()) {
+            var list = entry.getValue();
+            if (list == null || list.isEmpty()) continue;
+
+            for (var e : list) {
+                if (e == null) continue;
+                if (nowTick >= e.endTick()) continue;
+                if (!typeId.equals(e.typeId())) continue;
+                if (!causer.equals(e.causer())) continue;
+
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private record EntityLock(long endTick, UUID eventId, String typeId) {}
+
+    private final Map<UUID, EntityLock> entityLocks = new HashMap<>();
+
+    /** True if this entity currently has an active pressure order (any type) */
+    public boolean isEntityLocked(UUID entityUuid, long nowTick) {
+        if (entityUuid == null) return false;
+        EntityLock lock = entityLocks.get(entityUuid);
+        return lock != null && nowTick < lock.endTick();
+    }
+
+    /** Attach a lock to an entity until endTick. Returns false if already locked. */
+    public boolean tryLockEntity(UUID entityUuid, long nowTick, long endTick, UUID eventId, String typeId) {
+        if (entityUuid == null) return false;
+
+        EntityLock cur = entityLocks.get(entityUuid);
+        if (cur != null && nowTick < cur.endTick()) return false;
+
+        entityLocks.put(entityUuid, new EntityLock(endTick, eventId, typeId == null ? "" : typeId));
+        setDirty();
+        return true;
+    }
+
+    /** Optional: remove lock early (debug/manual) */
+    public void unlockEntity(UUID entityUuid) {
+        if (entityUuid == null) return;
+        if (entityLocks.remove(entityUuid) != null) setDirty();
+    }
+
+
+
 
     /** A compact snapshot of current modifiers affecting one kingdom. */
     public record Mods(
-            double economyMult,   // final multiplier (>=0)
+            double economyMult,    // final multiplier (>=0)
             double happinessDelta, // add to happiness() result (0..10 scale)
             double securityDelta,  // add to securityValue() result (0..1 scale)
             int relationsDelta     // add to relations eval (int)
@@ -59,6 +112,38 @@ public class KingdomPressureState extends SavedData {
         }
     }
 
+    
+
+    /**
+     * Returns true if an event with this type is currently active on this kingdom.
+     * If causerOrNull and/or scopeOrNull are provided, it matches those too.
+     *
+     * Use cases:
+     * - GLOBAL cooldown: hasActiveEvent(causee, typeId, null, RelScope.GLOBAL, nowTick)
+     * - Per-causer cooldown: hasActiveEvent(causee, typeId, causerId, RelScope.CAUSER_ONLY, nowTick)
+     */
+    public boolean hasActiveEvent(UUID causee, String typeId,
+                                  UUID causerOrNull,
+                                  RelScope scopeOrNull,
+                                  long nowTick) {
+        if (causee == null || typeId == null) return false;
+
+        var list = eventsByKingdom.get(causee);
+        if (list == null || list.isEmpty()) return false;
+
+        for (var e : list) {
+            if (e == null) continue;
+            if (nowTick >= e.endTick()) continue;
+            if (!typeId.equals(e.typeId())) continue;
+
+            if (causerOrNull != null && !causerOrNull.equals(e.causer())) continue;
+            if (scopeOrNull != null && scopeOrNull != e.relScope()) continue;
+
+            return true;
+        }
+        return false;
+    }
+
     /**
      * Add a new event. You can call this from:
      * - right-click entity actions
@@ -69,6 +154,8 @@ public class KingdomPressureState extends SavedData {
     public UUID addEvent(UUID causer, UUID causee, String typeId, Map<Stat, Double> effects, long nowTick, long durationTicks) {
         UUID eid = UUID.randomUUID();
         long end = Math.max(nowTick + 1, nowTick + Math.max(1, durationTicks));
+
+        UUID cz = (causer == null) ? ZERO_UUID : causer;
 
         EnumMap<Stat, Double> eff = new EnumMap<>(Stat.class);
         if (effects != null) {
@@ -83,7 +170,7 @@ public class KingdomPressureState extends SavedData {
         PressureEvent pe = new PressureEvent(
                 eid,
                 typeId == null ? "unknown" : typeId,
-                causer,
+                cz,
                 causee,
                 nowTick,
                 end,
@@ -97,12 +184,14 @@ public class KingdomPressureState extends SavedData {
     }
 
     public UUID addEvent(UUID causer, UUID causee, String typeId,
-                        Map<Stat, Double> effects,
-                        RelScope relScope,
-                        long nowTick, long durationTicks) {
+                         Map<Stat, Double> effects,
+                         RelScope relScope,
+                         long nowTick, long durationTicks) {
 
         UUID eid = UUID.randomUUID();
         long end = Math.max(nowTick + 1, nowTick + Math.max(1, durationTicks));
+
+        UUID cz = (causer == null) ? ZERO_UUID : causer;
 
         EnumMap<Stat, Double> eff = new EnumMap<>(Stat.class);
         if (effects != null) {
@@ -119,7 +208,7 @@ public class KingdomPressureState extends SavedData {
         PressureEvent pe = new PressureEvent(
                 eid,
                 typeId == null ? "unknown" : typeId,
-                causer,
+                cz,
                 causee,
                 nowTick,
                 end,
@@ -132,6 +221,36 @@ public class KingdomPressureState extends SavedData {
         return eid;
     }
 
+    /** Adds an event only if it isn't already active (cooldown until expire). */
+    public UUID tryAddEvent(UUID causer, UUID causee, String typeId,
+                            Map<Stat, Double> effects,
+                            long nowTick, long durationTicks) {
+        // For GLOBAL-style self policies, "typeId already active" is the cooldown
+        if (hasActiveEvent(causee, typeId, null, null, nowTick)) return null;
+        return addEvent(causer, causee, typeId, effects, nowTick, durationTicks);
+    }
+
+    /**
+     * Adds an event only if it isn't already active (cooldown until expire).
+     * - GLOBAL: blocks by (causee, typeId)
+     * - CAUSER_ONLY: blocks by (causee, typeId, causer, CAUSER_ONLY)
+     */
+    public UUID tryAddEvent(UUID causer, UUID causee, String typeId,
+                            Map<Stat, Double> effects,
+                            RelScope relScope,
+                            long nowTick, long durationTicks) {
+
+        RelScope rs = (relScope == null) ? RelScope.GLOBAL : relScope;
+        UUID cz = (causer == null) ? ZERO_UUID : causer;
+
+        if (rs == RelScope.GLOBAL) {
+            if (hasActiveEvent(causee, typeId, null, RelScope.GLOBAL, nowTick)) return null;
+        } else {
+            if (hasActiveEvent(causee, typeId, cz, RelScope.CAUSER_ONLY, nowTick)) return null;
+        }
+
+        return addEvent(cz, causee, typeId, effects, rs, nowTick, durationTicks);
+    }
 
     /** Convenience for common “economy pressure”: -15% econ for N ticks. */
     public UUID addEconomyEvent(UUID causer, UUID causee, String typeId, double economyPct, long nowTick, long durationTicks) {
@@ -157,6 +276,11 @@ public class KingdomPressureState extends SavedData {
         var list = eventsByKingdom.get(kingdomId);
         if (list == null) return List.of();
         return Collections.unmodifiableList(list);
+    }
+
+    /** INTERNAL: mark dirty explicitly when callers mutate lists directly. */
+    public void markDirty() {
+        setDirty();
     }
 
     /** The main thing other systems want: "what modifiers apply right now?" */
@@ -232,6 +356,14 @@ public class KingdomPressureState extends SavedData {
             }
         }
 
+        // expire entity locks
+        if (!entityLocks.isEmpty()) {
+            int before = entityLocks.size();
+            entityLocks.entrySet().removeIf(e -> e.getKey() == null || e.getValue() == null || nowTick >= e.getValue().endTick());
+            if (entityLocks.size() != before) changed = true;
+        }
+
+
         if (changed) setDirty();
     }
 
@@ -257,8 +389,7 @@ public class KingdomPressureState extends SavedData {
             Codec.STRING.xmap(s -> Stat.valueOf(s.toUpperCase(Locale.ROOT)), Stat::name);
 
     private static final Codec<RelScope> REL_SCOPE_CODEC =
-        Codec.STRING.xmap(s -> RelScope.valueOf(s.toUpperCase(Locale.ROOT)), RelScope::name);
-
+            Codec.STRING.xmap(s -> RelScope.valueOf(s.toUpperCase(Locale.ROOT)), RelScope::name);
 
     private static final Codec<EnumMap<Stat, Double>> EFFECTS_CODEC =
             Codec.unboundedMap(STAT_CODEC, Codec.DOUBLE).xmap(
@@ -283,20 +414,19 @@ public class KingdomPressureState extends SavedData {
             RecordCodecBuilder.create(inst -> inst.group(
                     UUID_CODEC.fieldOf("id").forGetter(PressureEvent::id),
                     Codec.STRING.fieldOf("typeId").forGetter(PressureEvent::typeId),
-                    UUID_CODEC.optionalFieldOf("causer", new UUID(0L, 0L)).forGetter(PressureEvent::causer),
+                    UUID_CODEC.optionalFieldOf("causer", ZERO_UUID).forGetter(PressureEvent::causer),
                     UUID_CODEC.fieldOf("causee").forGetter(PressureEvent::causee),
                     Codec.LONG.fieldOf("startTick").forGetter(PressureEvent::startTick),
                     Codec.LONG.fieldOf("endTick").forGetter(PressureEvent::endTick),
-                   EFFECTS_CODEC.optionalFieldOf("effects", new EnumMap<>(Stat.class)).forGetter(PressureEvent::effects),
+                    EFFECTS_CODEC.optionalFieldOf("effects", new EnumMap<>(Stat.class)).forGetter(PressureEvent::effects),
                     REL_SCOPE_CODEC.optionalFieldOf("relScope", RelScope.GLOBAL).forGetter(PressureEvent::relScope)
 
             ).apply(inst, (id, typeId, causer, causee, startTick, endTick, effects, relScope) -> {
                 EnumMap<Stat, Double> eff = (effects == null) ? new EnumMap<>(Stat.class) : effects;
-                UUID cz = (causer == null) ? new UUID(0L, 0L) : causer;
+                UUID cz = (causer == null) ? ZERO_UUID : causer;
                 RelScope rs = (relScope == null) ? RelScope.GLOBAL : relScope;
                 return new PressureEvent(id, typeId, cz, causee, startTick, endTick, eff, rs);
             }));
-
 
     private static final Codec<Map<UUID, List<PressureEvent>>> MAP_CODEC =
             Codec.unboundedMap(UUID_CODEC, EVENT_CODEC.listOf());
@@ -314,27 +444,47 @@ public class KingdomPressureState extends SavedData {
         return kingdomId != null && knownAiKingdoms.contains(kingdomId);
     }
 
+    /** INTERNAL: ensure a mutable list exists for this kingdom (used by server-side policy handlers). */
+    public java.util.List<PressureEvent> getOrCreateEventsMutable(java.util.UUID kingdomId) {
+        if (kingdomId == null) return null;
+        return eventsByKingdom.computeIfAbsent(kingdomId, k -> new java.util.ArrayList<>());
+    }
 
+   
+    // --- Entity lock codecs ---
+    private static final Codec<EntityLock> ENTITY_LOCK_CODEC =
+            RecordCodecBuilder.create(inst -> inst.group(
+                    Codec.LONG.fieldOf("endTick").forGetter(EntityLock::endTick),
+                    UUID_CODEC.optionalFieldOf("eventId", ZERO_UUID).forGetter(l -> l.eventId == null ? ZERO_UUID : l.eventId),
+                    Codec.STRING.optionalFieldOf("typeId", "").forGetter(EntityLock::typeId)
+            ).apply(inst, (endTick, eventId, typeId) -> new EntityLock(endTick, eventId, typeId)));
 
+    private static final Codec<Map<UUID, EntityLock>> ENTITY_LOCKS_CODEC =
+            Codec.unboundedMap(UUID_CODEC, ENTITY_LOCK_CODEC);
+
+    // --- Full state codec (THIS is the only CODEC field you should have) ---
     private static final Codec<KingdomPressureState> CODEC =
-        RecordCodecBuilder.create(inst -> inst.group(
-                MAP_CODEC.optionalFieldOf("eventsByKingdom", Map.of()).forGetter(s -> s.eventsByKingdom),
-                UUID_CODEC.listOf().optionalFieldOf("knownAi", List.of()).forGetter(s -> new ArrayList<>(s.knownAiKingdoms))
-        ).apply(inst, (m, knownList) -> {
-            KingdomPressureState s = new KingdomPressureState();
-            if (m != null) {
-                // Deep-copy values into mutable lists so tick() can removeIf(...)
-                for (var e : m.entrySet()) {
-                    UUID kid = e.getKey();
-                    List<PressureEvent> list = e.getValue();
-                    if (kid == null || list == null) continue;
-                    s.eventsByKingdom.put(kid, new ArrayList<>(list));
-                }
-            }
+            RecordCodecBuilder.create(inst -> inst.group(
+                    MAP_CODEC.optionalFieldOf("eventsByKingdom", Map.of()).forGetter(s -> s.eventsByKingdom),
+                    UUID_CODEC.listOf().optionalFieldOf("knownAi", List.of()).forGetter(s -> new ArrayList<>(s.knownAiKingdoms)),
+                    ENTITY_LOCKS_CODEC.optionalFieldOf("entityLocks", Map.of()).forGetter(s -> s.entityLocks)
+            ).apply(inst, (m, knownList, locks) -> {
+                KingdomPressureState s = new KingdomPressureState();
 
-            if (knownList != null) s.knownAiKingdoms.addAll(knownList);
-            return s;
-        }));
+                if (m != null) {
+                    for (var e : m.entrySet()) {
+                        UUID kid = e.getKey();
+                        List<PressureEvent> list = e.getValue();
+                        if (kid == null || list == null) continue;
+                        s.eventsByKingdom.put(kid, new ArrayList<>(list));
+                    }
+                }
+
+                if (knownList != null) s.knownAiKingdoms.addAll(knownList);
+                if (locks != null) s.entityLocks.putAll(locks);
+
+                return s;
+            }));
 
 
     private static final SavedDataType<KingdomPressureState> TYPE =
@@ -350,4 +500,5 @@ public class KingdomPressureState extends SavedData {
         if (overworld == null) return new KingdomPressureState();
         return overworld.getDataStorage().computeIfAbsent(TYPE);
     }
+
 }

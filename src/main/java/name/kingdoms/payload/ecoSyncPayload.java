@@ -1,9 +1,11 @@
 package name.kingdoms.payload;
 
+import name.kingdoms.KingdomEconomyCalc;
 import name.kingdoms.Kingdoms;
 import name.kingdoms.jobDefinition;
 import name.kingdoms.kingdomState;
 import name.kingdoms.pressure.KingdomPressureState;
+import name.kingdoms.pressure.PolicyModifiers;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -139,138 +141,41 @@ public record ecoSyncPayload(
         public static ecoSyncPayload fromKingdomWithProjected(MinecraftServer server, kingdomState.Kingdom k) {
                 if (server == null || k == null) return zeros();
 
-                long now = server.getTickCount();
-                var mods = KingdomPressureState.get(server).getMods(k.id, now);
-
-                // apply pressure to displayed happiness + security
-                double hEff = clamp10(k.happiness() + mods.happinessDelta());
-                double sEff = clamp01(k.securityValue() + mods.securityDelta());
-
-                // recompute prod multiplier based on pressured happiness
-                double pmEff = prodMultFromHappiness(hEff);
-
-                // apply economy multiplier to deltas (push production, etc.)
-                double econMult = mods.economyMult();
-
-                // projected deltas per SECOND (same structure as your current method)
-                double dGold = 0, dMeat = 0, dGrain = 0, dFish = 0;
-                double dWood = 0, dMetal = 0, dArmor = 0, dWeapons = 0;
-                double dGems = 0, dHorses = 0, dPotions = 0;
-
-                for (var e : k.active.entrySet()) {
-                        var job = jobDefinition.byId(e.getKey());
-                        int count = e.getValue();
-                        if (job == null || count <= 0) continue;
-
-                        double secondsPerCycle = job.getWorkInterval() / 20.0;
-                        if (secondsPerCycle <= 0) continue;
-
-                        // Apply pressured happiness productivity + economy mult
-                        double mult = pmEff * econMult;
-
-                        dGold    += (job.netGold()    * count * mult) / secondsPerCycle;
-                        dMeat    += (job.netMeat()    * count * mult) / secondsPerCycle;
-                        dGrain   += (job.netGrain()   * count * mult) / secondsPerCycle;
-                        dFish    += (job.netFish()    * count * mult) / secondsPerCycle;
-
-                        dWood    += (job.netWood()    * count * mult) / secondsPerCycle;
-                        dMetal   += (job.netMetal()   * count * mult) / secondsPerCycle;
-                        dArmor   += (job.netArmor()   * count * mult) / secondsPerCycle;
-                        dWeapons += (job.netWeapons() * count * mult) / secondsPerCycle;
-
-                        dGems    += (job.netGems()    * count * mult) / secondsPerCycle;
-                        dHorses  += (job.netHorses()  * count * mult) / secondsPerCycle;
-                        dPotions += (job.netPotions() * count * mult) / secondsPerCycle;
-                }
+                var d = KingdomEconomyCalc.compute(server, k);
 
                 String name = (k.name == null) ? "" : k.name;
 
-                String band = securityBandFor(sEff, kingdomState.Kingdom.REQUIRED_SECURITY);
+                // security band based on effective value
+                String band;
+                double s = d.securityEff();
+                double req = kingdomState.Kingdom.REQUIRED_SECURITY;
+                if (s >= 0.40) band = "High";
+                else if (s >= req) band = "Medium";
+                else band = "Low";
 
                 return new ecoSyncPayload(
-                        // totals (unchanged)
+                        // totals
                         k.gold, k.meat, k.grain, k.fish,
                         k.wood, k.metal, k.armor, k.weapons,
                         k.gems, k.horses, k.potions,
 
-                        // projected deltas (pressure-aware)
-                        dGold, dMeat, dGrain, dFish,
-                        dWood, dMetal, dArmor, dWeapons,
-                        dGems, dHorses, dPotions,
+                        // projected deltas per second (already policy + pressure aware)
+                        d.dGold(), d.dMeat(), d.dGrain(), d.dFish(),
+                        d.dWood(), d.dMetal(), d.dArmor(), d.dWeapons(),
+                        d.dGems(), d.dHorses(), d.dPotions(),
 
-                        // happiness + prod (pressure-aware)
-                        hEff,
-                        pmEff,
+                        // happiness + prodMult (effective)
+                        d.happinessEff(),
+                        d.prodMultEff(),
 
-                        // security (pressure-aware)
-                        sEff,
-                        kingdomState.Kingdom.REQUIRED_SECURITY,
+                        // security (effective)
+                        d.securityEff(),
+                        req,
                         band,
 
-                        // connected + name
+                        // connection + name
                         true,
                         name
                 );
-                }
-
-
-
-    public static ecoSyncPayload fromKingdomWithProjected(kingdomState.Kingdom k) {
-        double dGold = 0, dMeat = 0, dGrain = 0, dFish = 0;
-        double dWood = 0, dMetal = 0, dArmor = 0, dWeapons = 0;
-        double dGems = 0, dHorses = 0, dPotions = 0;
-
-        // include happiness multiplier in projections (so UI matches real output)
-        double pm = k.productionMultiplier();
-
-        for (var e : k.active.entrySet()) {
-            var job = jobDefinition.byId(e.getKey());
-            int count = e.getValue();
-            if (job == null || count <= 0) continue;
-
-            double secondsPerCycle = job.getWorkInterval() / 20.0; // ticks -> seconds
-            if (secondsPerCycle <= 0) continue;
-
-            dGold    += (job.netGold()    * count * pm) / secondsPerCycle;
-            dMeat    += (job.netMeat()    * count * pm) / secondsPerCycle;
-            dGrain   += (job.netGrain()   * count * pm) / secondsPerCycle;
-            dFish    += (job.netFish()    * count * pm) / secondsPerCycle;
-
-            dWood    += (job.netWood()    * count * pm) / secondsPerCycle;
-            dMetal   += (job.netMetal()   * count * pm) / secondsPerCycle;
-            dArmor   += (job.netArmor()   * count * pm) / secondsPerCycle;
-            dWeapons += (job.netWeapons() * count * pm) / secondsPerCycle;
-
-            dGems    += (job.netGems()    * count * pm) / secondsPerCycle;
-            dHorses  += (job.netHorses()  * count * pm) / secondsPerCycle;
-            dPotions += (job.netPotions() * count * pm) / secondsPerCycle;
-        }
-
-        String name = (k.name == null) ? "" : k.name;
-
-        return new ecoSyncPayload(
-                // totals
-                k.gold, k.meat, k.grain, k.fish,
-                k.wood, k.metal, k.armor, k.weapons,
-                k.gems, k.horses, k.potions,
-
-                // projected
-                dGold, dMeat, dGrain, dFish,
-                dWood, dMetal, dArmor, dWeapons,
-                dGems, dHorses, dPotions,
-
-                // happiness + prod
-                k.happiness(),
-                pm,
-
-                // security
-                k.securityValue(),
-                kingdomState.Kingdom.REQUIRED_SECURITY,
-                k.securityBand(),
-
-                // connected + name
-                true,
-                name
-        );
     }
 }

@@ -12,9 +12,6 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntitySpawnReason;
-import net.minecraft.world.entity.EntityType;
 
 public final class WarOverviewScreen extends Screen {
 
@@ -38,7 +35,39 @@ public final class WarOverviewScreen extends Screen {
     private int selectedSoldierSkinId;
 
     public void onEventsSync(name.kingdoms.payload.KingdomEventsSyncS2CPayload payload) {
-        this.activeEvents = (payload == null || payload.events() == null) ? java.util.List.of() : payload.events();
+        this.activeEvents = (payload == null || payload.events() == null)
+                ? java.util.List.of()
+                : payload.events();
+    }
+
+    private static String prettyEventName(String typeId) {
+        if (typeId == null) return "unknown";
+        return switch (typeId) {
+            // globals
+            case "global_plague" -> "Plague";
+            case "global_bountiful_harvest" -> "Bountiful Harvest";
+            case "global_bandit_wave" -> "Bandit Wave";
+            case "global_festival" -> "Festival Season";
+            case "global_drought" -> "Drought";
+
+            // locals / policies (optional)
+            case "double_pace" -> "Double Pace";
+            case "leisurely_pace" -> "Leisurely Pace";
+            case "increase_patrols" -> "Increased Patrols";
+            case "decrease_patrols" -> "Decreased Patrols";
+            case "double_rations" -> "Double Rations";
+            case "halve_rations" -> "Halved Rations";
+            case "alcohol_subsidies" -> "Alcohol Subsidies";
+            case "drunk_crackdowns" -> "Drink Crackdown";
+            case "frequent_services" -> "Frequent Services";
+            case "papal_authority" -> "Papal Authority";
+            case "diplomatic_envoys" -> "Diplomatic Envoys";
+            case "vassal_contributions" -> "Vassal Contributions";
+            case "market_subsidies" -> "Market Subsidies";
+            case "contraband_crackdowns" -> "Contraband Crackdowns";
+
+            default -> typeId;
+        };
     }
 
 
@@ -307,15 +336,27 @@ public final class WarOverviewScreen extends Screen {
             return;
         }
 
-        int maxLines = 14;
-        int lines = 0;
+      
 
+       int maxLines = 14;
+        int total = 0;
+        for (var e : activeEvents) if (e != null) total++;
+
+        int shown = 0;
         for (var e : activeEvents) {
             if (e == null) continue;
-            if (lines >= maxLines) break;
+            if (shown >= maxLines) break;
 
-            String name = e.typeId();
-            int secs = e.secondsRemaining();
+            String name = prettyEventName(e.typeId());
+            var mc = Minecraft.getInstance();
+            long nowGameTime = (mc.level == null) ? 0L : mc.level.getGameTime();
+
+            long ticksLeft = e.endTick() - nowGameTime; // endTick is END GAME TIME
+            if (ticksLeft <= 0) continue;               // hides expired without refresh
+
+            int secs = (int) ((ticksLeft + 19) / 20);
+
+
             String time = (secs >= 60) ? ((secs / 60) + "m") : (secs + "s");
 
             // compact effect summary
@@ -329,7 +370,11 @@ public final class WarOverviewScreen extends Screen {
             y += 10;
             g.drawString(this.font, "  " + eff + " [" + e.scope() + "]", x, y, 0xFFAAAAAA);
             y += 12;
-            lines++;
+            shown++;
+        }
+
+        if (total > shown) {
+            g.drawString(this.font, "...and " + (total - shown) + " more", x, y, 0xFF777777);
         }
 
         g.drawString(this.font, "(Refresh: click Events tab again)", x, this.height - 16, 0xFF777777);

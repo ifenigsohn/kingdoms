@@ -74,11 +74,30 @@ public final class WorkerActionsScreen extends Screen {
                 if (id == null || id.isBlank()) continue;
 
                 String label = switch (id) {
-                    case "PUSH_PRODUCTION" -> "Push Production (Economy ↑, Happiness ↓)";
-                    case "EASE_WORKLOAD" -> "Ease Workload (Happiness ↑, Economy ↓)";
-                    case "INCREASE_PATROLS" -> "Increase Patrols (Security ↑, Economy ↓)";
+                    case "DOUBLE_PACE" -> "Double pace (Economy ↑, Happiness ↓)";
+                    case "LEISURELY_PACE" -> "Leisurely pace (Economy ↓, Happiness ↑)";
+
+                    case "INCREASE_PATROLS" -> "Increase patrols (Security ↑, Economy ↓)";
+                    case "DECREASE_PATROLS" -> "Decrease patrols (Security ↓, Economy ↑)";
+
+                    case "DOUBLE_RATIONS" -> "Double rations (Regen ↑, Food cost ↑)";
+                    case "HALVE_RATIONS" -> "Halve rations (Regen ↓, Food cost ↓)";
+
+                    case "ALCOHOL_SUBSIDIES" -> "Alcohol subsidies (Happiness ↑, Gold cost ↓)";
+                    case "DRUNK_CRACKDOWNS" -> "Drunk crackdowns (Happiness ↓, Economy ↑)";
+
+                    case "FREQUENT_SERVICES" -> "Frequent services (Happiness ↑, Economy ↓)";
+                    case "PAPAL_AUTHORITY" -> "Papal authority (Relations ↑ with all rulers)";
+
+                    case "DIPLOMATIC_ENVOYS" -> "Diplomatic envoys (Relations ↑ with all rulers)";
+                    case "VASSAL_CONTRIBUTIONS" -> "Vassal contributions (Economy ↑, Happiness ↓)";
+
+                    case "MARKET_SUBSIDIES" -> "Market subsidies (Relations ↑, Shop profit ↓)";
+                    case "CONTRABAND_CRACKDOWNS" -> "Contraband crackdowns (Security ↑, Relations ↓)";
+
                     default -> id;
                 };
+
 
                 addActionButton(x, y, bw, label, id);
                 y += BTN_H + GAP;

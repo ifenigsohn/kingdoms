@@ -448,18 +448,55 @@ public class kingdomWorkerEntity extends PathfinderMob {
         List<String> actionIds = new ArrayList<>();
         String job = this.getJobId();
 
-        // Workers: economy/happiness levers
-        if ("farmer".equals(job) || "blacksmith".equals(job) || "fisherman".equals(job)
-                || "woodcutter".equals(job) || "miner".equals(job) || "trader".equals(job)
-                || "unknown".equals(job)) {
-            actionIds.add("PUSH_PRODUCTION");
-            actionIds.add("EASE_WORKLOAD");
+        // Pace policy (productive jobs)
+        if ("butcher".equals(job) || "farm".equals(job) || "fishing".equals(job)
+                || "wood".equals(job) || "metal".equals(job) || "gem".equals(job)
+                || "alchemy".equals(job) || "weapon".equals(job) || "armor".equals(job)) {
+            actionIds.add("DOUBLE_PACE");
+            actionIds.add("LEISURELY_PACE");
         }
 
-        // Guards/soldiers: security lever
-        if ("guard".equals(job) || "soldier".equals(job)) {
+
+
+        // Guard patrol policy
+        if ("guard".equals(job)) {
             actionIds.add("INCREASE_PATROLS");
+            actionIds.add("DECREASE_PATROLS");
         }
+
+        // Garrison / soldier rations policy
+        if ("garrison".equals(job) || "training".equals(job)) {
+            actionIds.add("DOUBLE_RATIONS");
+            actionIds.add("HALVE_RATIONS");
+        }
+
+        // Tavern policy
+        if ("tavern".equals(job)) {
+            actionIds.add("ALCOHOL_SUBSIDIES");
+            actionIds.add("DRUNK_CRACKDOWNS");
+        }
+
+
+        // Chapel / priest policy
+        if ("chapel".equals(job)) {
+            actionIds.add("FREQUENT_SERVICES");
+            actionIds.add("PAPAL_AUTHORITY");
+        }
+
+
+        // Noble / nobility policy
+        if ("nobility".equals(job)) {
+            actionIds.add("DIPLOMATIC_ENVOYS");
+            actionIds.add("VASSAL_CONTRIBUTIONS");
+        }
+
+
+        // Shop policy
+        if ("shop".equals(job)) {
+            actionIds.add("MARKET_SUBSIDIES");
+            actionIds.add("CONTRABAND_CRACKDOWNS");
+        }
+
 
         // Retinue buttons are false here (non-retinue)
         ServerPlayNetworking.send(sp, new OpenWorkerActionsS2CPayload(
@@ -725,6 +762,12 @@ public class kingdomWorkerEntity extends PathfinderMob {
                 long now = sl.getGameTime();
                 retinueCollide.entrySet().removeIf(e -> (now - e.getValue().lastSeenTick) > 5L);
                 // (if they haven't collided in ~0.25s, forget the timer)
+            }
+        }
+
+        if (this.level() instanceof ServerLevel sl && !this.isRetinue()) {
+            if ((sl.getGameTime() % name.kingdoms.pressure.PressureBarks.ATTEMPT_PERIOD_TICKS) == 0L) {
+                name.kingdoms.pressure.PressureBarks.tryBark(sl, this);
             }
         }
 

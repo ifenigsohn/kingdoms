@@ -279,7 +279,8 @@ public final class DiplomacyMailGenerator {
                 if (aiK == null) continue;
 
                 int baseRel = relState.getRelation(player.getUUID(), from.id);
-                int rel = PressureUtil.effectiveRelation(server, baseRel, from.id);
+                int rel = PressureUtil.effectiveRelation(server, baseRel, playerKingdom.id, from.id);
+
 
                 
                 boolean atWar = warState.isAtWar(playerKingdom.id, from.id);
@@ -591,14 +592,16 @@ public final class DiplomacyMailGenerator {
         // Use relations + personality policy here too
         DiplomacyRelationsState relState = DiplomacyRelationsState.get(server);
         int baseRel = relState.getRelation(toPlayer, fromAiId);
-        int rel = PressureUtil.effectiveRelation(server, baseRel, fromAiId);
+        var ks = name.kingdoms.kingdomState.get(server);
+        var playerK = ks.getPlayerKingdom(toPlayer);
+        UUID fromKid = (playerK == null) ? null : playerK.id;
+
+        int rel = PressureUtil.effectiveRelation(server, baseRel, fromKid, fromAiId);
 
 
         var warState = name.kingdoms.war.WarState.get(server);
         var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
 
-        var ks = name.kingdoms.kingdomState.get(server);
-        var playerK = ks.getPlayerKingdom(toPlayer);
 
         boolean atWar = (playerK != null) && warState.isAtWar(playerK.id, fromAiId);
         boolean allied = (playerK != null) && alliance.isAllied(playerK.id, fromAiId);

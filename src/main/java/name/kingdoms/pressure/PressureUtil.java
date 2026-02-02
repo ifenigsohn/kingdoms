@@ -8,10 +8,14 @@ import java.util.UUID;
 public final class PressureUtil {
     private PressureUtil() {}
 
-    /** Old signature: treat as "unknown other" (GLOBAL-only effects). */
+    @Deprecated
     public static int effectiveRelation(MinecraftServer server, int baseRel, UUID toKingdomId) {
+        // Optional: temporary logging to find missed call sites
+        System.out.println("[PressureUtil] WARNING old effectiveRelation() used; CAUSER_ONLY ignored");
+
         return effectiveRelation(server, baseRel, null, toKingdomId);
     }
+
 
     /**
      * New signature: fromKingdomId may be null. If provided, CAUSER_ONLY relation events can apply.
@@ -57,6 +61,31 @@ public final class PressureUtil {
                 }
             }
         }
+
+        // Also apply GLOBAL relation modifiers on the FROM side.
+        // This lets "envoys", "legitimacy crisis", etc. affect how this kingdom relates to everyone.
+        if (fromKingdomId != null && !isUnknownAi(server, fromKingdomId)) {
+            var fromList = ps.getEvents(fromKingdomId);
+            for (var e : fromList) {
+                if (e == null) continue;
+                if (now >= e.endTick()) continue;
+
+                var eff = e.effects();
+                if (eff == null) continue;
+
+                Double r = eff.get(KingdomPressureState.Stat.RELATIONS);
+                if (r == null) continue;
+
+                var scope = e.relScope();
+                if (scope == null) scope = KingdomPressureState.RelScope.GLOBAL;
+
+                // Only GLOBAL applies from the sender side (outgoing posture).
+                if (scope == KingdomPressureState.RelScope.GLOBAL) {
+                    delta += (int) Math.round(r);
+                }
+            }
+        }
+
 
         return clampRel(baseRel + delta);
     }

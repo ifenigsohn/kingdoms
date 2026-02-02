@@ -1,6 +1,8 @@
 package name.kingdoms.pressure;
 
 import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.Map;
 
 public final class PressureCatalog {
     private PressureCatalog() {}
@@ -9,245 +11,357 @@ public final class PressureCatalog {
     public static final long MINUTE = 20L * 60L;
     public static final long HOUR   = 20L * 60L * 60L;
 
-    /** Worker: push output -> econ up, happiness down */
-    public static Template PUSH_PRODUCTION() {
-        return new Template(
-                "push_production",
-                10 * MINUTE,
-                effects()
-                        .putPct(KingdomPressureState.Stat.ECONOMY, +0.12) // +12% output
-                        .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.6) // -0.6 on 0..10
-                        .build()
-        );
+    /* -----------------------------
+       Registry (lookup by typeId)
+     ----------------------------- */
+    private static final Map<String, Template> BY_TYPE = new HashMap<>();
+
+    private static Template reg(Template t) {
+        if (t == null || t.typeId() == null) return t;
+        BY_TYPE.put(t.typeId(), t);
+        return t;
     }
+
+    public static Template byTypeId(String typeId) {
+        if (typeId == null) return null;
+        return BY_TYPE.get(typeId);
+    }
+
+    /* -----------------------------
+       Template
+     ----------------------------- */
+
+    public record Template(
+            String typeId,
+            long durationTicks,
+            EnumMap<KingdomPressureState.Stat, Double> effects,
+            Map<String, String> barkPools // group -> poolId
+    ) {
+        public Template(String typeId, long durationTicks, EnumMap<KingdomPressureState.Stat, Double> effects) {
+            this(typeId, durationTicks, effects, Map.of());
+        }
+
+        /** Return poolId for a worker group ("worker","military","tavern","chapel","shop","nobility") */
+        public String barkPoolForGroup(String group) {
+            if (group == null || barkPools == null) return null;
+            return barkPools.get(group);
+        }
+
+        /** Add/override bark pool mapping for a group. */
+        public Template withBark(String group, String poolId) {
+            if (group == null || group.isBlank() || poolId == null || poolId.isBlank()) return this;
+
+            var m = new java.util.HashMap<>(this.barkPools == null ? java.util.Map.of() : this.barkPools);
+            m.put(group, poolId);
+            return new Template(this.typeId, this.durationTicks, this.effects, java.util.Collections.unmodifiableMap(m));
+        }
+    }
+
+    /* -----------------------------
+       Templates (registered once)
+     ----------------------------- */
+
+    /** Worker: push output -> econ up, happiness down */
+    private static final Template PUSH_PRODUCTION_T =
+            reg(new Template(
+                    "push_production",
+                    10 * MINUTE,
+                    effects()
+                            .putPct(KingdomPressureState.Stat.ECONOMY, +0.12) // +12% output
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.6) // -0.6 on 0..10
+                            .build()
+            ).withBark("worker", "pace_hard_worker"));
 
     /** Worker: ease workload -> happiness up, econ down */
-    public static Template EASE_WORKLOAD() {
-        return new Template(
-                "ease_workload",
-                10 * MINUTE,
-                effects()
-                        .putPct(KingdomPressureState.Stat.ECONOMY, -0.10)
-                        .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.8)
-                        .build()
-        );
-    }
+    private static final Template EASE_WORKLOAD_T =
+            reg(new Template(
+                    "ease_workload",
+                    10 * MINUTE,
+                    effects()
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.10)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.8)
+                            .build()
+            ).withBark("worker", "pace_easy_worker"));
 
     /** Guards: increase patrols -> security up, econ down */
-    public static Template INCREASE_PATROLS() {
-        return new Template(
-                "increase_patrols",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.SECURITY, +0.06) // +0.06 on 0..1
-                        .putPct(KingdomPressureState.Stat.ECONOMY, -0.08)
-                        .build()
-        );
-    }
+    private static final Template INCREASE_PATROLS_T =
+            reg(new Template(
+                    "increase_patrols",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, +0.06) // +0.06 on 0..1
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.08)
+                            .build()
+            ).withBark("military", "patrols_up_military"));
 
     /** External: sow discontent -> happiness down, relations down (temporary bias) */
-    public static Template SOW_DISCONTENT() {
-        return new Template(
-                "sow_discontent",
-                15 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.9)
-                        .putAdd(KingdomPressureState.Stat.RELATIONS, -8) // -8 temporary eval bias
-                        .build()
-        );
-    }
+    private static final Template SOW_DISCONTENT_T =
+            reg(new Template(
+                    "sow_discontent",
+                    15 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.9)
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, -8) // -8 temporary eval bias
+                            .build()
+            )); // optional bark later (e.g. "worker", "nobility")
 
     // -----------------------------
     // POLICY: Pace (mutually exclusive)
-    // Accessible via butcher/grain/fish/iron/gem NPCs
     // -----------------------------
-    public static Template DOUBLE_PACE() {
-        return new Template(
-                "double_pace",
-                10 * MINUTE,
-                effects()
-                        .putPct(KingdomPressureState.Stat.ECONOMY, +0.12)
-                        .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.6)
-                        .build()
-        );
-    }
+    private static final Template DOUBLE_PACE_T =
+            reg(new Template(
+                    "double_pace",
+                    10 * MINUTE,
+                    effects()
+                            .putPct(KingdomPressureState.Stat.ECONOMY, +0.12)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.6)
+                            .build()
+            ).withBark("worker", "pace_hard_worker"));
 
-    public static Template LEISURELY_PACE() {
-        return new Template(
-                "leisurely_pace",
-                10 * MINUTE,
-                effects()
-                        .putPct(KingdomPressureState.Stat.ECONOMY, -0.10)
-                        .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.8)
-                        .build()
-        );
-    }
+    private static final Template LEISURELY_PACE_T =
+            reg(new Template(
+                    "leisurely_pace",
+                    10 * MINUTE,
+                    effects()
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.10)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.8)
+                            .build()
+            ).withBark("worker", "pace_easy_worker"));
 
     // -----------------------------
     // POLICY: Patrols (mutually exclusive)
-    // Accessible via guard NPC type
     // -----------------------------
-    public static Template INCREASE_PATROLS_POLICY() {
-        return new Template(
-                "increase_patrols",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.SECURITY, +0.06)
-                        .putPct(KingdomPressureState.Stat.ECONOMY, -0.08)
-                        .build()
-        );
-    }
+    private static final Template INCREASE_PATROLS_POLICY_T =
+            reg(new Template(
+                    "increase_patrols",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, +0.06)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.08)
+                            .build()
+            ).withBark("military", "patrols_up_military"));
 
-    public static Template DECREASE_PATROLS_POLICY() {
-        return new Template(
-                "decrease_patrols",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.SECURITY, -0.06)
-                        .putPct(KingdomPressureState.Stat.ECONOMY, +0.05) // “less patrol cost” proxy
-                        .build()
-        );
-    }
+    private static final Template DECREASE_PATROLS_POLICY_T =
+            reg(new Template(
+                    "decrease_patrols",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, -0.06)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, +0.05) // “less patrol cost” proxy
+                            .build()
+            ).withBark("military", "patrols_down_military"));
 
     // -----------------------------
     // POLICY: Rations (mutually exclusive)
-    // Accessible via garrison/soldier NPC type
-    // NOTE: regen/food-cost will be implemented next pass;
-    // for now this is a proxy using security/econ/happiness.
     // -----------------------------
-    public static Template DOUBLE_RATIONS() {
-        return new Template(
-                "double_rations",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.SECURITY, +0.03) // proxy: readiness
-                        .putPct(KingdomPressureState.Stat.ECONOMY, -0.06)  // proxy: extra supply cost
-                        .build()
-        );
-    }
+    private static final Template DOUBLE_RATIONS_T =
+            reg(new Template(
+                    "double_rations",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, +0.03) // proxy: readiness
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.06)  // proxy: extra supply cost
+                            .build()
+            ).withBark("military", "rations_up_military"));
 
-    public static Template HALVE_RATIONS() {
-        return new Template(
-                "halve_rations",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.SECURITY, -0.03)
-                        .putPct(KingdomPressureState.Stat.ECONOMY, +0.04)
-                        .build()
-        );
-    }
+    private static final Template HALVE_RATIONS_T =
+            reg(new Template(
+                    "halve_rations",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, -0.03)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, +0.04)
+                            .build()
+            ).withBark("military", "rations_down_military"));
 
     // -----------------------------
     // POLICY: Tavern (mutually exclusive)
-    // Accessible via tavern NPC type
     // -----------------------------
-    public static Template ALCOHOL_SUBSIDIES() {
-        return new Template(
-                "alcohol_subsidies",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.9)
-                        .putPct(KingdomPressureState.Stat.ECONOMY, -0.08)
-                        .build()
-        );
-    }
+    private static final Template ALCOHOL_SUBSIDIES_T =
+            reg(new Template(
+                    "alcohol_subsidies",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.9)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.08)
+                            .build()
+            ).withBark("tavern", "booze_subsidy_tavern"));
 
-    public static Template DRUNK_CRACKDOWNS() {
-        return new Template(
-                "drunk_crackdowns",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.7)
-                        .putPct(KingdomPressureState.Stat.ECONOMY, +0.06)
-                        .build()
-        );
-    }
+    private static final Template DRUNK_CRACKDOWNS_T =
+            reg(new Template(
+                    "drunk_crackdowns",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.7)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, +0.06)
+                            .build()
+            ).withBark("tavern", "booze_crackdown_tavern"));
 
     // -----------------------------
-    // POLICY: Chapel/Priest (mutually exclusive)
-    // Accessible via chapel NPC type
-    // Papal Authority: relations with all rulers (GLOBAL rel)
+    // POLICY: Chapel (mutually exclusive)
     // -----------------------------
-    public static Template FREQUENT_SERVICES() {
-        return new Template(
-                "frequent_services",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.8)
-                        .putPct(KingdomPressureState.Stat.ECONOMY, -0.08)
-                        .build()
-        );
-    }
+    private static final Template FREQUENT_SERVICES_T =
+            reg(new Template(
+                    "frequent_services",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.8)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.08)
+                            .build()
+            ).withBark("chapel", "services_chapel"));
 
-    public static Template PAPAL_AUTHORITY() {
-        return new Template(
-                "papal_authority",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.RELATIONS, +10)
-                        .putPct(KingdomPressureState.Stat.ECONOMY, -0.05) // proxy for gold cost
-                        .build()
-        );
-    }
+    private static final Template PAPAL_AUTHORITY_T =
+            reg(new Template(
+                    "papal_authority",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, +10)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.05) // proxy for gold cost
+                            .build()
+            ).withBark("chapel", "services_chapel")); // reuse for now, or make a special pool later
 
     // -----------------------------
     // POLICY: Nobility (mutually exclusive)
-    // Diplomatic Envoys: global relations up, gold cost proxy
-    // Vassal Contributions: econ up, happiness down
     // -----------------------------
-    public static Template DIPLOMATIC_ENVOYS() {
-        return new Template(
-                "diplomatic_envoys",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.RELATIONS, +10)
-                        .putPct(KingdomPressureState.Stat.ECONOMY, -0.05)
-                        .build()
-        );
-    }
+    private static final Template DIPLOMATIC_ENVOYS_T =
+            reg(new Template(
+                    "diplomatic_envoys",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, +10)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.05)
+                            .build()
+            ).withBark("nobility", "envoys_nobility"));
 
-    public static Template VASSAL_CONTRIBUTIONS() {
-        return new Template(
-                "vassal_contributions",
-                12 * MINUTE,
-                effects()
-                        .putPct(KingdomPressureState.Stat.ECONOMY, +0.10)
-                        .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.8)
-                        .build()
-        );
-    }
+    private static final Template VASSAL_CONTRIBUTIONS_T =
+            reg(new Template(
+                    "vassal_contributions",
+                    12 * MINUTE,
+                    effects()
+                            .putPct(KingdomPressureState.Stat.ECONOMY, +0.10)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.8)
+                            .build()
+            ).withBark("nobility", "vassal_levy_nobility"));
 
     // -----------------------------
     // POLICY: Shop (mutually exclusive)
-    // Market Subsidies: global relations up, econ down
-    // Contraband Crackdowns: global relations down, security up
     // -----------------------------
-    public static Template MARKET_SUBSIDIES() {
-        return new Template(
-                "market_subsidies",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.RELATIONS, +8)
-                        .putPct(KingdomPressureState.Stat.ECONOMY, -0.08)
-                        .build()
-        );
-    }
+    private static final Template MARKET_SUBSIDIES_T =
+            reg(new Template(
+                    "market_subsidies",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, +8)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.08)
+                            .build()
+            ).withBark("shop", "market_subsidy_shop"));
 
-    public static Template CONTRABAND_CRACKDOWNS() {
-        return new Template(
-                "contraband_crackdowns",
-                12 * MINUTE,
-                effects()
-                        .putAdd(KingdomPressureState.Stat.RELATIONS, -8)
-                        .putAdd(KingdomPressureState.Stat.SECURITY, +0.04)
-                        .build()
-        );
-    }
+    private static final Template CONTRABAND_CRACKDOWNS_T =
+            reg(new Template(
+                    "contraband_crackdowns",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, -8)
+                            .putAdd(KingdomPressureState.Stat.SECURITY, +0.04)
+                            .build()
+            ).withBark("shop", "contraband_crackdown_shop"));
+
+    // ---- GLOBAL EVENTS ----
+
+    private static final Template PLAGUE_T =
+            reg(new Template(
+                    "global_plague",
+                    20 * MINUTE, // 20 min
+                    effects()
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.18)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -1.0)
+                            .putAdd(KingdomPressureState.Stat.SECURITY, -0.03)
+                            .build()
+            ).withBark("worker", "global_plague_worker")
+            .withBark("shop", "global_plague_shop"));
+
+    private static final Template BOUNTIFUL_HARVEST_T =
+            reg(new Template(
+                    "global_bountiful_harvest",
+                    15 * MINUTE,
+                    effects()
+                            .putPct(KingdomPressureState.Stat.ECONOMY, +0.12)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.7)
+                            .build()
+            ).withBark("worker", "global_harvest_worker"));
+
+    private static final Template BANDIT_WAVE_T =
+            reg(new Template(
+                    "global_bandit_wave",
+                    15 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, -0.07)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.5)
+                            .build()
+            ).withBark("military", "global_bandits_military")
+            .withBark("shop", "global_bandits_shop"));
+
+    private static final Template FESTIVAL_T =
+            reg(new Template(
+                    "global_festival",
+                    10 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, +1.1)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.05)
+                            .build()
+            ).withBark("tavern", "global_festival_tavern")
+            .withBark("worker", "global_festival_worker"));
+
+    private static final Template DROUGHT_T =
+            reg(new Template(
+                    "global_drought",
+                    20 * MINUTE,
+                    effects()
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.14)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.6)
+                            .build()
+            ).withBark("worker", "global_drought_worker"));
 
 
-    // --------------- plumbing ---------------
+    /* -----------------------------
+       Public getters (keep your old API)
+     ----------------------------- */
 
-    public record Template(String typeId, long durationTicks, EnumMap<KingdomPressureState.Stat, Double> effects) {}
+    public static Template PUSH_PRODUCTION()        { return PUSH_PRODUCTION_T; }
+    public static Template EASE_WORKLOAD()          { return EASE_WORKLOAD_T; }
+    public static Template INCREASE_PATROLS()       { return INCREASE_PATROLS_T; }
+    public static Template SOW_DISCONTENT()         { return SOW_DISCONTENT_T; }
+
+    public static Template DOUBLE_PACE()            { return DOUBLE_PACE_T; }
+    public static Template LEISURELY_PACE()         { return LEISURELY_PACE_T; }
+
+    public static Template INCREASE_PATROLS_POLICY(){ return INCREASE_PATROLS_POLICY_T; }
+    public static Template DECREASE_PATROLS_POLICY(){ return DECREASE_PATROLS_POLICY_T; }
+
+    public static Template DOUBLE_RATIONS()         { return DOUBLE_RATIONS_T; }
+    public static Template HALVE_RATIONS()          { return HALVE_RATIONS_T; }
+
+    public static Template ALCOHOL_SUBSIDIES()      { return ALCOHOL_SUBSIDIES_T; }
+    public static Template DRUNK_CRACKDOWNS()       { return DRUNK_CRACKDOWNS_T; }
+
+    public static Template FREQUENT_SERVICES()      { return FREQUENT_SERVICES_T; }
+    public static Template PAPAL_AUTHORITY()        { return PAPAL_AUTHORITY_T; }
+
+    public static Template DIPLOMATIC_ENVOYS()      { return DIPLOMATIC_ENVOYS_T; }
+    public static Template VASSAL_CONTRIBUTIONS()   { return VASSAL_CONTRIBUTIONS_T; }
+
+    public static Template MARKET_SUBSIDIES()       { return MARKET_SUBSIDIES_T; }
+    public static Template CONTRABAND_CRACKDOWNS()  { return CONTRABAND_CRACKDOWNS_T; }
+    public static Template GLOBAL_PLAGUE() { return PLAGUE_T; }
+    public static Template GLOBAL_HARVEST() { return BOUNTIFUL_HARVEST_T; }
+    public static Template GLOBAL_BANDITS() { return BANDIT_WAVE_T; }
+    public static Template GLOBAL_FESTIVAL() { return FESTIVAL_T; }
+    public static Template GLOBAL_DROUGHT() { return DROUGHT_T; }
+
+
+    /* -----------------------------
+       Effects builder (unchanged)
+     ----------------------------- */
 
     /** Small builder to keep templates clean. */
     public static Eff effects() { return new Eff(); }

@@ -1,0 +1,305 @@
+package name.kingdoms.pressure;
+
+import name.kingdoms.kingdomState;
+import net.minecraft.client.multiplayer.chat.LoggedChatMessage.Player;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+
+import java.util.*;
+
+public final class PressureBarks {
+    private PressureBarks() {}
+
+    // hard limit: 1 bark per kingdom per 2 minutes
+    private static final long KINGDOM_BARK_CD_TICKS = 20L * 120L;
+
+    // cooldown per kingdom
+    private static final Map<UUID, Long> NEXT_BARK_TICK_BY_KINGDOM = new HashMap<>();
+
+    // Keep it cheap: only attempt once per second per worker
+    public static final int ATTEMPT_PERIOD_TICKS = 20;
+
+    /** Called from kingdomWorkerEntity.tick() on SERVER. */
+    public static void tryBark(ServerLevel level, name.kingdoms.entity.kingdomWorkerEntity w) {
+        if (level == null || w == null) return;
+        if (w.isRetinue()) return;
+
+        UUID kid = w.getKingdomUUID();
+        if (kid == null) return;
+
+        long now = level.getGameTime();
+
+        // kingdom-wide cooldown gate
+        long next = NEXT_BARK_TICK_BY_KINGDOM.getOrDefault(kid, 0L);
+        if (now < next) return;
+
+        // only bark if a player is nearby (prevents “server spam” in empty areas)
+        net.minecraft.world.entity.player.Player near = level.getNearestPlayer(w, 16.0);
+        if (near == null) return;
+
+        // get active pressure events on this kingdom
+        var ps = KingdomPressureState.get(level.getServer());
+        var events = ps.getEvents(kid);
+        if (events == null || events.isEmpty()) return;
+
+        // pick an active event that actually has a bark pool for this worker’s group
+        String group = groupForJob(w.getJobId());
+        if (group.isEmpty()) return;
+
+        List<KingdomPressureState.PressureEvent> candidates = new ArrayList<>();
+        long nowTickCount = level.getServer().getTickCount();
+
+        for (var e : events) {
+            if (e == null) continue;
+            if (nowTickCount >= e.endTick()) continue;
+
+            var tpl = PressureCatalog.byTypeId(e.typeId());
+            if (tpl == null) continue;
+
+            String pool = tpl.barkPoolForGroup(group);
+            if (pool == null || pool.isBlank()) continue;
+
+            candidates.add(e);
+        }
+
+        if (candidates.isEmpty()) return;
+
+        // optional: light randomness so it doesn’t always bark immediately when CD expires
+        // (still respects "no more than once every 2 min")
+        if (level.random.nextFloat() > 0.55f) return;
+
+        var chosen = candidates.get(level.random.nextInt(candidates.size()));
+        var tpl = PressureCatalog.byTypeId(chosen.typeId());
+        if (tpl == null) return;
+
+        String pool = tpl.barkPoolForGroup(group);
+        String line = BarkPools.pick(pool, level.random);
+        if (line == null || line.isBlank()) return;
+
+        // deliver to nearby players only
+        sendLocalBark(level, w, line);
+
+        // set kingdom cooldown
+        NEXT_BARK_TICK_BY_KINGDOM.put(kid, now + KINGDOM_BARK_CD_TICKS);
+    }
+
+    private static void sendLocalBark(ServerLevel level, net.minecraft.world.entity.Entity speaker, String line) {
+        String name = speaker.getName().getString();
+
+        // Local chat-ish line. If you want “speech bubble” later, we can do packets + client rendering.
+        Component msg = Component.literal(name + ": ").append(Component.literal(line));
+
+        for (ServerPlayer p : level.players()) {
+            if (p.distanceToSqr(speaker) <= (24.0 * 24.0)) {
+                p.sendSystemMessage(msg);
+            }
+        }
+    }
+
+    /** JobId -> bark group. Keep this aligned with jobDefinition canonical ids. */
+    public static String groupForJob(String jobId) {
+        if (jobId == null) return "";
+        return switch (jobId) {
+            // production/crafting workers
+            case "farm", "butcher", "fishing",
+                 "wood", "metal", "gem",
+                 "alchemy", "weapon", "armor" -> "worker";
+
+            // military-ish workers
+            case "guard", "training", "garrison" -> "military";
+
+            case "tavern" -> "tavern";
+            case "chapel" -> "chapel";
+            case "shop" -> "shop";
+            case "nobility" -> "nobility";
+
+            default -> "";
+        };
+    }
+
+    /** Dialogue pools keyed by id. */
+    public static final class BarkPools {
+        private BarkPools() {}
+
+        private static final Map<String, String[]> POOLS = new HashMap<>();
+
+        static {
+            // ---- PACE ----
+            POOLS.put("pace_hard_worker", new String[]{
+                    "No rest… the bell keeps ringing.",
+                    "Faster, faster—my arms are lead.",
+                    "If the quotas rise again, someone’s going to snap.",
+                    "We’re worked like oxen, not folk.",
+                    "Keep your head down and keep moving."
+            });
+            POOLS.put("pace_easy_worker", new String[]{
+                    "Feels like we can breathe again.",
+                    "Steady hands make better work, they say.",
+                    "Not every day needs to be a sprint.",
+                    "A kinder pace—maybe the lord’s listening.",
+                    "We’ll finish when it’s done. Properly."
+            });
+
+            // ---- PATROLS ----
+            POOLS.put("patrols_up_military", new String[]{
+                    "Eyes open. Streets are ours tonight.",
+                    "More rounds, fewer surprises.",
+                    "Keep your torch high—show them we’re watching.",
+                    "Crime scatters when steel walks.",
+                    "Orders are orders. Move."
+            });
+            POOLS.put("patrols_down_military", new String[]{
+                    "Half the watch, twice the trouble…",
+                    "Feels too quiet. I don’t like it.",
+                    "We’re stretched thin—don’t wander alone.",
+                    "If something happens, we won’t reach you in time.",
+                    "Stay near the lights."
+            });
+
+            // ---- RATIONS ----
+            POOLS.put("rations_up_military", new String[]{
+                    "Full bellies—steady hands.",
+                    "Better rations. We’ll hold the line.",
+                    "Feels like we matter again.",
+                    "Eat up. Tomorrow’s work is blood.",
+                    "Strength comes from the pot."
+            });
+            POOLS.put("rations_down_military", new String[]{
+                    "Half rations? Then half the fight.",
+                    "Hungry men make bad guards.",
+                    "My stomach’s louder than the alarm bell.",
+                    "They want loyalty on an empty bowl.",
+                    "This won’t end well."
+            });
+
+            // ---- TAVERN ----
+            POOLS.put("booze_subsidy_tavern", new String[]{
+                    "Drinks are cheap—tongues get loose.",
+                    "Tonight we forget the ledger.",
+                    "A round for the realm!",
+                    "Coin flows out, laughter flows in.",
+                    "Careful—cheap ale brings expensive problems."
+            });
+            POOLS.put("booze_crackdown_tavern", new String[]{
+                    "No singing, no smiling—just rules.",
+                    "They’re counting cups now. Miserable work.",
+                    "If they ban the ale, folk will find worse.",
+                    "Quiet tables make loud grudges.",
+                    "Even the fire feels cold tonight."
+            });
+
+            // ---- CHAPEL ----
+            POOLS.put("services_chapel", new String[]{
+                    "The bells call us again—don’t be late.",
+                    "Prayer is cheaper than steel, they say.",
+                    "Kneel, listen, endure.",
+                    "The chapel’s full… like it’s a siege.",
+                    "Faith holds what walls cannot."
+            });
+
+            // ---- NOBILITY ----
+            POOLS.put("envoys_nobility", new String[]{
+                    "Letters fly—friends may follow.",
+                    "A warm word can do what swords can’t.",
+                    "Envoys sent. Let’s see who smiles back.",
+                    "Courts remember favors… and slights.",
+                    "Polite ink, sharp intent."
+            });
+            POOLS.put("vassal_levy_nobility", new String[]{
+                    "The vassals will grumble—then pay.",
+                    "Coin demanded. Resentment is the interest.",
+                    "They’ll send silver… and curses.",
+                    "A heavy hand collects quickly, but it lingers.",
+                    "Expect sour faces at the next hall."
+            });
+
+            // ---- SHOP ----
+            POOLS.put("market_subsidy_shop", new String[]{
+                    "Prices ease—folk breathe.",
+                    "Subsidy’s in. Keep the shelves full.",
+                    "Good for the street, bad for the purse.",
+                    "Coin goes out, goodwill comes back.",
+                    "If this holds, winter won’t bite as hard."
+            });
+            POOLS.put("contraband_crackdown_shop", new String[]{
+                    "Watch your pockets. They’re searching carts.",
+                    "Crackdown means fewer goods—and fewer smiles.",
+                    "Someone’s always selling something… just quieter now.",
+                    "If trade dries up, trouble grows.",
+                    "Lawful streets… hungry stalls."
+            });
+            POOLS.put("global_plague_worker", new String[] {
+                    "Keep your distance… folk are dropping sick.",
+                    "No one’s shaking hands anymore.",
+                    "They say it’s in the air. Or the water. Or both.",
+                    "We burn herbs at night and pray it helps.",
+                    "If you cough—leave. Please."
+            });
+
+            POOLS.put("global_plague_shop", new String[] {
+                    "No crowds. No touching goods.",
+                    "People buy candles and salt. Bad signs.",
+                    "Prices don’t matter when fear’s the currency.",
+                    "If this spreads, trade dies first.",
+                    "I’m keeping the door barred after dusk."
+            });
+
+            POOLS.put("global_harvest_worker", new String[] {
+                    "Look at that—bins are finally full.",
+                    "For once, the work feels worth it.",
+                    "Good harvest means fewer graves this winter.",
+                    "We’re smiling again. Strange feeling.",
+                    "If the weather holds, we’ll feast."
+            });
+
+            POOLS.put("global_bandits_military", new String[] {
+                    "Bandits on the roads—keep your blade close.",
+                    "They hit carts, not walls. Cowards.",
+                    "We’re stretched thin. Don’t wander.",
+                    "Torchlight and steel. That’s all that keeps order.",
+                    "If you see smoke on the road—turn back."
+            });
+
+            POOLS.put("global_bandits_shop", new String[] {
+                    "Caravans are late… or missing.",
+                    "Fewer goods means harder choices.",
+                    "Every missing cart is a hungry street.",
+                    "If the roads stay unsafe, the market turns ugly.",
+                    "Lock up early. Trust no one."
+            });
+
+            POOLS.put("global_festival_tavern", new String[] {
+                    "A toast! Even the floorboards are dancing.",
+                    "Music’s loud enough to scare the dead.",
+                    "For one night, nobody talks about war.",
+                    "Drink up—tomorrow the world returns.",
+                    "If you’ve coin, spend it. If not, smile anyway."
+            });
+
+            POOLS.put("global_festival_worker", new String[] {
+                    "Even the tools feel lighter today.",
+                    "A festival buys a lot of forgiveness.",
+                    "Let the children laugh while it lasts.",
+                    "We’ll work again tomorrow. Tonight we live.",
+                    "Try not to start fights. It’s a good day."
+            });
+
+            POOLS.put("global_drought_worker", new String[] {
+                    "Ground’s cracked like old leather.",
+                    "Water’s worth more than coin this week.",
+                    "Fields are thirsty. People too.",
+                    "If rain doesn’t come, trouble will.",
+                    "We’re measuring meals now… not days."
+            });
+
+        }
+
+        public static String pick(String poolId, net.minecraft.util.RandomSource rand) {
+            if (poolId == null) return null;
+            String[] lines = POOLS.get(poolId);
+            if (lines == null || lines.length == 0) return null;
+            return lines[rand.nextInt(lines.length)];
+        }
+    }
+}

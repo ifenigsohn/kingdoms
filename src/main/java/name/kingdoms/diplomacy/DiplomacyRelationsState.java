@@ -97,5 +97,12 @@ public final class DiplomacyRelationsState extends SavedData {
         rel.computeIfAbsent(player, k -> new HashMap<>()).put(kingdom, value);
     }
 
+    public boolean hasRelation(UUID player, UUID kingdom) {
+        if (player == null || kingdom == null) return false;
+        Map<UUID, Integer> inner = rel.get(player);
+        return inner != null && inner.containsKey(kingdom);
+    }
+
+
     
 }

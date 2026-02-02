@@ -246,7 +246,8 @@ public final class DiplomacyResponseQueue {
             // Get relation + personality
             // -----------------------------
             int baseRel = relState.getRelation(p.playerId, p.aiId);
-            int rel = PressureUtil.effectiveRelation(server, baseRel, p.aiId);
+            int rel = PressureUtil.effectiveRelation(server, baseRel, playerK.id, p.aiId);
+
 
             var pers = aiK.personality;
 
@@ -623,7 +624,7 @@ public final class DiplomacyResponseQueue {
             ServerPlayer sp = server.getPlayerList().getPlayer(p.playerId);
             if (sp != null) {
                 serverMail.syncInbox(sp, mailbox.getInbox(p.playerId));
-                ServerPlayNetworking.send(sp, ecoSyncPayload.fromKingdomWithProjected(playerK));
+                ServerPlayNetworking.send(sp, ecoSyncPayload.fromKingdomWithProjected(server, playerK));
             }
 
             it.remove();
