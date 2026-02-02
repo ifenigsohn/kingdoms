@@ -248,6 +248,13 @@ public final class DiplomacyResponseQueue {
             int baseRel = relState.getRelation(p.playerId, p.aiId);
             int rel = PressureUtil.effectiveRelation(server, baseRel, playerK.id, p.aiId);
 
+            // --- OUTGOING happiness -> relation modifier (A) ---
+            double hEff = ks.happinessWithPressure(server, playerK); // pressure-aware happiness
+            double relMult = outgoingRelMultFromHappiness(hEff);
+            rel = applyRelMult(rel, relMult);
+            rel = clampRel(rel);
+
+
 
             var pers = aiK.personality;
 
@@ -650,4 +657,30 @@ public final class DiplomacyResponseQueue {
             case POTIONS -> k.potions;
         };
     }
+
+    // Outgoing diplomacy penalty: low happiness makes your leverage worse.
+    // Returns multiplier in [0.75..1.00] by default.
+    private static double outgoingRelMultFromHappiness(double hEff) {
+        // No penalty unless low enough
+        if (hEff >= 4.0) return 1.0;
+
+        // h=4 -> 1.00, h=0 -> 0.75 (tune the 0.25)
+        double t = (4.0 - hEff) / 4.0; // 0..1
+        if (t < 0) t = 0;
+        if (t > 1) t = 1;
+        return 1.0 - 0.25 * t;
+    }
+
+    private static int applyRelMult(int rel, double mult) {
+        // keep sign + round
+        return (int) Math.round(rel * mult);
+    }
+
+    // Optional safety clamp if your evaluator assumes a range (tune/remove if unnecessary)
+    private static int clampRel(int rel) {
+        if (rel > 100) return 100;
+        if (rel < -100) return -100;
+        return rel;
+    }
+
 }

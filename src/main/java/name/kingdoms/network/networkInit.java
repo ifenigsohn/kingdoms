@@ -348,15 +348,21 @@ public final class networkInit {
                         ticketsMax = soldiersMax;
                         ticketsAlive = soldiersAlive;
                     } else {
-                        // player kingdom estimate (matches your warOverview)
-                        int garrisons = k.active.getOrDefault("garrison", 0);
-                        ticketsMax = Math.max(0, garrisons * 50);
-                        ticketsAlive = ticketsMax; // until you track losses
+                        // Player kingdom: use REAL persisted tickets
+                        ticketsMax = kingdomState.computePlayerTicketsMax(k);
 
-                        // If you don’t have player soldier counts yet, use tickets as a proxy (or 0)
+                        // Initialize / clamp display
+                        if (k.ticketsAlive < 0) {
+                            ticketsAlive = ticketsMax; // first-time default
+                        } else {
+                            ticketsAlive = Mth.clamp(k.ticketsAlive, 0, ticketsMax);
+                        }
+
+                        // If you don’t have separate soldier counts, keep using tickets as proxy
                         soldiersMax = ticketsMax;
                         soldiersAlive = ticketsAlive;
                     }
+
 
                     // ruler identity for head
                     java.util.UUID rulerId = (k.owner != null) ? k.owner : k.id;
@@ -2023,12 +2029,17 @@ public final class networkInit {
                 var warState = name.kingdoms.war.WarState.get(server);
                 var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
 
-                // Player tickets (estimate for now)
-                int garrisons = pk.active.getOrDefault("garrison", 0);
-                int yourMax = Math.max(0, garrisons * 50);
-                int yourAlive = yourMax; // until player losses tracked
+                // Player tickets (REAL persisted pool)
+                int yourMax = kingdomState.computePlayerTicketsMax(pk);
+
+                // show "full" if uninitialized, otherwise clamp to max
+                int yourAlive = (pk.ticketsAlive < 0)
+                        ? yourMax
+                        : Mth.clamp(pk.ticketsAlive, 0, yourMax);
+
                 double potions = pk.potions;
                 int soldierSkinId = pk.soldierSkinId;
+
 
                 java.util.ArrayList<name.kingdoms.payload.warOverviewSyncS2CPayload.Entry> allies = new java.util.ArrayList<>();
                 for (var allyId : alliance.alliesOf(pk.id)) {

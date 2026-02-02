@@ -321,6 +321,181 @@ public final class PressureCatalog {
                             .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.6)
                             .build()
             ).withBark("worker", "global_drought_worker"));
+        
+    private static final Template AI_AID_SUPPLIES_T =
+        reg(new Template("ai_aid_supplies", 10 * MINUTE,
+            effects()
+                .putPct(KingdomPressureState.Stat.ECONOMY, +0.10)
+                .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.6)
+                .putAdd(KingdomPressureState.Stat.SECURITY, +0.02)
+                .build()
+        ).withBark("worker", "ai_aid_worker")
+        .withBark("military", "ai_aid_military"));
+
+    private static final Template AI_ENVOY_PRAISE_T =
+        reg(new Template("ai_envoy_praise", 12 * MINUTE,
+            effects()
+                .putAdd(KingdomPressureState.Stat.RELATIONS, +10)
+                .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.3)
+                .build()
+        ).withBark("nobility", "ai_praise_nobility"));
+
+    private static final Template AI_TRADE_EMBARGO_T =
+        reg(new Template("ai_trade_embargo", 12 * MINUTE,
+            effects()
+                .putPct(KingdomPressureState.Stat.ECONOMY, -0.12)
+                .putAdd(KingdomPressureState.Stat.RELATIONS, -6)
+                .build()
+        ).withBark("shop", "ai_embargo_shop"));
+
+    private static final Template AI_FUND_BANDITS_T =
+        reg(new Template("ai_fund_bandits", 12 * MINUTE,
+            effects()
+                .putAdd(KingdomPressureState.Stat.SECURITY, -0.06)
+                .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.4)
+                .putAdd(KingdomPressureState.Stat.RELATIONS, -6)
+                .build()
+        ).withBark("military", "ai_bandits_military")
+        .withBark("shop", "ai_bandits_shop"));
+
+    private static final Template AI_BORDER_RAIDS_T =
+        reg(new Template("ai_border_raids", 10 * MINUTE,
+            effects()
+                .putPct(KingdomPressureState.Stat.ECONOMY, -0.10)
+                .putAdd(KingdomPressureState.Stat.SECURITY, -0.05)
+                .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.5)
+                .putAdd(KingdomPressureState.Stat.RELATIONS, -10)
+                .build()
+        ).withBark("military", "ai_raids_military")
+        .withBark("worker", "ai_raids_worker"));
+
+    // ====== 10 NEW AI→PLAYER PRESSURE TEMPLATES (PressureCatalog additions) ======
+    // Paste these into PressureCatalog.java (inside the class), near your other templates.
+    // Assumes you have: reg(...), Template.withBark(...), effects() builder, and byTypeId().
+
+    private static final Template AI_GIFT_GRAIN_T =
+            reg(new Template(
+                    "ai_gift_grain",
+                    10 * MINUTE,
+                    effects()
+                            .putPct(KingdomPressureState.Stat.ECONOMY, +0.06)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.5)
+                            .build()
+            ).withBark("worker", "ai_gift_grain_worker")
+            .withBark("shop", "ai_gift_grain_shop"));
+
+    private static final Template AI_SEND_MERCENARIES_T =
+            reg(new Template(
+                    "ai_send_mercenaries",
+                    10 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, +0.06)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.04)
+                            .build()
+            ).withBark("military", "ai_send_mercs_military"));
+
+    private static final Template AI_TRAINING_ADVISORS_T =
+            reg(new Template(
+                    "ai_training_advisors",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, +0.04)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.2)
+                            .build()
+            ).withBark("military", "ai_training_advisors_military"));
+
+    private static final Template AI_WAR_INTEL_T =
+            reg(new Template(
+                    "ai_war_intel",
+                    10 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, +0.05)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.1)
+                            .build()
+            ).withBark("military", "ai_war_intel_military"));
+
+    private static final Template AI_PILGRIM_BLESSING_T =
+            reg(new Template(
+                    "ai_pilgrim_blessing",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, +0.8)
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, +6)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.03)
+                            .build()
+            ).withBark("chapel", "ai_pilgrim_blessing_chapel")
+            .withBark("worker", "ai_pilgrim_blessing_worker"));
+
+    private static final Template AI_SPREAD_RUMORS_T =
+            reg(new Template(
+                    "ai_spread_rumors",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.7)
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, -8)
+                            .build()
+            ).withBark("nobility", "ai_spread_rumors_nobility")
+            .withBark("worker", "ai_spread_rumors_worker"));
+
+    private static final Template AI_SPY_NETWORK_T =
+            reg(new Template(
+                    "ai_spy_network",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, -0.04)
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, -6)
+                            .build()
+            ).withBark("military", "ai_spy_network_military")
+            .withBark("shop", "ai_spy_network_shop"));
+
+    private static final Template AI_SABOTAGE_STORES_T =
+            reg(new Template(
+                    "ai_sabotage_stores",
+                    10 * MINUTE,
+                    effects()
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.10)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.4)
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, -8)
+                            .build()
+            ).withBark("worker", "ai_sabotage_stores_worker")
+            .withBark("shop", "ai_sabotage_stores_shop"));
+
+    private static final Template AI_BOUNTY_HUNTERS_T =
+            reg(new Template(
+                    "ai_bounty_hunters",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, -0.05)
+                            .putAdd(KingdomPressureState.Stat.HAPPINESS, -0.3)
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, -6)
+                            .build()
+            ).withBark("military", "ai_bounty_hunters_military"));
+
+    private static final Template AI_SMUGGLER_FLOOD_T =
+            reg(new Template(
+                    "ai_smuggler_flood",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.SECURITY, -0.04)
+                            .putPct(KingdomPressureState.Stat.ECONOMY, -0.06)
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, -6)
+                            .build()
+            ).withBark("shop", "ai_smuggler_flood_shop")
+            .withBark("worker", "ai_smuggler_flood_worker"));
+
+
+    // Optional: public getters (only if you like the pattern)
+    public static Template AI_GIFT_GRAIN()        { return AI_GIFT_GRAIN_T; }
+    public static Template AI_SEND_MERCENARIES()  { return AI_SEND_MERCENARIES_T; }
+    public static Template AI_TRAINING_ADVISORS() { return AI_TRAINING_ADVISORS_T; }
+    public static Template AI_WAR_INTEL()         { return AI_WAR_INTEL_T; }
+    public static Template AI_PILGRIM_BLESSING()  { return AI_PILGRIM_BLESSING_T; }
+    public static Template AI_SPREAD_RUMORS()     { return AI_SPREAD_RUMORS_T; }
+    public static Template AI_SPY_NETWORK()       { return AI_SPY_NETWORK_T; }
+    public static Template AI_SABOTAGE_STORES()   { return AI_SABOTAGE_STORES_T; }
+    public static Template AI_BOUNTY_HUNTERS()    { return AI_BOUNTY_HUNTERS_T; }
+    public static Template AI_SMUGGLER_FLOOD()    { return AI_SMUGGLER_FLOOD_T; }
+
 
 
     /* -----------------------------

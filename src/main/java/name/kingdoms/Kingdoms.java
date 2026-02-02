@@ -111,11 +111,11 @@ public class Kingdoms implements ModInitializer {
         }
 
         ecoTickCounter++;
-        if (ecoTickCounter < 6000) return; // 5 minutes for playtest
+        if (ecoTickCounter < 4000) return; // 4 minutes for playtest
         ecoTickCounter = 0;
 
         var ks = kingdomState.get(server);
-        for (var k : ks.getAllKingdoms()) applyEconomyStep(server, k, 10.0);
+        for (var k : ks.getAllKingdoms()) applyEconomyStep(server, k, 240.0);
         ks.markDirty();
     }
 
@@ -361,8 +361,10 @@ public class Kingdoms implements ModInitializer {
         ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickCalendar);
         ServerTickEvents.END_SERVER_TICK.register(name.kingdoms.ambient.AmbientManager::tick);
         AmbientPropManager.init();
-        ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickPlayerTroops);
+        ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickPlayerTickets);
         name.kingdoms.pressure.GlobalPressureEvents.init();
+        name.kingdoms.pressure.AiPressureTicker.init();
+
 
 
         WarPendingTicker.init();

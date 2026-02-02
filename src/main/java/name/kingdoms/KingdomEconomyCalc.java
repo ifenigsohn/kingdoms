@@ -1,21 +1,19 @@
 package name.kingdoms;
 
-import name.kingdoms.jobDefinition;
-import name.kingdoms.kingdomState;
-import name.kingdoms.pressure.PolicyModifiers;
 import name.kingdoms.pressure.KingdomPressureState;
+import name.kingdoms.pressure.PolicyModifiers;
 import net.minecraft.server.MinecraftServer;
 
 public final class KingdomEconomyCalc {
     private KingdomEconomyCalc() {}
 
     public record Deltas(
-        double dGold, double dMeat, double dGrain, double dFish,
-        double dWood, double dMetal, double dArmor, double dWeapons,
-        double dGems, double dHorses, double dPotions,
-        double happinessEff,
-        double securityEff,
-        double prodMultEff
+            double dGold, double dMeat, double dGrain, double dFish,
+            double dWood, double dMetal, double dArmor, double dWeapons,
+            double dGems, double dHorses, double dPotions,
+            double happinessEff,
+            double securityEff,
+            double prodMultEff
     ) {}
 
     public static Deltas compute(MinecraftServer server, kingdomState.Kingdom k) {
@@ -24,10 +22,37 @@ public final class KingdomEconomyCalc {
         var mods = KingdomPressureState.get(server).getMods(k.id, now);
         var pol  = PolicyModifiers.compute(server, k.id);
 
-        double hEff = clamp10(k.happiness() + mods.happinessDelta());
+        // --- pressure-aware security first (0..1) ---
         double sEff = clamp01(k.securityValue() + mods.securityDelta());
-        double pmEff = prodMultFromHappiness(hEff);
 
+        // --- SECURITY -> HAPPINESS (sliding), then add happiness pressure delta ---
+        // NOTE: k.happiness() currently includes a hard -2 when security is low.
+        // We'll neutralize that here for now, then apply the sliding penalty using sEff.
+        double hBase = k.happiness();
+
+        double hEff = hBase;
+
+        if (k.populationJobs() > 5) {
+            double req = kingdomState.Kingdom.REQUIRED_SECURITY; // 0.30
+            double deficit01 = clamp((req - sEff) / req, 0.0, 1.0); // 0..1
+            double maxPenalty = 3.0; // tune; old was 2.0 flat
+            hEff -= maxPenalty * deficit01;
+        }
+
+        // apply pressure happiness delta last
+        hEff = clamp10(hEff + mods.happinessDelta());
+
+        // --- HAPPINESS -> PRODUCTIVITY (sliding): 0..10 -> 0.40..1.20 ---
+        double pmFromH = 0.40 + (hEff / 10.0) * (1.20 - 0.40); // = 0.40 + 0.08*hEff
+
+        // --- SECURITY -> PRODUCTIVITY (sliding) ---
+        // s 0..1 => 0.85..1.15 (tune)
+        double pmFromS = lerp(0.85, 1.15, sEff);
+
+        // bounded final productivity multiplier
+        double pmEff = clamp(pmFromH * pmFromS, 0.40, 1.20);
+
+        // other economy multipliers (pressure events)
         double mult = pmEff * mods.economyMult();
 
         double dGold = 0, dMeat = 0, dGrain = 0, dFish = 0;
@@ -64,18 +89,24 @@ public final class KingdomEconomyCalc {
         }
 
         return new Deltas(
-            dGold, dMeat, dGrain, dFish,
-            dWood, dMetal, dArmor, dWeapons,
-            dGems, dHorses, dPotions,
-            hEff, sEff, pmEff
+                dGold, dMeat, dGrain, dFish,
+                dWood, dMetal, dArmor, dWeapons,
+                dGems, dHorses, dPotions,
+                hEff, sEff, pmEff
         );
     }
 
+    // ----------------
+    // small helpers
+    // ----------------
     private static double clamp10(double v) { return Math.max(0.0, Math.min(10.0, v)); }
     private static double clamp01(double v) { return Math.max(0.0, Math.min(1.0, v)); }
-    private static double prodMultFromHappiness(double h) {
-        if (h >= 7.0) return 1.0;
-        if (h >= 4.0) return 0.75;
-        return 0.5;
+
+    private static double clamp(double v, double lo, double hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+
+    private static double lerp(double a, double b, double t) {
+        return a + (b - a) * t;
     }
 }

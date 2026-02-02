@@ -14,12 +14,13 @@ public record KingdomEventsSyncS2CPayload(long serverNowTick, List<Entry> events
     public record Entry(
             String typeId,
             UUID causer,
-            String scope, // "GLOBAL" or "CAUSER_ONLY"
+            String causerName,
+            String scope,
             double econMult,
             double happinessDelta,
             double securityDelta,
             int relationsDelta,
-            long endTick // IMPORTANT: this is END GAME TIME (world gameTime)
+            long endTick // END GAME TIME (world gameTime)
     ) {}
 
     public static final Type<KingdomEventsSyncS2CPayload> TYPE =
@@ -46,6 +47,7 @@ public record KingdomEventsSyncS2CPayload(long serverNowTick, List<Entry> events
                     for (int i = 0; i < n; i++) {
                         String typeId = buf.readUtf(32767);
                         UUID causer = readUUID(buf);
+                        String causerName = buf.readUtf(128); // NEW
                         String scope = buf.readUtf(64);
 
                         double econMult = buf.readDouble();
@@ -53,9 +55,9 @@ public record KingdomEventsSyncS2CPayload(long serverNowTick, List<Entry> events
                         double sec = buf.readDouble();
                         int rel = buf.readVarInt();
 
-                        long endTick = buf.readLong(); // end GAME TIME
+                        long endTick = buf.readLong();
 
-                        list.add(new Entry(typeId, causer, scope, econMult, hap, sec, rel, endTick));
+                        list.add(new Entry(typeId, causer, causerName, scope, econMult, hap, sec, rel, endTick));
                     }
 
                     return new KingdomEventsSyncS2CPayload(serverNowTick, list);
@@ -70,7 +72,11 @@ public record KingdomEventsSyncS2CPayload(long serverNowTick, List<Entry> events
 
                     for (Entry e : list) {
                         buf.writeUtf(e.typeId() == null ? "" : e.typeId(), 32767);
-                        writeUUID(buf, e.causer() == null ? new UUID(0L, 0L) : e.causer());
+
+                        UUID cz = (e.causer() == null) ? new UUID(0L, 0L) : e.causer();
+                        writeUUID(buf, cz);
+
+                        buf.writeUtf(e.causerName() == null ? "" : e.causerName(), 128); // NEW
                         buf.writeUtf(e.scope() == null ? "" : e.scope(), 64);
 
                         buf.writeDouble(e.econMult());
@@ -78,7 +84,7 @@ public record KingdomEventsSyncS2CPayload(long serverNowTick, List<Entry> events
                         buf.writeDouble(e.securityDelta());
                         buf.writeVarInt(e.relationsDelta());
 
-                        buf.writeLong(e.endTick()); // end GAME TIME
+                        buf.writeLong(e.endTick());
                     }
                 }
             };

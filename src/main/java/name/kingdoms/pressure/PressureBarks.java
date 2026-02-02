@@ -293,6 +293,203 @@ public final class PressureBarks {
                     "We’re measuring meals now… not days."
             });
 
+            POOLS.put("ai_aid_worker", new String[]{
+                "A caravan came in—foreign seal on the crates.",
+                "Supplies from afar… someone still favors us.",
+                "We’ve got tools again. Proper ones.",
+                "Coin’s moving. Feels like breathing room.",
+                "Say what you will—help is help."
+            });
+
+            POOLS.put("ai_aid_military", new String[]{
+                "Allied stores arrived. Good.",
+                "More bolts, more bandages—keep them dry.",
+                "They sent support. We won’t forget it.",
+                "With this, we can hold the line.",
+                "Tell the captain: supplies are in."
+            });
+
+            POOLS.put("ai_praise_nobility", new String[]{
+                "An envoy arrived—smiling, flattering, watching.",
+                "Courts speak well of our ruler today.",
+                "A polite letter, a warmer tone.",
+                "They’re praising us… for now.",
+                "Friendship is ink. Let’s see if it holds."
+            });
+
+            POOLS.put("ai_embargo_shop", new String[]{
+                "Foreign merchants turned back at the gates.",
+                "No salt, no cloth—embargo, they say.",
+                "Prices will climb. Folk will blame us.",
+                "When trade stops, anger starts.",
+                "They’re squeezing us without drawing steel."
+            });
+
+            POOLS.put("ai_bandits_military", new String[]{
+                "Bandits are bold lately… too bold.",
+                "Someone’s paying them. You can smell it.",
+                "Roads aren’t safe. Patrol double.",
+                "Hit-and-run, like trained hands.",
+                "If we catch one, they’ll talk."
+            });
+
+            POOLS.put("ai_bandits_shop", new String[]{
+                "Another cart missing. That’s not luck.",
+                "Goods vanish, coin vanishes—same story.",
+                "Bandits don’t get this organized alone.",
+                "If the roads die, we starve.",
+                "Lock up early. Trust nobody."
+            });
+
+            POOLS.put("ai_raids_worker", new String[]{
+                "Smoke on the horizon… again.",
+                "Fields trampled. Tools stolen.",
+                "We rebuild what they burn. Every time.",
+                "Border raids… like wolves testing a fence.",
+                "If this keeps up, winter wins."
+            });
+
+            POOLS.put("ai_raids_military", new String[]{
+                "Raiders crossed the line—fast and dirty.",
+                "They want us tired, not dead.",
+                "Track them. Don’t chase blind.",
+                "They’ll hit again if we look weak.",
+                "Steel up. We’re being tested."
+            });
+
+            // ====== ADD 10 BARK POOLS (PressureBarks.BarkPools) ======
+            // Paste inside PressureBarks.BarkPools static { ... } initializer.
+
+            POOLS.put("ai_gift_grain_worker", new String[]{
+                    "Foreign wagons came in—grain sacks stacked high.",
+                    "They sent food. For once, the stores look hopeful.",
+                    "If this keeps up, winter won’t bite so hard.",
+                    "Strange to feel… supported.",
+                    "Say what you will—full bellies calm a town."
+            });
+
+            POOLS.put("ai_gift_grain_shop", new String[]{
+                    "Bread’s cheaper today. That’s no accident.",
+                    "A gift shipment—sealed and counted twice.",
+                    "Supplies like this make friends fast.",
+                    "We’ll stock the shelves while we can.",
+                    "If it’s charity, it’s the useful kind."
+            });
+
+            POOLS.put("ai_send_mercs_military", new String[]{
+                    "Mercenaries arrived—coin buys steel.",
+                    "New blades in the yard. Keep an eye on them.",
+                    "They’ll fight… as long as the purse holds.",
+                    "No loyalty, just contracts. Still—helpful.",
+                    "Let them stand the wall. We’ll watch their backs."
+            });
+
+            POOLS.put("ai_training_advisors_military", new String[]{
+                    "Advisors came—drills are changing.",
+                    "They’ve seen real battles. Listen and learn.",
+                    "Formation work today. No excuses.",
+                    "Better training beats bigger numbers.",
+                    "If we learn fast, we bleed less."
+            });
+
+            POOLS.put("ai_war_intel_military", new String[]{
+                    "Scouts brought maps—enemy routes marked.",
+                    "We’ve got intel. That’s half a victory.",
+                    "Ambush points on the road—stay sharp.",
+                    "Someone’s watching the enemy for us.",
+                    "This might save lives. Don’t waste it."
+            });
+
+            POOLS.put("ai_pilgrim_blessing_chapel", new String[]{
+                    "Pilgrims arrived with blessings—and gossip.",
+                    "The chapel’s full. Hope spreads like fire.",
+                    "A friendly king’s word carries weight in prayer.",
+                    "Light a candle—today feels gentler.",
+                    "Faith travels farther than armies."
+            });
+
+            POOLS.put("ai_pilgrim_blessing_worker", new String[]{
+                    "Folk are smiling again. It’s… unsettling.",
+                    "Blessings or not, morale’s up.",
+                    "Even tired hands work easier with hope.",
+                    "Someone spoke well of us beyond the border.",
+                    "Maybe the world hasn’t turned against us—yet."
+            });
+
+            POOLS.put("ai_spread_rumors_nobility", new String[]{
+                    "Rumors from court—poison wrapped in silk.",
+                    "They’re whispering about our ruler again.",
+                    "A scandal can cost more than a siege.",
+                    "Keep your words careful. Ears are everywhere.",
+                    "Someone wants us looking weak."
+            });
+
+            POOLS.put("ai_spread_rumors_worker", new String[]{
+                    "Heard the talk? It’s ugly, and it’s spreading.",
+                    "People argue in the street like it matters to them.",
+                    "Rumors don’t feed children, but they start fights.",
+                    "Feels like someone is stirring the pot.",
+                    "If this keeps up, trouble’s coming."
+            });
+
+            POOLS.put("ai_spy_network_military", new String[]{
+                    "Too many strangers with sharp eyes.",
+                    "Someone’s paying informants—check the gates.",
+                    "Don’t speak plans in the open. Ever.",
+                    "If they know our patrols, we change them.",
+                    "Spies don’t win wars—but they start them."
+            });
+
+            POOLS.put("ai_spy_network_shop", new String[]{
+                    "Odd buyers asking odd questions.",
+                    "Someone’s casing the stalls, not shopping.",
+                    "If you hear talk of routes—keep it to yourself.",
+                    "A quiet spy costs the loudest coin.",
+                    "Lock the ledger. Trust no one."
+            });
+
+            POOLS.put("ai_sabotage_stores_worker", new String[]{
+                    "Tools went missing. Again.",
+                    "Stores spoiled overnight—like it was planned.",
+                    "We lose a day’s work to fix what they break.",
+                    "Someone wants us hungry and tired.",
+                    "If we catch them, it won’t be gentle."
+            });
+
+            POOLS.put("ai_sabotage_stores_shop", new String[]{
+                    "Crates tampered with. Seals broken.",
+                    "Stock’s ruined—someone knew where to hit.",
+                    "We’ll raise prices or we’ll close. Simple as that.",
+                    "This isn’t theft—it’s sabotage.",
+                    "If it keeps happening, the market will riot."
+            });
+
+            POOLS.put("ai_bounty_hunters_military", new String[]{
+                    "Bounty hunters in the region—trouble follows them.",
+                    "They’re not guards. They’re predators.",
+                    "If they’re paid to hunt, someone’s paying.",
+                    "Keep the peace—don’t give them excuses.",
+                    "I don’t like hired killers near our walls."
+            });
+
+            POOLS.put("ai_smuggler_flood_shop", new String[]{
+                    "Smugglers everywhere—cheap goods, dirty hands.",
+                    "Contraband’s flowing like water.",
+                    "If law fails, honest trade dies.",
+                    "Someone’s backing this. Feels organized.",
+                    "Don’t ask where it came from—just lock up."
+            });
+
+            POOLS.put("ai_smuggler_flood_worker", new String[]{
+                    "Folk buying strange goods at night.",
+                    "Smugglers make coin, not friends.",
+                    "When law bends, it snaps later.",
+                    "Feels like the town’s slipping sideways.",
+                    "If guards crack down, it’ll get ugly fast."
+            });
+
+
+
         }
 
         public static String pick(String poolId, net.minecraft.util.RandomSource rand) {

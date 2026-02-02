@@ -366,7 +366,9 @@ public final class WarOverviewScreen extends Screen {
                             + " sec " + String.format(java.util.Locale.US, "%+.2f", e.securityDelta())
                             + " rel " + (e.relationsDelta() >= 0 ? "+" : "") + e.relationsDelta();
 
-            g.drawString(this.font, name + " (" + time + ")", x, y, 0xFFFFFFFF);
+            String by = (e.causerName() == null || e.causerName().isBlank()) ? "" : (" — by " + e.causerName());
+            g.drawString(this.font, name + by + " (" + time + ")", x, y, 0xFFFFFFFF);
+
             y += 10;
             g.drawString(this.font, "  " + eff + " [" + e.scope() + "]", x, y, 0xFFAAAAAA);
             y += 12;
