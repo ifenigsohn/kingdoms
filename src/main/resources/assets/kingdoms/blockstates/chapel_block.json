@@ -1,7 +1,13 @@
 {
   "variants": {
-    "": {
-      "model": "kingdoms:block/chapel_block"
-    }
+    "enabled=true,facing=north": { "model": "kingdoms:block/chapel_block", "y": 0 },
+    "enabled=true,facing=east":  { "model": "kingdoms:block/chapel_block", "y": 90 },
+    "enabled=true,facing=south": { "model": "kingdoms:block/chapel_block", "y": 180 },
+    "enabled=true,facing=west":  { "model": "kingdoms:block/chapel_block", "y": 270 },
+
+    "enabled=false,facing=north": { "model": "kingdoms:block/chapel_block", "y": 0 },
+    "enabled=false,facing=east":  { "model": "kingdoms:block/chapel_block", "y": 90 },
+    "enabled=false,facing=south": { "model": "kingdoms:block/chapel_block", "y": 180 },
+    "enabled=false,facing=west":  { "model": "kingdoms:block/chapel_block", "y": 270 }
   }
 }

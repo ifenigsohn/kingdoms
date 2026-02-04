@@ -48,6 +48,13 @@ public class FindBedAtNightGoal extends Goal {
             }
         }
 
+        int now = sl.getServer().getTickCount();
+        int stagger = (mob.getId() & 31);
+        if (((now + stagger) % 100) != 0) {
+            return false;
+        }
+
+
         // 2) Find a new unclaimed bed nearby
         targetBedHead = findNearbyUnclaimedBedHead(sl, mob.blockPosition(), searchRange, mob);
         if (targetBedHead != null) {

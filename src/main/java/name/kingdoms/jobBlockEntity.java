@@ -62,6 +62,12 @@ public class jobBlockEntity extends BlockEntity {
     private static final double NO_RESOURCE_MSG_RADIUS = 24.0;
 
     private static final int SKIN_COUNT = 8;
+    @Nullable private UUID assignedWorkerUuid = null;
+
+    @Nullable
+    public UUID getAssignedWorkerUuid() { return assignedWorkerUuid; }
+
+    public void setAssignedWorkerUuid(@Nullable UUID id) { assignedWorkerUuid = id; }
 
     // datapack path: resources/data/kingdoms/names/medieval_names.json
     private static final ResourceLocation NAMES_JSON =
@@ -267,6 +273,7 @@ public class jobBlockEntity extends BlockEntity {
 
         // Now that requirements are met, ensure worker exists
         be.ensureWorker(serverLevel, pos, kingdom, true);
+        be.pruneDuplicateWorkers(serverLevel, pos);
 
 
         boolean canWorkNow = be.job.canWork(serverLevel, kingdom);
@@ -397,6 +404,7 @@ public class jobBlockEntity extends BlockEntity {
             worker.setYHeadRot(yaw);
 
             worker.setHomePos(jobPos);
+            worker.setBindPos(jobPos);
             worker.setJobId(job.getId());
             
             // Use kingdom-selected skin for combat jobs; random for others
@@ -417,10 +425,14 @@ public class jobBlockEntity extends BlockEntity {
             level.addFreshEntity(worker);
             spawnEntityPoof(level, worker.getX(), worker.getY(), worker.getZ());
 
-            this.workerUuid = worker.getUUID();
+            UUID id = worker.getUUID();
+            this.workerUuid = id;
+            this.assignedWorkerUuid = id;
             this.setChanged();
+
         } else {
             worker.setHomePos(jobPos);
+            worker.setBindPos(jobPos);
             worker.setJobId(job.getId());
             worker.setKingdomUUID(kingdom.id);
 
@@ -466,7 +478,9 @@ public class jobBlockEntity extends BlockEntity {
             worker.discard();
         }
         this.workerUuid = null;
+        this.assignedWorkerUuid = null;
         this.setChanged();
+
     }
 
     // Used for missing-reqs case where we already poofed (avoid double-poof)
@@ -476,15 +490,42 @@ public class jobBlockEntity extends BlockEntity {
             worker.discard();
         }
         this.workerUuid = null;
+        this.assignedWorkerUuid = null;
         this.setChanged();
+
     }
 
     @Nullable
     private kingdomWorkerEntity getWorkerIfAlive(ServerLevel level) {
-        if (this.workerUuid == null) return null;
-        Entity e = level.getEntity(this.workerUuid);
-        return (e instanceof kingdomWorkerEntity w && w.isAlive()) ? w : null;
+        // 1) Prefer assignedWorkerUuid (the "slot owner")
+        if (this.assignedWorkerUuid != null) {
+            Entity e = level.getEntity(this.assignedWorkerUuid);
+            if (e instanceof kingdomWorkerEntity w && w.isAlive()) {
+                // keep workerUuid in sync for older code paths
+                if (this.workerUuid == null || !this.workerUuid.equals(this.assignedWorkerUuid)) {
+                    this.workerUuid = this.assignedWorkerUuid;
+                    this.setChanged();
+                }
+                return w;
+            }
+        }
+
+        // 2) Fallback to workerUuid if assigned is missing
+        if (this.workerUuid != null) {
+            Entity e = level.getEntity(this.workerUuid);
+            if (e instanceof kingdomWorkerEntity w && w.isAlive()) {
+                // if assigned was null, claim it now
+                if (this.assignedWorkerUuid == null) {
+                    this.assignedWorkerUuid = this.workerUuid;
+                    this.setChanged();
+                }
+                return w;
+            }
+        }
+
+        return null;
     }
+
 
     private static String randomName(ServerLevel level, RandomSource r) {
         List<String> pool = getOrLoadNames(level);
@@ -561,6 +602,7 @@ public class jobBlockEntity extends BlockEntity {
 
         if (job != null) out.putString("JobId", job.getId());
         if (workerUuid != null) out.putString("WorkerUuid", workerUuid.toString());
+        if (assignedWorkerUuid != null) out.putString("AssignedWorkerUuid", assignedWorkerUuid.toString());
         if (countedKingdomId != null) out.putString("CountedKingdomId", countedKingdomId.toString());
 
         out.putLong("LastNoResMsg", lastNoResourceMsgTick);
@@ -581,6 +623,7 @@ public class jobBlockEntity extends BlockEntity {
 
         job = in.getString("JobId").map(jobDefinition::byId).orElse(null);
         workerUuid = in.getString("WorkerUuid").map(UUID::fromString).orElse(null);
+        assignedWorkerUuid = in.getString("AssignedWorkerUuid").map(UUID::fromString).orElse(null);
         countedKingdomId = in.getString("CountedKingdomId").map(UUID::fromString).orElse(null);
 
         lastNoResourceMsgTick = in.getLong("LastNoResMsg").orElse(0L);
@@ -610,4 +653,30 @@ public class jobBlockEntity extends BlockEntity {
 
         super.setRemoved();
     }
+
+    private void pruneDuplicateWorkers(ServerLevel level, BlockPos jobPos) {
+        // Only prune if we have an owner; otherwise we'd risk deleting the only valid one
+        if (assignedWorkerUuid == null) return;
+        if (!level.isLoaded(jobPos)) return;
+
+        var box = new net.minecraft.world.phys.AABB(jobPos).inflate(16);
+
+        List<kingdomWorkerEntity> workers = level.getEntitiesOfClass(
+                kingdomWorkerEntity.class,
+                box,
+                w -> w != null
+                        && w.isAlive()
+                        && !w.isRetinue()
+                        && jobPos.equals(w.getHomePos()) // homePos is jobPos in your code
+                        && job != null
+                        && job.getId().equals(w.getJobId())
+        );
+
+        for (kingdomWorkerEntity w : workers) {
+            if (!w.getUUID().equals(assignedWorkerUuid)) {
+                w.discard();
+            }
+        }
+    }
+
 }

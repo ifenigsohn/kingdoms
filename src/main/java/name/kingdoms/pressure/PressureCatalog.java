@@ -559,4 +559,26 @@ public final class PressureCatalog {
 
         public EnumMap<KingdomPressureState.Stat, Double> build() { return m; }
     }
+
+    // -----------------------------
+    // AI↔AI inter-kingdom pressure
+    // -----------------------------
+    private static final Template AI_GOSSIP_PRAISE_T =
+            reg(new Template(
+                    "ai_gossip_praise",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, +10)
+                            .build()
+            ));
+
+    private static final Template AI_GOSSIP_SLANDER_T =
+            reg(new Template(
+                    "ai_gossip_slander",
+                    12 * MINUTE,
+                    effects()
+                            .putAdd(KingdomPressureState.Stat.RELATIONS, -10)
+                            .build()
+            ));
+
 }

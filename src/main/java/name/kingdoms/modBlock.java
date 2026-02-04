@@ -35,6 +35,8 @@ public class modBlock {
     ) {
         ResourceLocation id = ResourceLocation.fromNamespaceAndPath(Kingdoms.MOD_ID, name);
 
+           settings = settings.noOcclusion();
+
         // ✅ CRITICAL: set block id BEFORE constructing the Block
         ResourceKey<Block> blockKey = keyOfBlock(name);
         Block block = blockFactory.apply(settings.setId(blockKey));

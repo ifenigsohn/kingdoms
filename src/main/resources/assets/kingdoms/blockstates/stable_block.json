@@ -1,7 +1,8 @@
 {
   "variants": {
-    "": {
-      "model": "kingdoms:block/stable_block"
-    }
+    "facing=north": { "model": "kingdoms:block/stable_block", "y": 0 },
+    "facing=east":  { "model": "kingdoms:block/stable_block", "y": 90 },
+    "facing=south": { "model": "kingdoms:block/stable_block", "y": 180 },
+    "facing=west":  { "model": "kingdoms:block/stable_block", "y": 270 }
   }
 }

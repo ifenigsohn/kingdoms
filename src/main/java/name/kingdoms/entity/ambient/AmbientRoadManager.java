@@ -33,8 +33,8 @@ public final class AmbientRoadManager {
     private static final int TOTAL_CAP_BUFFER = 8;
     private static int TOTAL_LIVE = 0;
     private static final int TOTAL_CAP = 200; // tune for whole server
-    private static final int CAP_PER_PLAYER = 25;     // tune: max road NPCs near player
-    private static final int CAP_PLAYER_RADIUS = 60;  // tune: how far "near" means
+    private static final int CAP_PER_PLAYER = 20;     // tune: max road NPCs near player
+    private static final int CAP_PLAYER_RADIUS = 80;  // tune: how far "near" means
 
     public static void onRoadAmbientDespawn() {
         if (TOTAL_LIVE > 0) TOTAL_LIVE--;
@@ -43,7 +43,7 @@ public final class AmbientRoadManager {
     private static final float HORSE_CHANCE = 0.18f;
 
     // day vs night pacing
-    private static final int DAY_MIN_COOLDOWN = 20 * 5;   // 5s
+    private static final int DAY_MIN_COOLDOWN = 20 * 10;   // 10s
     private static final int DAY_MAX_COOLDOWN = 20 * 30;  // 30s
     private static final int NIGHT_MIN_COOLDOWN = 20 * 40; // 40s
     private static final int NIGHT_MAX_COOLDOWN = 20 * 80; // 80s
@@ -57,10 +57,10 @@ public final class AmbientRoadManager {
         private static final Map<UUID, Long> NEXT_DUE_KINGDOM = new HashMap<>();
 
         private static final int TICKS_PER_CYCLE = 20 * 20; // 20 seconds = 400 ticks
-        private static final int CAP_PER_INFRA = 2;         // +5 road NPCs per infra point
+        private static final int CAP_PER_INFRA = 1;         // +1 road NPCs per infra point
 
         // how far we count existing road NPCs for cap checks
-        private static final int CAP_COUNT_RADIUS = 96;
+        private static final int CAP_COUNT_RADIUS = 120;
         
 
 

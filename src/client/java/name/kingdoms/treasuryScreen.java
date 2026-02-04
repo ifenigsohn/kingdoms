@@ -14,6 +14,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 import name.kingdoms.payload.ecoRequestPayload;
+import net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipComponent;
+import net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipPositioner;
+import net.minecraft.client.gui.screens.inventory.tooltip.DefaultTooltipPositioner;
+import net.minecraft.resources.ResourceLocation;
 
 
 
@@ -54,6 +58,17 @@ public class treasuryScreen extends Screen {
 
     // Pixel scrolling for mixed-height list
     private int scrollPx = 0;
+
+    // --- Hover tooltip geometry (set each render) ---
+    private int happyLineY = -1;
+    private int secLineY   = -1;
+    private int econLineY  = -1;
+
+    private int hoverLineX = 0;
+    private int hoverLineW = this.width / 2;
+
+
+
 
     // Collapsible groups
     private final Map<String, Boolean> collapsed = new HashMap<>();
@@ -165,6 +180,8 @@ public class treasuryScreen extends Screen {
         super.init();
 
         ClientPlayNetworking.send(new name.kingdoms.payload.KingdomEventsRequestC2SPayload());
+        ClientPlayNetworking.send(new name.kingdoms.payload.EcoBreakdownRequestC2SPayload());
+
 
         closeBtn = Button.builder(Component.literal("Close"), b -> onClose())
                 .bounds(this.width - 62, 8, 54, 18)
@@ -413,7 +430,12 @@ public class treasuryScreen extends Screen {
         g.drawString(this.font, "Resources", leftX, y, 0xFFFFFFFF);
         y += 14;
 
+        // record hover region base x/w for these lines
+        hoverLineX = leftX;
+        hoverLineW = 260;
+
         // Happiness line (colored)
+        happyLineY = y;
         double h = eco.happiness();
         int hColor = (h >= 7.0) ? 0xFF22CC22 : (h >= 4.0) ? 0xFFFFCC00 : 0xFFFF4444;
         String band = (h >= 7.0) ? "High" : (h >= 4.0) ? "Medium" : "Low";
@@ -421,17 +443,22 @@ public class treasuryScreen extends Screen {
         y += 14;
 
         // Security line (colored)
+        secLineY = y;
         double s = eco.securityValue();
         double req = eco.requiredSecurity();
         String sBand = eco.securityBand();
         int sColor = (s >= 0.40) ? 0xFF22CC22 : (s >= req) ? 0xFFFFCC00 : 0xFFFF4444;
-
-        // If you want the "3:10" style shown:
         int per10 = (int) Math.round(s * 10.0);
-
         g.drawString(this.font,
                 String.format("Security: %d:10 (%.2f / %.2f, %s)", per10, s, req, sBand),
                 leftX, y, sColor);
+        y += 14;
+
+        // Economy multiplier line
+        econLineY = y;
+        var bd = kingdomsClient.CLIENT_ECO_BREAKDOWN;
+        double mult = (bd == null) ? 1.0 : bd.finalMult();
+        g.drawString(this.font, String.format("Economy: x%.2f", mult), leftX, y, 0xFFCCCCCC);
         y += 14;
 
 
@@ -545,15 +572,36 @@ public class treasuryScreen extends Screen {
             if (it instanceof EntryItem ei) {
                 buyButtons.get(b).active = canAfford(eco, ei.entry());
             }
+        }   
+
+       super.render(g, mouseX, mouseY, delta);
+
+        // schedule tooltip for next frame (GuiGraphics will draw it in renderDeferredElements())
+        var bd2 = kingdomsClient.CLIENT_ECO_BREAKDOWN;
+        if (bd2 != null) {
+            if (inLine(mouseX, mouseY, happyLineY)) {
+                drawHoverTooltipBox(g, mouseX, mouseY, happinessTooltip(bd2));
+            } else if (inLine(mouseX, mouseY, secLineY)) {
+                drawHoverTooltipBox(g, mouseX, mouseY, securityTooltip(bd2));
+            } else if (inLine(mouseX, mouseY, econLineY)) {
+                drawHoverTooltipBox(g, mouseX, mouseY, economyTooltip(bd2));
+            }
         }
 
-        super.render(g, mouseX, mouseY, delta);
+
     }
 
     @Override
     public boolean isPauseScreen() {
         return false;
     }
+
+    private static List<FormattedCharSequence> toVisualLines(List<Component> lines) {
+        List<FormattedCharSequence> out = new ArrayList<>(lines.size());
+        for (Component c : lines) out.add(c.getVisualOrderText());
+        return out;
+    }
+
 
 
     /* -----------------------------
@@ -633,6 +681,87 @@ public class treasuryScreen extends Screen {
         else sb.append(String.format(Locale.ROOT, "%.2f", v));
         sb.append(" ").append(label);
     }
+
+    private boolean inLine(int mouseX, int mouseY, int y) {
+        int h = 12;
+        return mouseX >= hoverLineX && mouseX <= (hoverLineX + hoverLineW)
+                && mouseY >= y && mouseY <= (y + h);
+    }
+
+
+    private List<Component> happinessTooltip(name.kingdoms.payload.EcoBreakdownS2CPayload bd) {
+        return List.of(
+                Component.literal("Happiness breakdown"),
+                Component.literal(String.format("Base: %.2f", bd.hBase())),
+                Component.literal(String.format("Security penalty: -%.2f", bd.hSecurityPenalty())),
+                Component.literal(String.format("Pressure: %+.2f", bd.hPressureDelta())),
+                Component.literal(String.format("Final: %.2f", bd.hEff()))
+        );
+    }
+
+    private List<Component> securityTooltip(name.kingdoms.payload.EcoBreakdownS2CPayload bd) {
+        return List.of(
+                Component.literal("Security breakdown"),
+                Component.literal(String.format("Base: %.2f", bd.sBase())),
+                Component.literal(String.format("Pressure: %+.2f", bd.sPressureDelta())),
+                Component.literal(String.format("Final: %.2f", bd.sEff()))
+        );
+    }
+
+    private List<Component> economyTooltip(name.kingdoms.payload.EcoBreakdownS2CPayload bd) {
+        return List.of(
+                Component.literal("Economy multiplier breakdown"),
+                Component.literal(String.format("From happiness: x%.3f", bd.pmFromH())),
+                Component.literal(String.format("From security:  x%.3f", bd.pmFromS())),
+                Component.literal(String.format("Productivity:   x%.3f", bd.pmEff())),
+                Component.literal(String.format("Pressure econ:  x%.3f", bd.pressureEconMult())),
+                Component.literal(String.format("Tavern gold in: x%.3f", bd.tavernGoldInMult())),
+                Component.literal(String.format("Shop gold out:  x%.3f", bd.shopGoldOutMult())),
+                Component.literal(String.format("Final:          x%.3f", bd.finalMult()))
+        );
+    }
+
+    private void drawHoverTooltipBox(GuiGraphics g, int mouseX, int mouseY, List<Component> lines) {
+        if (lines == null || lines.isEmpty()) return;
+
+        int pad = 6;
+        int lineH = 12;
+
+        // measure width
+        int w = 0;
+        for (Component c : lines) w = Math.max(w, this.font.width(c));
+        w = w + pad * 2;
+
+        int h = pad * 2 + lines.size() * lineH;
+
+        int x = mouseX + 12;
+        int y = mouseY + 12;
+
+        // clamp to screen
+        if (x + w > this.width)  x = this.width - w - 6;
+        if (y + h > this.height) y = this.height - h - 6;
+        if (x < 6) x = 6;
+        if (y < 6) y = 6;
+
+        // background + border
+        int bg = 0xCC000000;
+        int border = 0xFFAAAAAA;
+
+        g.fill(x, y, x + w, y + h, bg);
+        g.hLine(x, x + w, y, border);
+        g.hLine(x, x + w, y + h, border);
+        g.vLine(x, y, y + h, border);
+        g.vLine(x + w, y, y + h, border);
+
+        // text
+        int ty = y + pad;
+        for (int i = 0; i < lines.size(); i++) {
+            int color = (i == 0) ? 0xFFFFFFFF : 0xFFCCCCCC;
+            g.drawString(this.font, lines.get(i), x + pad, ty, color, false);
+            ty += lineH;
+        }
+    }
+
 
     private static String ioString(jobDefinition def, boolean inputs) {
         StringBuilder sb = new StringBuilder();
@@ -718,7 +847,10 @@ public class treasuryScreen extends Screen {
         // refresh eco every 2 seconds while open
         if ((this.minecraft.level.getGameTime() % 40L) == 0L) {
             ClientPlayNetworking.send(new ecoRequestPayload());
+            ClientPlayNetworking.send(new name.kingdoms.payload.EcoBreakdownRequestC2SPayload());
         }
+
+        
     }
 
 }

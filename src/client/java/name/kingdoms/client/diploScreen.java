@@ -119,6 +119,30 @@ public class diploScreen extends AbstractContainerScreen<diploMenu> {
             ClientPlayNetworking.send(new name.kingdoms.payload.requestProposalC2SPayload(toKingdom));
         });
 
+        addLocalAction("Speak to (Policies)", () -> {
+            if (mc == null) return;
+
+            int entId = menu.kingEntityId; // public field in diploMenu
+            java.util.UUID entUuid = menu.getTargetEntityUuid();
+            java.util.UUID kid = menu.getTargetKingdomId();
+
+            if (kid == null) {
+                if (mc.player != null) mc.player.displayClientMessage(Component.literal("No target kingdom."), false);
+                return;
+            }
+            if (entUuid == null) entUuid = new java.util.UUID(0L, 0L);
+
+            ClientPlayNetworking.send(new name.kingdoms.payload.KingSpeakActionsRequestC2SPayload(
+                    entId,
+                    entUuid,
+                    kid,
+                    name.kingdoms.pressure.ForeignPressureActions.CH_KING
+            ));
+        });
+
+
+
+
 
 
         contentH = actionButtons.size() * BTN_H + Math.max(0, actionButtons.size() - 1) * BTN_GAP;

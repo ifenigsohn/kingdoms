@@ -1,11 +1,15 @@
 package name.kingdoms.entity.ai;
 
 import name.kingdoms.IKingdomSpawnerBlock;
+import name.kingdoms.aiKingdomState;
 import name.kingdoms.kingdomState;
 import name.kingdoms.namePool;
 import name.kingdoms.diplomacy.DiplomacyRelationsState;
 import name.kingdoms.entity.SoldierEntity;
+import name.kingdoms.payload.KingSpeakActionsRequestC2SPayload;
+import name.kingdoms.pressure.ForeignPressureActions;
 import name.kingdoms.war.WarState;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
@@ -16,6 +20,8 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.DifficultyInstance;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.*;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
@@ -131,6 +137,31 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         this.setPersistenceRequired();
     }
 
+    // --- AI throttling ---
+    private int aiInterval = 1;          // ticks between AI updates
+    private int aiSkip = 0;              // countdown
+    private int nearPlayerCheckCd = 0;   // how often to recompute nearest player
+    private boolean hasNearbyPlayer = true;
+    private double nearestPlayerD2 = 0.0;
+    private int ambientTargetCheckCd = 0;
+
+    // --- Hibernate (skip expensive movement tick when far) ---
+    private int hibernateCheckCd = 0;
+    private boolean hibernating = false;
+
+    // --- Soft throttle (still ticks, but much less often) ---
+    private int softTickSkip = 0;
+    private static final int SOFT_DIST = 48;         // start soft-throttling beyond this
+    private static final int SOFT_TICK_RATE = 5;     // only do full tick 1/5 ticks when soft
+
+
+    // Tune these
+    private static final int HIBERNATE_DIST = 96;      // start hibernating when farther than this
+    private static final int WAKE_DIST = 80;           // wake when closer than this
+    private static final int HIBERNATE_CHECK_TICKS = 20; // check once per second
+
+
+
     public static AttributeSupplier.Builder createAttributes() {
         return Mob.createMobAttributes()
                 .add(Attributes.MAX_HEALTH, 20.0D)
@@ -141,12 +172,12 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     
     @Override
     public boolean isCustomNameVisible() {
-    // Ambient soldiers ALWAYS show their nametag
-    if (this.isAmbient()) {
-        return true;
+        // Ambient soldiers ALWAYS show their nametag
+        if (this.isAmbient()) {
+            return true;
+        }
+        return super.isCustomNameVisible();
     }
-    return super.isCustomNameVisible();
-}
 
     public BlockPos getAmbientLoiterCenter() { return ambientLoiterCenter; }
     public int getAmbientLoiterRadius() { return ambientLoiterRadius; }
@@ -162,6 +193,55 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     protected net.minecraft.world.entity.ai.navigation.PathNavigation createNavigation(Level level) {
         return new name.kingdoms.entity.TrapdoorBlockingGroundNavigation(this, level);
     }
+
+    private boolean isFarInactive() {
+        return !hasNearbyPlayer || nearestPlayerD2 > (96 * 96);
+    }
+
+    private void updateHibernateState(ServerLevel level) {
+        // Never hibernate ambient scenes or combatants (they're the “interesting” ones)
+        if (this.isAmbient() || this.isCombatant() || this.isSleeping()) {
+            hibernating = false;
+            return;
+        }
+
+        if (hibernateCheckCd-- > 0) return;
+        hibernateCheckCd = HIBERNATE_CHECK_TICKS;
+
+        if (nearPlayerCheckCd > 0) {
+            // customServerAiStep will refresh soon; use last-known values
+        } else {
+            Player p = level.getNearestPlayer(this, 160.0);
+            hasNearbyPlayer = (p != null);
+            nearestPlayerD2 = (p == null) ? Double.MAX_VALUE : this.distanceToSqr(p);
+        }
+        double d2 = nearestPlayerD2;
+
+        // Hard unload ONLY spawner-bound non-ambient non-combatants (town clutter)
+        if (this.hasSpawnerPos() && !this.isAmbient() && !this.isCombatant()) {
+            if (d2 > (192.0 * 192.0)) {
+                this.discard();
+                return;
+            }
+        }
+
+
+        // Hysteresis so it doesn't flicker
+        if (!hibernating) {
+            if (d2 > (HIBERNATE_DIST * HIBERNATE_DIST)) hibernating = true;
+        } else {
+            if (d2 < (WAKE_DIST * WAKE_DIST)) hibernating = false;
+        }
+    }
+
+    private boolean shouldSoftThrottle() {
+        // don’t soft-throttle ambient scenes or combatants
+        if (this.isAmbient() || this.isCombatant() || this.isSleeping()) return false;
+        return hasNearbyPlayer && nearestPlayerD2 > (SOFT_DIST * SOFT_DIST) && nearestPlayerD2 <= (HIBERNATE_DIST * HIBERNATE_DIST);
+    }
+
+
+
 
 
     @Override
@@ -181,15 +261,15 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         });
 
         this.goalSelector.addGoal(3, new AmbientSeparationGoal(this, 2.0, 1.05));
-        this.goalSelector.addGoal(4, new name.kingdoms.entity.ai.AmbientFollowLeaderGoal(this, 1.15, 6.0f, 3.0f));
+        this.goalSelector.addGoal(4, new AmbientFollowLeaderGoal(this, 1.15, 6.0f, 3.0f));
 
-        this.goalSelector.addGoal(4, new OpenDoorGoal(this, true));
+        this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
 
         // Existing NPC goals
-        this.goalSelector.addGoal(5, new FindBedAtNightGoalNPC(this, 1.05D, 30));
-        this.goalSelector.addGoal(6, new ReturnHomeDayGoalNPC(this, 1.05D));
+        this.goalSelector.addGoal(6, new FindBedAtNightGoalNPC(this, 1.05D, 30));
+        this.goalSelector.addGoal(7, new ReturnHomeDayGoalNPC(this, 1.05D));
 
-        this.goalSelector.addGoal(6, new AmbientLoiterGoal(this, new AmbientLoiterGoal.LoiterAccess() {
+        this.goalSelector.addGoal(8, new AmbientLoiterGoal(this, new AmbientLoiterGoal.LoiterAccess() {
             @Override public BlockPos getAmbientLoiterCenter() { return aiKingdomNPCEntity.this.getAmbientLoiterCenter(); }
             @Override public int getAmbientLoiterRadius() { return aiKingdomNPCEntity.this.getAmbientLoiterRadius(); }
             @Override public boolean isAmbientLoiterActive() { return aiKingdomNPCEntity.this.isAmbientLoiterActive(); }
@@ -197,13 +277,22 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
 
 
-        this.goalSelector.addGoal(7, new WaterAvoidingRandomStrollGoal(this, 0.9D) {
-            @Override public boolean canUse() { return !aiKingdomNPCEntity.this.isSleeping() && super.canUse(); }
-            @Override public boolean canContinueToUse() { return !aiKingdomNPCEntity.this.isSleeping() && super.canContinueToUse(); }
+        this.goalSelector.addGoal(9, new WaterAvoidingRandomStrollGoal(this, 0.9D) {
+            @Override public boolean canUse() {
+                return !aiKingdomNPCEntity.this.isSleeping()
+                        && !aiKingdomNPCEntity.this.isFarInactive()
+                        && super.canUse();
+            }
+            @Override public boolean canContinueToUse() {
+                return !aiKingdomNPCEntity.this.isSleeping()
+                        && !aiKingdomNPCEntity.this.isFarInactive()
+                        && super.canContinueToUse();
+            }
         });
 
-        this.goalSelector.addGoal(8, new LookAtPlayerGoal(this, Player.class, 6.0F));
-        this.goalSelector.addGoal(9, new RandomLookAroundGoal(this));
+
+        this.goalSelector.addGoal(10, new LookAtPlayerGoal(this, Player.class, 6.0F));
+        this.goalSelector.addGoal(11, new RandomLookAroundGoal(this));
 
         // -----------------
         // Targets (combatants only)
@@ -462,14 +551,17 @@ public class aiKingdomNPCEntity extends PathfinderMob {
     public boolean isBedClaimedByOther(BlockPos bedHeadPos, int checkRadius) {
         if (!(this.level() instanceof ServerLevel sl)) return false;
 
+        var box = new net.minecraft.world.phys.AABB(bedHeadPos).inflate(checkRadius);
+
         return !sl.getEntitiesOfClass(
                 aiKingdomNPCEntity.class,
-                this.getBoundingBox().inflate(checkRadius),
+                box,
                 w -> w != this
                         && w.getAssignedBedPos() != null
                         && w.getAssignedBedPos().equals(bedHeadPos)
         ).isEmpty();
     }
+
 
     /** Called by spawner blocks to configure role + skin (+ name). */
     public void initFromSpawner(@Nullable String aiTypeId, int skinId) {
@@ -536,6 +628,61 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         this.ambientTalkTtl = Math.max(20, ttlTicks); // at least 1s
     }
 
+    @Override
+    protected InteractionResult mobInteract(Player player, InteractionHand hand) {
+        if (hand != InteractionHand.MAIN_HAND) return InteractionResult.PASS;
+
+        // Let client handle sending the request packet.
+        // Returning SUCCESS on client makes the hand swing and triggers client logic cleanly.
+        return InteractionResult.SUCCESS;
+    }
+
+    @Override
+    protected void customServerAiStep(ServerLevel level) {
+        // If sleeping, don't run AI at all.
+        if (this.isSleeping()) return;
+        if (hibernating) return;
+
+        // If in combat / panic, always run full AI.
+        boolean urgent = (this.getTarget() != null && this.getTarget().isAlive())
+                || this.hurtTime > 0
+                || panicTicks > 0;
+
+        if (!urgent) {
+            // Only recompute nearest player every 20 ticks (1 second)
+            if (nearPlayerCheckCd-- <= 0) {
+                nearPlayerCheckCd = 20;
+
+                Player p = level.getNearestPlayer(this, 160.0);
+                hasNearbyPlayer = (p != null);
+                nearestPlayerD2 = (p == null) ? Double.MAX_VALUE : this.distanceToSqr(p);
+
+                // Decide AI rate by distance
+                if (!hasNearbyPlayer) aiInterval = 80;                // 4s
+                else if (nearestPlayerD2 < (48 * 48)) aiInterval = 1;  // full
+                else if (nearestPlayerD2 < (96 * 96)) aiInterval = 5;  // cheaper
+                else aiInterval = 20;                                  // far
+            }
+
+            // When far from players, stop navigation so we don't repath constantly
+            if ((!hasNearbyPlayer || nearestPlayerD2 > (96 * 96)) && !this.getNavigation().isDone()) {
+                this.getNavigation().stop();
+            }
+
+            // Stagger updates so all NPCs don't think on the same tick
+            int stagger = (this.getId() & 15);
+
+            // Skip AI most ticks
+            if (((this.tickCount + stagger) % aiInterval) != 0) {
+                return;
+            }
+        }
+
+        // Run vanilla AI on allowed ticks
+        super.customServerAiStep(level);
+    }
+
+
 
     @Override
     public @Nullable SpawnGroupData finalizeSpawn(
@@ -583,8 +730,59 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
     @Override
     public void tick() {
+        // Client keeps normal behavior (rendering/anim expectations)
+        if (this.level().isClientSide()) {
+            super.tick();
+            return;
+        }
+
+        if (!(this.level() instanceof ServerLevel level)) {
+            super.tick();
+            return;
+        }
+
+        // Decide if we should hibernate (server-side only)
+        updateHibernateState(level);
+
+        // Soft throttle band: only do full tick sometimes
+        if (!hibernating && shouldSoftThrottle()) {
+            if (softTickSkip-- > 0) {
+                // minimal upkeep
+                this.baseTick();
+                // stop navigation so we don't repath on skipped ticks
+                if (!this.getNavigation().isDone()) this.getNavigation().stop();
+                return;
+            }
+            softTickSkip = SOFT_TICK_RATE - 1;
+        } else {
+            softTickSkip = 0;
+        }
+
+
+        // If hibernating, DO NOT call super.tick() (that’s where tickMovement/travel cost lives)
+        if (hibernating) {
+            // Minimal “keep alive” tick
+            this.baseTick();
+
+            // Freeze any motion/pathing and targets
+            this.getNavigation().stop();
+            this.setDeltaMovement(Vec3.ZERO);
+            this.setSprinting(false);
+            this.setTarget(null);
+
+            // Optional: keep them from drifting due to pushes
+            // (If you *want* crowds to still push them around, remove this)
+            // this.setNoGravity(true);
+
+            return;
+        }
+
+        // Normal full tick when not hibernating
         super.tick();
-        if (!(this.level() instanceof ServerLevel level)) return;
+
+        // -------------------------
+        // Everything below is your existing logic, unchanged
+        // -------------------------
 
         // Deliver queued ambient speech only when close enough
         if (ambientTalkTtl > 0) {
@@ -621,12 +819,10 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             }
         }
 
-
         // TTL despawn for ambient event NPCs
         if (this.entityData.get(IS_AMBIENT)) {
             int ttl = this.entityData.get(AMBIENT_TTL);
             if (ttl <= 0) {
-                // If riding an ambient mount, kill it too so you don't leak horses
                 Entity v = this.getVehicle();
                 if (v != null && v.getTags().contains(name.kingdoms.ambient.SpawnUtil.AMBIENT_MOUNT_TAG)) {
                     v.discard();
@@ -637,11 +833,9 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             this.entityData.set(AMBIENT_TTL, ttl - 1);
         }
 
-
-
         if (isCombatant() && !this.isSleeping()) {
             boolean fightingNow = this.getTarget() != null && this.getTarget().isAlive();
-            if (fightingNow) combatEquipLinger = 40; // 2 seconds
+            if (fightingNow) combatEquipLinger = 40;
             else if (combatEquipLinger > 0) combatEquipLinger--;
 
             setCombatSword(fightingNow || combatEquipLinger > 0);
@@ -650,32 +844,35 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             setCombatSword(false);
         }
 
-        // Ambient combat auto-engage (helps scripted battles start immediately)
+        // Ambient combat auto-engage (throttled)
         if (this.isAmbient() && this.isCombatant() && !this.isSleeping()) {
             if (this.getTarget() == null || !this.getTarget().isAlive()) {
-                // Prefer nearby enemy combatants (bandits <-> soldiers)
-                double r = 20.0;
-                var nearby = level.getEntitiesOfClass(
-                        aiKingdomNPCEntity.class,
-                        this.getBoundingBox().inflate(r),
-                        e -> e != this && e.isAlive() && e.isAmbient() && e.isCombatant() && this.isEnemyAiNpc(e)
-                );
 
-                aiKingdomNPCEntity best = null;
-                double bestD2 = Double.MAX_VALUE;
-                for (var e : nearby) {
-                    double d2 = this.distanceToSqr(e);
-                    if (d2 < bestD2) { bestD2 = d2; best = e; }
+                if (ambientTargetCheckCd-- <= 0) {
+                    ambientTargetCheckCd = 10 + (this.getId() & 7);
+
+                    double r = 20.0;
+
+                    var nearby = level.getEntitiesOfClass(
+                            aiKingdomNPCEntity.class,
+                            this.getBoundingBox().inflate(r),
+                            e -> e != this && e.isAlive() && e.isAmbient() && e.isCombatant() && this.isEnemyAiNpc(e)
+                    );
+
+                    aiKingdomNPCEntity best = null;
+                    double bestD2 = Double.MAX_VALUE;
+                    for (var e : nearby) {
+                        double d2 = this.distanceToSqr(e);
+                        if (d2 < bestD2) { bestD2 = d2; best = e; }
+                    }
+                    if (best != null) this.setTarget(best);
                 }
-                if (best != null) {
-                    this.setTarget(best);
-                }
+            } else {
+                ambientTargetCheckCd = 0;
             }
         }
 
-
-
-        // Despawn if spawner destroyed (accept ANY kingdom spawner type)
+        // Despawn if spawner destroyed
         if (this.hasSpawnerPos()) {
             BlockPos sp = this.getSpawnerPos();
             BlockState bs = level.getBlockState(sp);
@@ -738,6 +935,7 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             }
         }
     }
+
 
     private void teleportHome(ServerLevel level) {
         if (this.isSleeping()) this.stopSleeping();
@@ -873,6 +1071,9 @@ public class aiKingdomNPCEntity extends PathfinderMob {
         private final int searchRadius;
 
         private int recheckCooldown = 0;
+        private int pathCooldown = 0;
+        private static final int PATH_RECALC_COOLDOWN_TICKS = 60; // 3 seconds
+
 
         FindBedAtNightGoalNPC(aiKingdomNPCEntity mob, double speed, int searchRadius) {
             this.mob = mob;
@@ -895,6 +1096,10 @@ public class aiKingdomNPCEntity extends PathfinderMob {
                 return false;
             }
 
+            // If nobody is near, don't do expensive bed logic
+            Player p = sl.getNearestPlayer(mob, 96.0);
+            if (p == null) return false;
+
             if (mob.homePos == null) mob.homePos = mob.blockPosition();
 
             // If we have a bed, try to go sleep.
@@ -903,15 +1108,19 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             // Find a bed nearby
             BlockPos found = findNearestBed(sl, mob.blockPosition(), searchRadius);
             if (found == null) {
-                recheckCooldown = 40; // 2 seconds
+                // No bed found: back off much harder (10s) so 50 NPCs don't scan constantly
+                recheckCooldown = 200; // 10 seconds
                 return false;
             }
 
+
             // Don’t steal someone else’s bed
             if (mob.isBedClaimedByOther(found, searchRadius)) {
-                recheckCooldown = 40;
+                // Bed taken: medium backoff
+                recheckCooldown = 100; // 5 seconds
                 return false;
             }
+
 
             mob.assignedBedPos = found;
             return true;
@@ -929,18 +1138,27 @@ public class aiKingdomNPCEntity extends PathfinderMob {
 
             // continue while navigating OR until we are close enough to sleep
             double d2 = mob.blockPosition().distSqr(mob.assignedBedPos);
-            return d2 > 2.5 && !mob.getNavigation().isDone();
+            return d2 > 2.5;
         }
 
         @Override
         public void start() {
-            if (mob.assignedBedPos != null) {
-                mob.getNavigation().moveTo(
-                        mob.assignedBedPos.getX() + 0.5,
-                        mob.assignedBedPos.getY(),
-                        mob.assignedBedPos.getZ() + 0.5,
-                        speed
-                );
+            if (mob.assignedBedPos == null) return;
+
+            // Don't pathfind too often
+            if (pathCooldown > 0) return;
+            pathCooldown = PATH_RECALC_COOLDOWN_TICKS;
+
+            boolean ok = mob.getNavigation().moveTo(
+                    mob.assignedBedPos.getX() + 0.5,
+                    mob.assignedBedPos.getY(),
+                    mob.assignedBedPos.getZ() + 0.5,
+                    speed
+            );
+
+            // If pathfinding failed, back off HARD so we don't spam A*
+            if (!ok) {
+                recheckCooldown = 100; // 5 seconds
             }
         }
 
@@ -949,22 +1167,45 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             if (!(mob.level() instanceof ServerLevel sl)) return;
             if (mob.assignedBedPos == null) return;
 
+            // cooldown tick
+            if (pathCooldown > 0) pathCooldown--;
+
             // If bed got broken, forget it
             BlockState bs = sl.getBlockState(mob.assignedBedPos);
             if (!(bs.getBlock() instanceof BedBlock)) {
                 mob.assignedBedPos = null;
                 mob.getNavigation().stop();
-                recheckCooldown = 40;
+                recheckCooldown = 40; // 2 seconds
                 return;
             }
 
+            // If we're far but navigation is done (failed or completed), only try again occasionally
             double d2 = mob.blockPosition().distSqr(mob.assignedBedPos);
+            if (d2 > 2.5 && mob.getNavigation().isDone()) {
+                if (pathCooldown <= 0) {
+                    pathCooldown = PATH_RECALC_COOLDOWN_TICKS;
+
+                    boolean ok = mob.getNavigation().moveTo(
+                            mob.assignedBedPos.getX() + 0.5,
+                            mob.assignedBedPos.getY(),
+                            mob.assignedBedPos.getZ() + 0.5,
+                            speed
+                    );
+
+                    if (!ok) {
+                        recheckCooldown = 100; // 5 seconds backoff
+                        return;
+                    }
+                }
+            }
+
+            // If close enough, sleep
             if (d2 <= 2.5) {
-                // Try to sleep
                 mob.getNavigation().stop();
                 mob.startSleeping(mob.assignedBedPos);
             }
         }
+
 
         @Override
         public void stop() {
@@ -981,25 +1222,29 @@ public class aiKingdomNPCEntity extends PathfinderMob {
             int oy = origin.getY();
             int oz = origin.getZ();
 
-            for (int dx = -r; dx <= r; dx++) {
-                for (int dz = -r; dz <= r; dz++) {
-                    // stay near entity's vertical level to keep scan cheap
-                    for (int dy = -3; dy <= 3; dy++) {
-                        BlockPos p = new BlockPos(ox + dx, oy + dy, oz + dz);
-                        BlockState bs = sl.getBlockState(p);
-                        if (!(bs.getBlock() instanceof BedBlock)) continue;
+            // Sample count (tune): 200 checks instead of ~26,000
+            int samples = 200;
+            var rand = sl.random;
 
-                        int d2 = dx * dx + dz * dz + dy * dy;
-                        if (d2 < bestD2) {
-                            bestD2 = d2;
-                            best = p;
-                        }
-                    }
+            for (int i = 0; i < samples; i++) {
+                int dx = rand.nextInt(r * 2 + 1) - r;
+                int dz = rand.nextInt(r * 2 + 1) - r;
+                int dy = rand.nextInt(7) - 3;
+
+                BlockPos p = new BlockPos(ox + dx, oy + dy, oz + dz);
+                BlockState bs = sl.getBlockState(p);
+                if (!(bs.getBlock() instanceof BedBlock)) continue;
+
+                int d2 = dx * dx + dz * dz + dy * dy;
+                if (d2 < bestD2) {
+                    bestD2 = d2;
+                    best = p;
                 }
             }
 
             return best;
         }
+
     }
 
     @Nullable

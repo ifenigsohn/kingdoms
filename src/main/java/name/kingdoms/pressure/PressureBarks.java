@@ -1,7 +1,6 @@
 package name.kingdoms.pressure;
 
-import name.kingdoms.kingdomState;
-import net.minecraft.client.multiplayer.chat.LoggedChatMessage.Player;
+
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;

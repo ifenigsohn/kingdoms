@@ -47,11 +47,11 @@ public class kingdomBordersMapScreen extends Screen {
     // -------------------------
     // Persistent explored cache (CPU-side)
     // -------------------------
-    private static final int CACHE_W = 2048;
-    private static final int CACHE_H = 2048;
+    private static final int CACHE_W = 4096;
+    private static final int CACHE_H = 4096;
 
     // Cache pixels represent this many blocks (fixed, independent of UI zoom)
-    private static final int CACHE_SCALE_BLOCKS = 2;
+    private static final int CACHE_SCALE_BLOCKS = 4;
 
     private static NativeImage terrainCache;
     private static boolean cacheInit = false;
@@ -240,11 +240,36 @@ public class kingdomBordersMapScreen extends Screen {
     private static void fillFog() {
         if (terrainCache == null) return;
         for (int y = 0; y < CACHE_H; y++) {
-            for (int x = 0; x < CACHE_W; x++) {
+            for (int x = 0; x < CACHE_W; x++) {           
                 terrainCache.setPixel(x, y, FOG);
             }
         }
     }
+
+    private static void ensureTerrainCacheSize() {
+        if (terrainCache == null) return;
+
+        int w = terrainCache.getWidth();
+        int h = terrainCache.getHeight();
+        if (w == CACHE_W && h == CACHE_H) return;
+
+        // Old cache file (or old constants). Discard it and start fresh.
+        try {
+            terrainCache.close();
+        } catch (Throwable ignored) {}
+
+        terrainCache = new NativeImage(CACHE_W, CACHE_H, false);
+        fillFog();
+
+        // reset scan so reveal starts near player again
+        scanR = 0;
+        scanEdge = 0;
+        scanT = 0;
+
+        cacheDirty = true;
+        dirtyWrites = 0;
+    }
+
 
     private static void loadCacheIfExists(Minecraft mc, String key) {
         try {
@@ -259,6 +284,8 @@ public class kingdomBordersMapScreen extends Screen {
                 terrainCache = new NativeImage(CACHE_W, CACHE_H, false);
                 fillFog();
             }
+
+            ensureTerrainCacheSize();
 
             if (Files.exists(meta)) {
                 String txt = Files.readString(meta);
@@ -344,6 +371,8 @@ public class kingdomBordersMapScreen extends Screen {
                 cacheCenterZ = pz;
                 cacheInit = true;
             }
+
+            ensureTerrainCacheSize();
 
             return;
         }
@@ -908,6 +937,7 @@ public class kingdomBordersMapScreen extends Screen {
         lines += 1; // Allies
         if (war) lines += 2; // "⚔ AT WAR" + Enemies
         lines += 1; // Relation
+        lines += 1; // Happiness/Security (player scale)
         lines += 1; // Soldiers
         // (Tickets removed)
         lines += 1; // Gold/Food
@@ -979,6 +1009,30 @@ public class kingdomBordersMapScreen extends Screen {
 
         g.drawString(this.font, Component.literal("Relation: " + card.relation()), tx, ty, 0xFFC0C0C0, false);
         ty += 12;
+
+        // Happiness and Security on PLAYER scale
+        double hap = card.happinessValue();      // 0..10
+        double sec = card.securityValue();       // 0..1
+
+        int secPct = (int) Math.round(sec * 100.0);
+        String hs = String.format(Locale.ROOT, "Happiness: %.1f/10  Security: %d%%", hap, secPct);
+
+        // Color coding:
+        // - normal: gray
+        // - warning: light red (either stat low)
+        // - danger: brighter red (either stat very low)
+        int hsColor;
+        if (hap < 2.5 || sec < 0.20) {
+            hsColor = 0xFFFF6666;   // danger
+        } else if (hap < 4.0 || sec < 0.35) {
+            hsColor = 0xFFFFAAAA;   // warning
+        } else {
+            hsColor = 0xFFC0C0C0;   // normal
+        }
+
+        g.drawString(this.font, Component.literal(hs), tx, ty, hsColor, false);
+        ty += 12;
+
 
         g.drawString(this.font, Component.literal("Soldiers: " + card.soldiersAlive() + "/" + card.soldiersMax()), tx, ty, 0xFFC0C0C0, false);
         ty += 12;

@@ -1,7 +1,8 @@
 {
   "variants": {
-    "": {
-      "model": "kingdoms:block/woodstump"
-    }
+    "facing=north": { "model": "kingdoms:block/woodstump", "y": 0 },
+    "facing=east":  { "model": "kingdoms:block/woodstump", "y": 90 },
+    "facing=south": { "model": "kingdoms:block/woodstump", "y": 180 },
+    "facing=west":  { "model": "kingdoms:block/woodstump", "y": 270 }
   }
 }

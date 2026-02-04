@@ -19,6 +19,7 @@ import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntityTicker;
 import net.minecraft.world.level.block.entity.BlockEntityType;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.StateDefinition;
 import net.minecraft.world.level.block.state.properties.BooleanProperty;
@@ -28,7 +29,7 @@ import org.jetbrains.annotations.Nullable;
 import java.util.HashMap;
 import java.util.Map;
 
-public class jobBlock extends Block implements EntityBlock {
+public class jobBlock extends HorizontalFacingNoCullBlock implements EntityBlock {
 
     public static final int REQUIRE_RADIUS = 7;
 
@@ -44,13 +45,18 @@ public class jobBlock extends Block implements EntityBlock {
     private final String jobId;
     private final jobDefinition job;
 
-    public jobBlock(jobDefinition job, Properties props) {
+    public jobBlock(jobDefinition job, BlockBehaviour.Properties props) {
         super(props);
         this.job = job;
         this.jobId = job.getId();
 
-        // default state: enabled
-        this.registerDefaultState(this.stateDefinition.any().setValue(ENABLED, true));
+        // default state (include enabled + facing default is handled by base class,
+        // but we explicitly set enabled here)
+        this.registerDefaultState(
+                this.stateDefinition.any()
+                        .setValue(FACING, net.minecraft.core.Direction.NORTH)
+                        .setValue(ENABLED, true)
+        );
     }
 
     public String getJobId() {

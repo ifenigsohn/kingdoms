@@ -132,4 +132,10 @@ public final class AiRelationsState extends SavedData {
         return rel;
     }
 
+    public boolean has(UUID a, UUID b) {
+        if (a == null || b == null) return false;
+        return rel.containsKey(key(a, b));
+    }
+
+
 }

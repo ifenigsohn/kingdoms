@@ -12,6 +12,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 import name.kingdoms.blueprint.KingdomSatelliteSpawner.KingdomSize;
+import name.kingdoms.diplomacy.AiRelationsState;
 import name.kingdoms.entity.SoldierSkins;
 import name.kingdoms.blueprint.KingdomSatelliteSpawner;
 import java.util.HashMap;
@@ -189,14 +190,35 @@ public class aiKingdomState extends SavedData {
         k.horses  = range(r, 0, 100);
         k.weapons = range(r, 20, 150);
 
-        k.happiness = Mth.clamp(rangeInt(r, 25, 90), 0, 100);
-        k.security  = Mth.clamp(rangeInt(r, 0, 1), 0, 100);
+        k.happiness = Mth.clamp(rangeInt(r, 40, 90), 0, 100);
+        k.security = Mth.clamp(rangeInt(r, 40, 90), 0, 100);
+
 
         k.skinId = king.getSkinId();
         k.soldierSkinId = SoldierSkins.random(level.random);
 
         kk.soldierSkinId = k.soldierSkinId;
         ks.markDirty();
+
+        // -------------------------
+        // Init persistent AI↔AI relations for this new kingdom
+        // -------------------------
+        var server = level.getServer();
+        var aiRel = AiRelationsState.get(server);
+
+        // Ensure the new kingdom has a baseline opinion toward every existing AI kingdom
+        for (var other : this.kingdoms.values()) {
+        if (other == null || other.id == null) continue;
+        if (other.id.equals(k.id)) continue;
+
+        // If you add aiRel.has(...), use that. Otherwise see note below.
+        if (!aiRel.has(k.id, other.id)) {
+                int init = server.overworld().random.nextInt(31) - 15; // -15..+15
+                aiRel.set(k.id, other.id, init);
+        }
+        }
+
+
 
         kingdoms.put(kingdomId, k);
         setDirty();
@@ -461,6 +483,14 @@ public class aiKingdomState extends SavedData {
         public KingdomPersonality personality = KingdomPersonality.DEFAULT;
         public int skinId = 0;
         public int soldierSkinId = 0;
+
+        public double happinessValue() {
+                 return Mth.clamp(this.happiness / 10.0, 0.0, 10.0); // 0..10
+        }
+
+        public double securityValue() {
+                  return Mth.clamp(this.security / 100.0, 0.0, 1.0); // 0..1
+        }
 
 
         // army pool

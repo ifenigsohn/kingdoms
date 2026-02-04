@@ -19,7 +19,7 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import name.kingdoms.diplomacy.AiDiplomacyTicker;
 import name.kingdoms.diplomacy.Letter;
 import name.kingdoms.diplomacy.ResourceType;
-
+import name.kingdoms.entity.aiKingdomEntity;
 import name.kingdoms.blueprint.WorldgenToggleState;
 import name.kingdoms.diplomacy.AiDiplomacyEvent;
 import name.kingdoms.diplomacy.AiDiplomacyEventState;
@@ -35,6 +35,9 @@ import name.kingdoms.sim.SimRunWriter;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.UUID;
+import net.minecraft.world.entity.Entity;
+
+
 
 import name.kingdoms.ambient.AmbientContext;
 import name.kingdoms.ambient.AmbientEvent;
@@ -213,7 +216,47 @@ public final class KingdomsCommands {
                         .then(Commands.literal("toggle")
                                 .executes(ctx -> worldgenToggle(ctx.getSource()))
                         )
+                        .then(Commands.literal("forcegen")
+                                .executes(ctx -> forceGen(ctx, 200, null))
+                                .then(Commands.argument("radius", IntegerArgumentType.integer(32, 2000))
+                                        .executes(ctx -> forceGen(ctx, IntegerArgumentType.getInteger(ctx, "radius"), null))
+                                        .then(Commands.argument("bpId", StringArgumentType.word())
+                                                .executes(ctx -> forceGen(
+                                                        ctx,
+                                                        IntegerArgumentType.getInteger(ctx, "radius"),
+                                                        StringArgumentType.getString(ctx, "bpId")
+                                                ))
+                                        )
+                                )
+                        )
+
+
                 )
+
+                .then(Commands.literal("renamekingdom")
+                        .then(Commands.argument("target", StringArgumentType.string())
+                                .then(Commands.argument("newName", StringArgumentType.greedyString())
+                                        .executes(ctx -> renameKingdom(
+                                                ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "target"),
+                                                StringArgumentType.getString(ctx, "newName")
+                                        ))
+                                )
+                        )
+                        )
+
+                        .then(Commands.literal("renameking")
+                                .then(Commands.argument("target", StringArgumentType.string())
+                                        .then(Commands.argument("newKingName", StringArgumentType.greedyString())
+                                                .executes(ctx -> renameKing(
+                                                        ctx.getSource(),
+                                                        StringArgumentType.getString(ctx, "target"),
+                                                        StringArgumentType.getString(ctx, "newKingName")
+                                                ))
+                                        )
+                                )
+                        )
+
 
                 
 
@@ -828,6 +871,120 @@ public final class KingdomsCommands {
         return 0;
         }
 
+        private static int renameKingdom(CommandSourceStack src, String targetRaw, String newNameRaw) {
+                var server = src.getServer();
+                var ks = kingdomState.get(server);
+                var ai = aiKingdomState.get(server);
+
+                String newName = (newNameRaw == null) ? "" : newNameRaw.trim();
+                if (newName.isBlank()) {
+                        src.sendFailure(Component.literal("New name cannot be blank."));
+                        return 0;
+                }
+
+                UUID id = resolveKingdomIdFromTarget(ks, ai, targetRaw);
+                if (id == null) {
+                        src.sendFailure(Component.literal("No kingdom found for: " + (targetRaw == null ? "" : targetRaw)));
+                        return 0;
+                }
+
+                var k = ks.getKingdom(id);
+                if (k == null) {
+                        src.sendFailure(Component.literal("Kingdom not found in kingdomState for id=" + id));
+                        return 0;
+                }
+
+                String old = (k.name == null ? "" : k.name);
+                k.name = newName;
+                ks.setDirty();
+
+                // Mirror into aiKingdomState if this is an AI kingdom
+                var aiK = ai.getById(id);
+                if (aiK != null) {
+                        aiK.name = newName;
+                        ai.markDirty();
+                }
+
+                src.sendSuccess(() -> Component.literal("Renamed kingdom '" + old + "' -> '" + newName + "' (id=" + id + ")"), true);
+                return 1;
+                }
+
+                private static int renameKing(CommandSourceStack src, String targetRaw, String newKingNameRaw) {
+                var server = src.getServer();
+                var ks = kingdomState.get(server);
+                var ai = aiKingdomState.get(server);
+
+                String newKingName = (newKingNameRaw == null) ? "" : newKingNameRaw.trim();
+                if (newKingName.isBlank()) {
+                        src.sendFailure(Component.literal("New king name cannot be blank."));
+                        return 0;
+                }
+
+                UUID kingdomId = resolveKingdomIdFromTarget(ks, ai, targetRaw);
+                if (kingdomId == null) {
+                        src.sendFailure(Component.literal("No kingdom found for: " + (targetRaw == null ? "" : targetRaw)));
+                        return 0;
+                }
+
+                var aiK = ai.getById(kingdomId);
+                if (aiK == null) {
+                        src.sendFailure(Component.literal("That target is not an AI kingdom (id=" + kingdomId + ")."));
+                        return 0;
+                }
+
+                UUID kingUuid = aiK.kingUuid;
+                if (kingUuid == null) {
+                        src.sendFailure(Component.literal("AI kingdom has no king UUID (id=" + kingdomId + ")."));
+                        return 0;
+                }
+
+                aiKingdomEntity found = null;
+                for (ServerLevel lvl : server.getAllLevels()) {
+                        Entity e = lvl.getEntity(kingUuid);
+                        if (e instanceof aiKingdomEntity king) {
+                        found = king;
+                        break;
+                        }
+                }
+
+                if (found == null) {
+                        src.sendFailure(Component.literal(
+                        "Could not find the AI king entity in loaded worlds (kingUuid=" + kingUuid + "). " +
+                        "If the chunk is unloaded, teleport near the king/spawner and try again."
+                        ));
+                        return 0;
+                }
+
+                String old = found.getKingName();
+                found.setKingName(newKingName);
+
+                src.sendSuccess(() -> Component.literal("Renamed king '" + old + "' -> '" + newKingName + "' (kingdomId=" + kingdomId + ")"), true);
+                return 1;
+                }
+
+                private static UUID resolveKingdomIdFromTarget(kingdomState ks, aiKingdomState ai, String targetRaw) {
+                String target = (targetRaw == null) ? "" : targetRaw.trim();
+                if (target.isBlank()) return null;
+
+                // 1) UUID
+                try {
+                        return UUID.fromString(target);
+                } catch (IllegalArgumentException ignored) {}
+
+                // 2) Exact match on kingdomState kingdom names
+                var km = ks.getAllKingdoms().stream()
+                        .filter(k -> k != null && k.name != null && k.name.equalsIgnoreCase(target))
+                        .findFirst();
+                if (km.isPresent()) return km.get().id;
+
+                // 3) AI kingdom fuzzy match (reuse existing helper)
+                UUID aiId = findAiByName(ai, target);
+                if (aiId != null) return aiId;
+
+                return null;
+        }
+
+
         // -------------------------
         // Inspect: Player/World Kingdom
         // -------------------------
@@ -1096,6 +1253,38 @@ public final class KingdomsCommands {
         src.sendSuccess(() -> Component.literal("Kingdoms worldgen toggled to " + (now ? "ON" : "OFF")), true);
         return 1;
     }
+
+    private static int forceGen(CommandContext<CommandSourceStack> ctx, int radiusBlocks, String bpIdOrNull) {
+        CommandSourceStack src = ctx.getSource();
+        ServerPlayer p;
+        try {
+                p = src.getPlayerOrException();
+        } catch (Exception e) {
+                src.sendFailure(Component.literal("Must be run by a player."));
+                return 0;
+        }
+
+        ServerLevel level = (ServerLevel) p.level();
+
+
+        boolean ok = name.kingdoms.blueprint.worldGenBluePrintAutoSpawner.forceSpawnNear(
+                src.getServer(),
+                level,
+                p.blockPosition(),
+                radiusBlocks,
+                bpIdOrNull
+        );
+
+        if (!ok) {
+                src.sendFailure(Component.literal("Forcegen failed (busy, no valid spot found, or BP queue full). Try again, increase radius, or wait for current placement to finish."));
+                return 0;
+        }
+
+        String bpText = (bpIdOrNull == null || bpIdOrNull.isBlank()) ? "(random)" : bpIdOrNull;
+        src.sendSuccess(() -> Component.literal("[Kingdoms] Forced kingdom generation queued within " + radiusBlocks + " blocks. bp=" + bpText), true);
+        return 1;
+        }
+
 
 
         

@@ -1,5 +1,8 @@
 package name.kingdoms;
 
+import java.util.UUID;
+
+import name.kingdoms.entity.aiKingdomEntity;
 import name.kingdoms.entity.ai.aiKingdomNPCEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -87,15 +90,27 @@ public class AIkingdomNPCSpawnerBlock extends Block implements IKingdomSpawnerBl
 
         // If we somehow got duplicates, keep exactly one.
         if (list.size() > 1) {
-            // Deterministic: keep the one with the smallest entity id (oldest-ish)
             list.sort(java.util.Comparator.comparingInt(Entity::getId));
+
+            // keep oldest-ish
+            aiKingdomNPCEntity keep = list.get(0);
+
             for (int i = 1; i < list.size(); i++) {
                 list.get(i).discard();
             }
-            return; // after cleanup, do NOT spawn
+
+            // NEW: ensure the kept NPC is properly bound
+            ensureBound(sl, pos, keep);
+            return;
         }
 
-        if (list.size() == 1) return;
+
+        if (list.size() == 1) {
+            // NEW: self-heal binding in case the NPC lost its kingdom UUID
+            ensureBound(sl, pos, list.get(0));
+            return;
+        }
+
 
         spawnOne(sl, pos);
     }
@@ -123,7 +138,121 @@ public class AIkingdomNPCSpawnerBlock extends Block implements IKingdomSpawnerBl
         // bind to spawner so we can count "ours" and so it despawns if block is broken
         npc.setSpawnerPos(pos);
 
+        // ----------------------------
+        // Bind NPC to an AI kingdom id
+        // ----------------------------
+        UUID bindKid = null;
+
+        // A) Prefer: nearest AI king entity -> ensures AI kingdom exists + claims border
+        var kings = sl.getEntitiesOfClass(
+                aiKingdomEntity.class,
+                new AABB(pos).inflate(128),
+                e -> e != null && e.isAlive()
+        );
+
+        aiKingdomState ai = aiKingdomState.get(sl.getServer());
+
+        aiKingdomEntity nearestKing = null;
+        double bestD2 = Double.MAX_VALUE;
+        for (var k : kings) {
+            double d2 = k.distanceToSqr(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+            if (d2 < bestD2) { bestD2 = d2; nearestKing = k; }
+        }
+
+        if (nearestKing != null) {
+            // This call also links AI -> kingdomState (ensureAiKingdom + claimRect) inside aiKingdomState
+            var aiK = ai.getOrCreateForKing(sl, nearestKing);
+            if (aiK != null && aiK.id != null) bindKid = aiK.id;
+        }
+
+        // B) Fallback: if territory is already claimed in kingdomState
+        if (bindKid == null) {
+            var ks = kingdomState.get(sl.getServer());
+            var at = ks.getKingdomAt(sl, pos);
+            if (at != null && at.id != null) bindKid = at.id;
+        }
+
+        // C) Apply binding if we found something
+        if (bindKid != null) {
+            npc.setKingdomUUID(bindKid);
+            try { name.kingdoms.pressure.KingdomPressureState.get(sl.getServer()).markKnownAi(bindKid); }
+            catch (Throwable ignored) {}
+        }
+
+
+
+        // --------------------------------------------
+        // NEW: bind this NPC to the kingdom at this pos
+        // --------------------------------------------
+        var ks = kingdomState.get(sl.getServer());
+        var k = ks.getKingdomAt(sl, pos);
+        if (k != null && k.id != null) {
+            npc.setKingdomUUID(k.id);
+
+            // Optional: if this is an AI kingdom, mark discovered for pressure systems
+            // (harmless even if it's a player kingdom)
+            try {
+                name.kingdoms.pressure.KingdomPressureState.get(sl.getServer()).markKnownAi(k.id);
+            } catch (Throwable ignored) {}
+        } else {
+            // Debug if you want: spawner placed outside any kingdom region
+            // System.out.println("[AI NPC Spawner] No kingdomAt for pos=" + pos);
+            npc.setKingdomUUID(null);
+        }
+
         sl.addFreshEntity(npc);
         if (npc instanceof Mob mob) mob.setPersistenceRequired();
     }
+
+    private UUID inferKingdomId(ServerLevel sl, BlockPos spawnerPos) {
+        if (sl == null) return null;
+
+        UUID bindKid = null;
+
+        // A) Prefer: nearest AI king -> ensures AI kingdom exists/claims
+        var kings = sl.getEntitiesOfClass(
+                name.kingdoms.entity.aiKingdomEntity.class,
+                new AABB(spawnerPos).inflate(128),
+                e -> e != null && e.isAlive()
+        );
+
+        var ai = aiKingdomState.get(sl.getServer());
+
+        name.kingdoms.entity.aiKingdomEntity nearest = null;
+        double bestD2 = Double.MAX_VALUE;
+        for (var k : kings) {
+            double d2 = k.distanceToSqr(spawnerPos.getX() + 0.5, spawnerPos.getY() + 0.5, spawnerPos.getZ() + 0.5);
+            if (d2 < bestD2) { bestD2 = d2; nearest = k; }
+        }
+
+        if (nearest != null) {
+            var aiK = ai.getOrCreateForKing(sl, nearest);
+            if (aiK != null && aiK.id != null) bindKid = aiK.id;
+        }
+
+        // B) Fallback: claimed kingdom at the spawner position
+        if (bindKid == null) {
+            var ks = kingdomState.get(sl.getServer());
+            var at = ks.getKingdomAt(sl, spawnerPos);
+            if (at != null && at.id != null) bindKid = at.id;
+        }
+
+        return bindKid;
+    }
+
+    private void ensureBound(ServerLevel sl, BlockPos spawnerPos, aiKingdomNPCEntity npc) {
+        if (sl == null || npc == null) return;
+
+        UUID kid = npc.getKingdomUUID();
+        if (kid != null) return; // already bound
+
+        UUID inferred = inferKingdomId(sl, spawnerPos);
+        if (inferred != null) {
+            npc.setKingdomUUID(inferred);
+            try { name.kingdoms.pressure.KingdomPressureState.get(sl.getServer()).markKnownAi(inferred); }
+            catch (Throwable ignored) {}
+        }
+    }
+
+
 }

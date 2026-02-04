@@ -47,6 +47,15 @@ public class FindBedAtNightGoalAI extends Goal {
             }
         }
 
+        // Stagger bed searching so a town doesn't all scan on the same tick
+        int now = sl.getServer().getTickCount();
+        int stagger = (mob.getId() & 31); // 0..31
+        if (((now + stagger) % 100) != 0) { // only allow search attempt ~every 5s per NPC, staggered
+            return false;
+        }
+
+
+
         // 2) Find a new unclaimed bed nearby
         targetBedHead = findNearbyUnclaimedBedHead(sl, mob.blockPosition(), searchRange, mob);
         if (targetBedHead != null) {

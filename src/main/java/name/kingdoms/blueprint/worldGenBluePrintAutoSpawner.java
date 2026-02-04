@@ -47,6 +47,197 @@ public final class worldGenBluePrintAutoSpawner {
     private static final String[] CASTLE_POOL = { "castlenew1", "castlemed1","castlenew2","castlenew3","castlenew4","castlenew5" };
     private static final boolean INCLUDE_AIR = false;
 
+    // =========================================================
+    // Manual spawning (commands)
+    // =========================================================
+
+    private static void forcePreemptAll(MinecraftServer server, ServerLevel level) {
+        // 1) stop any running blueprint tasks right now
+        BlueprintPlacerEngine.forcePreemptRuntime(); // you already have this
+
+        // 2) drop the “only one region at a time” gate
+        KingdomGenGate.forceEnd(); // you'll add this (below)
+
+        // 3) (optional) clear this region reservation map if you want command to ignore spacing in-flight
+        reservedOriginXZ.clear();
+
+        // 4) you MAY want to clear these so placeSome() doesn’t backoff this key forever
+        // nextPlaceTick.clear();
+        // failCount.clear();
+    }
+
+    
+
+    /**
+     * Manually force-spawns a kingdom-style castle near {@code center}.
+     *
+     * - Ignores WorldgenToggleState (because it is a command)
+     * - Still loads chunks + uses heightmap to pick a sensible surface Y
+     * - Uses BlueprintPlacerEngine.enqueueWorldgen so roads + satellites behave identically to normal worldgen
+     */
+    public static boolean forceSpawnNear(MinecraftServer server,
+                                        ServerLevel level,
+                                        BlockPos center,
+                                        int radiusBlocks,
+                                        String preferredBpIdOrNull) {
+
+        // Avoid overlapping multi-spawns / fighting the engine.
+        if (KingdomGenGate.hasActiveRegion() || BlueprintPlacerEngine.getQueueSize() >= MAX_BP_QUEUE) {
+            forcePreemptAll(server, level);
+        }
+
+        // This key is ONLY for grouping roads/footprints and for in-flight de-dupe.
+        // It does NOT need to match the region-grid keys used by normal worldgen.
+        long tmpJobKey = level.getRandom().nextLong();
+        if (tmpJobKey == Long.MIN_VALUE) tmpJobKey = 1; // avoid sentinel
+        final long jobKey = tmpJobKey;
+
+
+
+        if (!KingdomGenGate.tryBeginRegion(jobKey)) return false;
+
+        try {
+            // Pick blueprint
+            String bpId = (preferredBpIdOrNull != null && !preferredBpIdOrNull.isBlank())
+                    ? preferredBpIdOrNull
+                    : CASTLE_POOL[level.getRandom().nextInt(CASTLE_POOL.length)];
+
+            // Try multiple candidates inside the radius until we find something that looks sane.
+            // (The BlueprintPlacerEngine preflight will still reject bad footprints.)
+            final int attempts = 48;
+            final int minDist = Math.min(96, Math.max(16, radiusBlocks / 3));
+            BlockPos origin = null;
+
+            for (int i = 0; i < attempts; i++) {
+                // random point in a disk
+                double ang = level.getRandom().nextDouble() * (Math.PI * 2.0);
+                double r = Math.sqrt(level.getRandom().nextDouble()) * radiusBlocks;
+                int x = center.getX() + (int) Math.round(Math.cos(ang) * r);
+                int z = center.getZ() + (int) Math.round(Math.sin(ang) * r);
+
+                // keep it from spawning directly on top of the player
+                long dx = (long) x - (long) center.getX();
+                long dz = (long) z - (long) center.getZ();
+                if (dx * dx + dz * dz < (long) minDist * (long) minDist) continue;
+
+                // optional biome safety (matches worldgen policy)
+                if (BLOCK_COLD_BIOMES && isColdBiome(level, x, z)) continue;
+
+                // keep spacing with already spawned castles
+                if (isTooCloseToAnyCastle(level, x, z)) continue;
+
+                // Ensure chunk exists before reading heightmaps
+                level.getChunk(x >> 4, z >> 4);
+                int y = surfaceY(level, x, z);
+                if (y <= level.getMinY() + 2) continue;
+
+                origin = new BlockPos(x, y, z);
+                break;
+            }
+
+            if (origin == null) {
+                KingdomGenGate.endRegion(jobKey);
+                return false;
+            }
+
+            final BlockPos originFinal = origin;
+
+            Blueprint bp = Blueprint.load(server, MOD_ID, bpId);
+
+            // Enqueue as a worldgen-style job so it participates in roads/satellites exactly like normal.
+            BlueprintPlacerEngine.enqueueWorldgenForced(
+                level, bp, originFinal, MOD_ID, INCLUDE_AIR,
+                jobKey, // roadsRegionKey
+                jobKey, // jobKey
+                () -> {
+                    // SUCCESS
+                    CastleOriginState.get(level).put(jobKey, originFinal);
+                    List<BlockPos> anchors = RoadAnchors.consumeBarrierAnchors(level, originFinal);
+                    if (anchors.isEmpty()) anchors = List.of(RoadAnchors.fallbackFromBlueprintOrigin(level, originFinal));
+
+                    RoadAnchorState st = RoadAnchorState.get(level);
+                    for (BlockPos a : anchors) st.add(jobKey, a);
+
+                    KingdomSatelliteSpawner.KingdomSize kSize = KingdomSatelliteSpawner.KingdomSize.MEDIUM;
+                    List<String> buildingPool = List.of(
+                            "struct1","struct2","struct3","struct4","struct5","struct6","struct7","struct8","struct9","struct10","struct11","struct12","struct13","struct14","struct15","struct16","struct17",
+                            "struct18","struct19","struct20","struct21","struct22","struct23"
+                    );
+
+                    UUID kingdomId = kingdomUuidForRegion(level.getSeed(), jobKey);
+
+                    int half = KingdomSatelliteSpawner.maxRadiusForSize(kSize) + 32;
+                    int minX = originFinal.getX() - half;
+                    int maxX = originFinal.getX() + half;
+                    int minZ = originFinal.getZ() - half;
+                    int maxZ = originFinal.getZ() + half;
+
+                    name.kingdoms.kingdomState ks = name.kingdoms.kingdomState.get(level.getServer());
+                    name.kingdoms.kingdomState.Kingdom kk = ks.ensureAiKingdom(
+                            kingdomId,
+                            kingdomId,
+                            "Forced Kingdom",
+                            originFinal
+                    );
+
+                    boolean haveValidBorder = kk.hasBorder;
+                    if (!kk.hasBorder) {
+                        boolean ok = ks.trySetKingdomBorder(level, kk, minX, maxX, minZ, maxZ);
+                        haveValidBorder = ok;
+                        if (!ok) {
+                            LOGGER.warn("[ForceGen] Border overlap prevented for kingdomId={} jobKey={} rect=({},{})->({},{})",
+                                    kingdomId, jobKey, minX, minZ, maxX, maxZ);
+                            kk.hasBorder = false;
+                            kk.borderMinX = kk.borderMaxX = kk.borderMinZ = kk.borderMaxZ = 0;
+                            ks.setDirty();
+                        }
+                    }
+
+                    if (haveValidBorder) {
+                        KingdomSatelliteSpawner.enqueuePlanAfterDelay(
+                                level, originFinal, bp, MOD_ID, jobKey,
+                                kSize, buildingPool, level.getRandom(),
+                                20 * 10,
+                                kk.borderMinX, kk.borderMaxX,
+                                kk.borderMinZ, kk.borderMaxZ
+                        );
+                    } else {
+                        KingdomSatelliteSpawner.enqueuePlanAfterDelay(
+                                level, originFinal, bp, MOD_ID, jobKey,
+                                kSize, buildingPool, level.getRandom(),
+                                20 * 10,
+                                minX, maxX, minZ, maxZ
+                        );
+                    }
+                },
+                () -> {
+                    // FAIL
+                    KingdomGenGate.endRegion(jobKey);
+                    KingdomsSpawnState.get(level).clearQueued(jobKey);
+                }
+        );
+
+
+            return true;
+        } catch (Exception ex) {
+            KingdomGenGate.endRegion(jobKey);
+            LOGGER.error("[ForceGen] Exception while enqueuing forced kingdom", ex);
+            return false;
+        }
+    }
+
+    private static boolean isTooCloseToAnyCastle(ServerLevel level, int candX, int candZ) {
+        CastleOriginState st = CastleOriginState.get(level);
+        for (BlockPos p : st.allOrigins()) {
+            long dx = (long) candX - (long) p.getX();
+            long dz = (long) candZ - (long) p.getZ();
+            if (dx * dx + dz * dz < MIN_CASTLE_SPACING_SQ) return true;
+        }
+        return false;
+    }
+
+
+
     // Anti-surprise: decide all regions within viewDist + EXTRA around players
     private static final int DECIDE_EXTRA_CHUNKS = 8;
 
@@ -73,6 +264,8 @@ public final class worldGenBluePrintAutoSpawner {
     private static final int NO_SPAWN_RADIUS_BLOCKS = 150;
     private static final long NO_SPAWN_RADIUS_SQ = (long) NO_SPAWN_RADIUS_BLOCKS * (long) NO_SPAWN_RADIUS_BLOCKS;
     private static final int MAX_PENDING_CHECKS_PER_TICK = 10;
+
+    
 
     private static UUID kingdomUuidForRegion(long worldSeed, long regionKey) {
         String s = "kingdoms:region:" + worldSeed + ":" + regionKey;
@@ -184,9 +377,22 @@ public final class worldGenBluePrintAutoSpawner {
             if (overworld == null) return;
 
              // === WORLDGEN TOGGLE ===
-            if (!WorldgenToggleState.get(overworld).isEnabled()) {
-                return; // stop deciding + placing entirely
+            boolean worldgenEnabled = WorldgenToggleState.get(overworld).isEnabled();
+
+            if (worldgenEnabled) {
+                // Only overworld for now (matches your old logic)
+                feedDecideQueue(server, overworld);
+                decideSome(overworld);
+                rebuildPendingQueueIfNeeded(overworld); // cheap guard
+                placeSome(server, overworld);
             }
+
+            // Still log even when disabled (optional)
+            if (LOG && (tickAge % (20 * 10) == 0)) {
+                LOGGER.info("[Kingdoms][SpawnV3] tick={} decideQ={} pendingQ={} bpQ={} reserved={} worldgenEnabled={}",
+                        tickAge, decideQueue.size(), pendingQueue.size(), BlueprintPlacerEngine.getQueueSize(), reservedOriginXZ.size(), worldgenEnabled);
+            }
+
 
             // Only overworld for now (matches your old logic)
             feedDecideQueue(server, overworld);
@@ -519,8 +725,29 @@ public final class worldGenBluePrintAutoSpawner {
                 level.getChunk(tcx, tcz); // loads/generates
             }
 
+
+
+            // Always ensure chunk exists before reading heightmaps
+            level.getChunk(tcx, tcz); // loads/generates
+
             int y = surfaceY(level, x, z);
+
+            // sanity: if still near minY, bail + requeue (heightmap still not valid)
+            if (y <= level.getMinY() + 2) {
+                int fc = failCount.getOrDefault(regionKey, 0) + 1;
+                failCount.put(regionKey, fc);
+                int backoff = Math.min(FAIL_COOLDOWN_MAX_TICKS, FAIL_COOLDOWN_BASE_TICKS * fc);
+                nextPlaceTick.put(regionKey, tickAge + backoff);
+
+                if (LOG) LOGGER.info("[SpawnV3] SKIP bad heightmap key={} plan=({}, {}) y={} (minY={})",
+                        regionKey, x, z, y, level.getMinY());
+
+                pendingQueue.addLast(regionKey);
+                return;
+            }
+
             BlockPos origin = new BlockPos(x, y, z);
+
 
             try {
                 Blueprint bp = Blueprint.load(server, MOD_ID, e.bpId());

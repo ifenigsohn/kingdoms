@@ -364,7 +364,7 @@ public class Kingdoms implements ModInitializer {
         ServerTickEvents.END_SERVER_TICK.register(Kingdoms::tickPlayerTickets);
         name.kingdoms.pressure.GlobalPressureEvents.init();
         name.kingdoms.pressure.AiPressureTicker.init();
-
+        name.kingdoms.pressure.AiInterKingdomPressureTicker.init();
 
 
         WarPendingTicker.init();

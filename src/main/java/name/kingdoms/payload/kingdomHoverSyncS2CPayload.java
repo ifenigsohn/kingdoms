@@ -17,6 +17,9 @@ public record kingdomHoverSyncS2CPayload(
 
         int relation,
 
+        double happinessValue, 
+        double securityValue, 
+
         int soldiersAlive,
         int soldiersMax,
 
@@ -51,6 +54,9 @@ public record kingdomHoverSyncS2CPayload(
                     buf.writeUtf(p.rulerName());
 
                     buf.writeVarInt(p.relation());
+
+                    buf.writeDouble(p.happinessValue()); 
+                    buf.writeDouble(p.securityValue());
 
                     buf.writeVarInt(p.soldiersAlive());
                     buf.writeVarInt(p.soldiersMax());
@@ -90,6 +96,9 @@ public record kingdomHoverSyncS2CPayload(
                         buf.readUtf(),
 
                         buf.readVarInt(),
+
+                        buf.readDouble(),     
+                        buf.readDouble(),
 
                         buf.readVarInt(),
                         buf.readVarInt(),

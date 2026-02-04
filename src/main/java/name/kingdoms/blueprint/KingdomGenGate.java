@@ -60,4 +60,9 @@ public final class KingdomGenGate {
         }
     }
 
+    public static void forceEnd() {
+        ACTIVE_REGION = Long.MIN_VALUE;
+    }
+
+
 }

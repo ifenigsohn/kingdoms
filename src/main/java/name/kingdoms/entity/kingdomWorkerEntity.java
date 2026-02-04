@@ -8,6 +8,7 @@ import net.minecraft.network.chat.Component;
 import name.kingdoms.RetinueRespawnManager;
 import name.kingdoms.kingdomState;
 import name.kingdoms.kingdomsClientProxy;
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -60,6 +61,25 @@ public class kingdomWorkerEntity extends PathfinderMob {
 
         private boolean equippedCombatSword = false;
 
+        // ---- Routine state ----
+        @org.jetbrains.annotations.Nullable private net.minecraft.core.BlockPos routineTarget = null;
+        private int routineLoiterTicks = 0;
+
+        // ---- TP / stuck detection ----
+        private int stuckTicks = 0;
+        private double lastDistToTargetSq = Double.MAX_VALUE;
+        private int tpCooldown = 0;
+
+        // Tune
+        private static final int ROUTINE_SEARCH_RADIUS = 40;
+        private static final int ROUTINE_SAMPLES = 220;      // cheap sampling instead of full cube scan
+        private static final int STUCK_MAX_TICKS = 20 * 8;   // 8 seconds
+        private static final int TP_COOLDOWN_TICKS = 20 * 20; // 20 seconds
+
+        // ---- Orphan cleanup ----
+        private int unboundTicks = 0;
+        private static final int UNBOUND_GRACE_TICKS = 20 * 12; // 12 seconds grace
+
 
 
         private boolean isCombatant() {
@@ -70,24 +90,76 @@ public class kingdomWorkerEntity extends PathfinderMob {
 
 
         private void updateDisplayName() {
-        if (!this.isRetinue()) return;
+            if (!this.isRetinue()) return;
 
-        String job = getJobId();
-        if (job == null || job.isBlank()) return;
+            String job = getJobId();
+            if (job == null || job.isBlank()) return;
 
-        String base = getRetinueBaseName();
-        if (base == null) base = "";
-        base = base.trim();
+            String base = getRetinueBaseName();
+            if (base == null) base = "";
+            base = base.trim();
 
-        Component prettyJob = Component.translatable("job.kingdoms." + job);
+            Component prettyJob = Component.translatable("job.kingdoms." + job);
 
-        Component name = base.isBlank()
-                ? prettyJob
-                : Component.literal(base + " (").append(prettyJob).append(Component.literal(")"));
+            Component name = base.isBlank()
+            ? prettyJob
+            : Component.literal(base + " (").append(prettyJob).append(Component.literal(")"));
 
-        this.setCustomName(name);
-        this.setCustomNameVisible(true);
-    }
+            this.setCustomName(blue(name));
+            this.setCustomNameVisible(true);
+
+
+        }
+
+
+        @Nullable
+        private static BlockPos findNearestPoiBlock(ServerLevel sl, BlockPos origin, int r, net.minecraft.world.level.block.Block poiBlock) {
+            BlockPos best = null;
+            int bestD2 = Integer.MAX_VALUE;
+
+            int ox = origin.getX();
+            int oy = origin.getY();
+            int oz = origin.getZ();
+
+            var rand = sl.random;
+
+            for (int i = 0; i < ROUTINE_SAMPLES; i++) {
+                int dx = rand.nextInt(r * 2 + 1) - r;
+                int dz = rand.nextInt(r * 2 + 1) - r;
+                int dy = rand.nextInt(9) - 4;
+
+                BlockPos p = new BlockPos(ox + dx, oy + dy, oz + dz);
+                var bs = sl.getBlockState(p);
+
+                if (bs.getBlock() != poiBlock) continue;
+
+                // If it’s a jobBlock, require ENABLED true
+                if (bs.getBlock() instanceof name.kingdoms.jobBlock) {
+                    try {
+                        if (!bs.getValue(name.kingdoms.jobBlock.ENABLED)) continue;
+                    } catch (Throwable ignored) {}
+                }
+
+                // must be enabled if it’s a jobBlock with ENABLED property
+                if (bs.getBlock() instanceof name.kingdoms.jobBlock) {
+                    try {
+                        if (!bs.getValue(name.kingdoms.jobBlock.ENABLED)) continue;
+                    } catch (Throwable ignored) {}
+                }
+
+                int d2 = dx * dx + dz * dz + dy * dy;
+                if (d2 < bestD2) {
+                    bestD2 = d2;
+                    best = p;
+                }
+            }
+
+            return best;
+        }
+
+
+
+        
 
 
     @Override
@@ -123,6 +195,10 @@ public class kingdomWorkerEntity extends PathfinderMob {
     private static final EntityDataAccessor<Boolean> IS_RETINUE =
             SynchedEntityData.defineId(kingdomWorkerEntity.class, EntityDataSerializers.BOOLEAN);
 
+    private static final EntityDataAccessor<BlockPos> BIND_POS =
+        SynchedEntityData.defineId(kingdomWorkerEntity.class, EntityDataSerializers.BLOCK_POS);
+
+
     // -----------------------
     // State
     // -----------------------
@@ -144,11 +220,13 @@ public class kingdomWorkerEntity extends PathfinderMob {
 
     private int panicTicks = 0;
     private long lastTaxDay = -1;
+    private int bindValidateCd = 0;
 
     // Retinue emergency teleport tuning
     private static final int RETINUE_EMERGENCY_TP_RADIUS = 90;      // should be >= FollowOwnerGoal range
     private static final int RETINUE_TP_COOLDOWN_TICKS = 40;        // 2 seconds
     private long lastRetinueTeleportTick = -999999L;
+    
 
 
     // -----------------------
@@ -186,73 +264,48 @@ public class kingdomWorkerEntity extends PathfinderMob {
 
 
     @Override
-    protected void registerGoals() {
-        this.goalSelector.addGoal(0, new FloatGoal(this));
+protected void registerGoals() {
+    this.goalSelector.addGoal(0, new FloatGoal(this));
 
-        // Panic only for non-combatants
-        this.goalSelector.addGoal(1, new PanicGoal(this, 1.35D) {
-            @Override public boolean canUse() {
-                return !kingdomWorkerEntity.this.isCombatant() && super.canUse();
-            }
-            @Override public boolean canContinueToUse() {
-                return !kingdomWorkerEntity.this.isCombatant() && super.canContinueToUse();
-            }
-        });
+    this.goalSelector.addGoal(1, new PanicGoal(this, 1.35D) {
+        @Override public boolean canUse() { return !kingdomWorkerEntity.this.isCombatant() && super.canUse(); }
+        @Override public boolean canContinueToUse() { return !kingdomWorkerEntity.this.isCombatant() && super.canContinueToUse(); }
+    });
 
-        // Combatants can melee attack
-        this.goalSelector.addGoal(2, new MeleeAttackGoal(this, 1.15D, true) {
-            @Override public boolean canUse() {
-                return kingdomWorkerEntity.this.isCombatant()
-                        && !kingdomWorkerEntity.this.isSleeping()
-                        && super.canUse();
-            }
-            @Override public boolean canContinueToUse() {
-                return kingdomWorkerEntity.this.isCombatant()
-                        && !kingdomWorkerEntity.this.isSleeping()
-                        && super.canContinueToUse();
-            }
-        });
+    this.goalSelector.addGoal(2, new MeleeAttackGoal(this, 1.15D, true) {
+        @Override public boolean canUse() { return kingdomWorkerEntity.this.isCombatant() && !kingdomWorkerEntity.this.isSleeping() && super.canUse(); }
+        @Override public boolean canContinueToUse() { return kingdomWorkerEntity.this.isCombatant() && !kingdomWorkerEntity.this.isSleeping() && super.canContinueToUse(); }
+    });
 
-        // Retinue follow (unique priorities)
-        this.goalSelector.addGoal(3, new FollowOwnerGoal(this, 2.0D, 8.0F, 8.0F));
-        this.goalSelector.addGoal(4, new RetinueSeparationGoal(this, 3.5, 1.0));
+    // Retinue follow/separation
+    this.goalSelector.addGoal(3, new FollowOwnerGoal(this, 2.0D, 8.0F, 8.0F));
+    this.goalSelector.addGoal(4, new RetinueSeparationGoal(this, 3.5, 1.0));
+    this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
 
-        this.goalSelector.addGoal(5, new OpenDoorGoal(this, true));
+    // Worker POI routines (they will self-gate retinue internally)
+    this.goalSelector.addGoal(6, new VisitMorningPoiGoal(this, 1.05D));
+    this.goalSelector.addGoal(7, new VisitTavernAtNightGoal(this, 1.05D));
 
-        // Worker-only goals should NOT run while retinue
-        this.goalSelector.addGoal(6, new FindBedAtNightGoal(this, 1.05D, 30) {
-            @Override public boolean canUse() {
-                return !kingdomWorkerEntity.this.isRetinue() && super.canUse();
-            }
-            @Override public boolean canContinueToUse() {
-                return !kingdomWorkerEntity.this.isRetinue() && super.canContinueToUse();
-            }
-        });
+    // Bed/home already gated with anonymous override in your code (keep that)
+    this.goalSelector.addGoal(8, new FindBedAtNightGoal(this, 1.05D, 30) {
+        @Override public boolean canUse() { return !kingdomWorkerEntity.this.isRetinue() && super.canUse(); }
+        @Override public boolean canContinueToUse() { return !kingdomWorkerEntity.this.isRetinue() && super.canContinueToUse(); }
+    });
 
-        this.goalSelector.addGoal(7, new ReturnHomeDayGoal(this, 1.05D) {
-            @Override public boolean canUse() {
-                return !kingdomWorkerEntity.this.isRetinue() && super.canUse();
-            }
-            @Override public boolean canContinueToUse() {
-                return !kingdomWorkerEntity.this.isRetinue() && super.canContinueToUse();
-            }
-        });
+    this.goalSelector.addGoal(9, new ReturnHomeDayGoal(this, 1.05D) {
+        @Override public boolean canUse() { return !kingdomWorkerEntity.this.isRetinue() && super.canUse(); }
+        @Override public boolean canContinueToUse() { return !kingdomWorkerEntity.this.isRetinue() && super.canContinueToUse(); }
+    });
 
-        this.goalSelector.addGoal(8, new WaterAvoidingRandomStrollGoal(this, 0.9D) {
-            @Override public boolean canUse() {
-                return !kingdomWorkerEntity.this.isRetinue()
-                        && !kingdomWorkerEntity.this.isSleeping()
-                        && super.canUse();
-            }
-            @Override public boolean canContinueToUse() {
-                return !kingdomWorkerEntity.this.isRetinue()
-                        && !kingdomWorkerEntity.this.isSleeping()
-                        && super.canContinueToUse();
-            }
-        });
+    this.goalSelector.addGoal(10, new WaterAvoidingRandomStrollGoal(this, 0.9D) {
+        @Override public boolean canUse() { return !kingdomWorkerEntity.this.isRetinue() && !kingdomWorkerEntity.this.isSleeping() && super.canUse(); }
+        @Override public boolean canContinueToUse() { return !kingdomWorkerEntity.this.isRetinue() && !kingdomWorkerEntity.this.isSleeping() && super.canContinueToUse(); }
+    });
 
-        this.goalSelector.addGoal(9, new LookAtPlayerGoal(this, Player.class, 6.0F));
-        this.goalSelector.addGoal(10, new RandomLookAroundGoal(this));
+    this.goalSelector.addGoal(11, new LookAtPlayerGoal(this, Player.class, 6.0F));
+    this.goalSelector.addGoal(12, new RandomLookAroundGoal(this));
+
+
 
         // --------------------
         // Target goals
@@ -319,6 +372,8 @@ public class kingdomWorkerEntity extends PathfinderMob {
         return true;
     }
 
+    
+
 
     @Override
     protected void defineSynchedData(SynchedEntityData.Builder builder) {
@@ -331,9 +386,21 @@ public class kingdomWorkerEntity extends PathfinderMob {
         builder.define(IS_RETINUE, false);
         builder.define(RETINUE_BASE_NAME, "");
         builder.define(KINGDOM_UUID, "");
+        builder.define(BIND_POS, BlockPos.ZERO);
 
 
     }
+
+    @Nullable
+    public BlockPos getBindPosOrNull() {
+        BlockPos p = this.entityData.get(BIND_POS);
+        return (p == null || p.equals(BlockPos.ZERO)) ? null : p;
+    }
+
+    public void setBindPos(@Nullable BlockPos p) {
+        this.entityData.set(BIND_POS, p == null ? BlockPos.ZERO : p);
+    }
+
 
     @Nullable
     public UUID getKingdomUUID() {
@@ -361,7 +428,9 @@ public class kingdomWorkerEntity extends PathfinderMob {
         super.aiStep();
     }
 
-
+    private static Component blue(Component c) {
+        return c.copy().withStyle(s -> s.withColor(ChatFormatting.BLUE));
+    }
     // -----------------------
     // MENUS
     // -----------------------
@@ -754,6 +823,18 @@ public class kingdomWorkerEntity extends PathfinderMob {
     public void tick() {
         super.tick();
 
+        if (this.level() instanceof ServerLevel sl && !this.isRetinue()) {
+            if (bindValidateCd-- <= 0) {
+                bindValidateCd = 100;
+                validateBinding(sl);
+                if (!this.isAlive()) return;
+            }
+
+            orphanCleanupTick(sl);
+            if (!this.isAlive()) return;
+        }
+
+
         if (this.level() instanceof ServerLevel sl) {
             // Retinue only; workers don't need this map
             if (!this.isRetinue()) {
@@ -824,6 +905,32 @@ public class kingdomWorkerEntity extends PathfinderMob {
             }
             return;
         }
+
+        if (this.level() instanceof ServerLevel sl && !this.isRetinue() && !this.isSleeping()) {
+
+            long t = sl.getDayTime() % 24000L;
+
+            // If we’re routing to a POI, routineTarget is set -> assist it
+            if (this.routineTarget != null) {
+                tpHelper_tick(sl, this.routineTarget, 2);
+            }
+            // If it’s night and we have a bed assignment, assist bed pathing
+            else if (t >= 12500L && t <= 23500L && this.assignedBedPos != null) {
+                tpHelper_tick(sl, this.assignedBedPos, 2);
+            }
+            // If it’s day and we have homePos, assist returning home (optional)
+            else if (t < 12000L && this.homePos != null) {
+                // only assist if we’re notably away
+                if (this.blockPosition().distSqr(this.homePos) > (14 * 14)) {
+                    tpHelper_tick(sl, this.homePos, 3);
+                } else {
+                    tpHelper_clear();
+                }
+            } else {
+                tpHelper_clear();
+            }
+        }
+
 
         // panic / running
         if (this.isOnFire() || this.hurtTime > 0) {
@@ -946,6 +1053,10 @@ public class kingdomWorkerEntity extends PathfinderMob {
         if (homePos != null) out.putLong("HomePos", homePos.asLong());
         if (assignedBedPos != null) out.putLong("BedPos", assignedBedPos.asLong());
 
+        BlockPos bp = getBindPosOrNull();
+        if (bp != null) out.putLong("BindPos", bp.asLong());
+
+
         out.putLong("LastTaxDay", lastTaxDay);
         String kid = this.entityData.get(KINGDOM_UUID);
         if (kid != null && !kid.isBlank()) out.putString("KingdomUUID", kid);
@@ -973,6 +1084,8 @@ public class kingdomWorkerEntity extends PathfinderMob {
 
         homePos = in.getLong("HomePos").map(BlockPos::of).orElse(null);
         assignedBedPos = in.getLong("BedPos").map(BlockPos::of).orElse(null);
+        this.entityData.set(BIND_POS, BlockPos.of(in.getLongOr("BindPos", BlockPos.ZERO.asLong())));
+
 
         // retinue fields
         this.entityData.set(IS_RETINUE, in.getBooleanOr("IsRetinue", false));
@@ -1036,6 +1149,83 @@ public class kingdomWorkerEntity extends PathfinderMob {
             }
         }
     }
+
+    private void tpHelper_clear() {
+        stuckTicks = 0;
+        lastDistToTargetSq = Double.MAX_VALUE;
+    }
+
+    private void tpHelper_tick(ServerLevel sl, BlockPos target, int arriveRadius) {
+        if (target == null) return;
+
+        // don’t spam teleports
+        if (tpCooldown > 0) {
+            tpCooldown--;
+            return;
+        }
+
+        double d2 = this.blockPosition().distSqr(target);
+        if (d2 <= (arriveRadius * arriveRadius)) {
+            tpHelper_clear();
+            return;
+        }
+
+        // If navigation isn't active, treat as stuck
+        boolean navActive = !this.getNavigation().isDone();
+
+        // progress check
+        boolean progressed = d2 < (lastDistToTargetSq - 0.25);
+        lastDistToTargetSq = d2;
+
+        // If we’re not even navigating right now, don’t accumulate “stuck”.
+        // (Goals decide when to navigate; this avoids false positives.)
+        if (!navActive) {
+            stuckTicks = 0;
+            return;
+        }
+
+        if (!progressed) stuckTicks++;
+        else stuckTicks = 0;
+
+        if (stuckTicks < STUCK_MAX_TICKS) return;
+
+        // teleport near target safely
+        BlockPos tp = findSafeTeleportNear(sl, target, 3);
+        if (tp != null) {
+            this.getNavigation().stop();
+            this.teleportTo(tp.getX() + 0.5, tp.getY(), tp.getZ() + 0.5);
+            tpCooldown = TP_COOLDOWN_TICKS;
+        }
+
+        stuckTicks = 0;
+    }
+
+    @org.jetbrains.annotations.Nullable
+    private static BlockPos findSafeTeleportNear(ServerLevel sl, BlockPos target, int r) {
+        // try a few random offsets near target, pick first safe 2-high air spot
+        var rand = sl.random;
+
+        for (int i = 0; i < 24; i++) {
+            int dx = rand.nextInt(r * 2 + 1) - r;
+            int dz = rand.nextInt(r * 2 + 1) - r;
+
+            BlockPos base = target.offset(dx, 0, dz);
+
+            // snap to surface
+            BlockPos top = sl.getHeightmapPos(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, base);
+
+            // need 2 blocks of air
+            if (!sl.getBlockState(top).isAir()) continue;
+            if (!sl.getBlockState(top.above()).isAir()) continue;
+
+            // and solid ground below
+            if (!sl.getBlockState(top.below()).isSolid()) continue;
+
+            return top;
+        }
+        return null;
+    }
+
 
     // Retinue-only "unstick" collision tracking
     private final java.util.Map<java.util.UUID, CollideInfo> retinueCollide = new java.util.HashMap<>();
@@ -1115,6 +1305,290 @@ public class kingdomWorkerEntity extends PathfinderMob {
                 if (owner instanceof Player p) this.lastTimestamp = p.getLastHurtMobTimestamp();
             }
             super.start();
+        }
+        
+    }
+
+    private void validateBinding(ServerLevel sl) {
+        BlockPos bp = getBindPosOrNull();
+        if (bp == null) return;            // not bound => can't validate
+        if (!sl.isLoaded(bp)) return;      // don't force chunk loads
+
+        // If the block is gone, this worker should go too (prevents orphans after world edits)
+        var state = sl.getBlockState(bp);
+        if (!(state.getBlock() instanceof name.kingdoms.jobBlock)) { // <-- change if your spawner block type differs
+            this.discard();
+            return;
+        }
+
+        // If the block entity tracks an assigned worker UUID, enforce it
+        var be = sl.getBlockEntity(bp);
+        if (be instanceof name.kingdoms.jobBlockEntity jbe) {         // <-- rename to your actual BE class
+            UUID assigned = jbe.getAssignedWorkerUuid();              // <-- add this method in Step 3
+            if (assigned == null) {
+                // claim if empty
+                jbe.setAssignedWorkerUuid(this.getUUID());
+                jbe.setChanged();
+            } else if (!assigned.equals(this.getUUID())) {
+                // another worker owns this slot -> WE are a duplicate
+                this.discard();
+            }
+        }
+    }
+
+    private void orphanCleanupTick(ServerLevel sl) {
+        if (this.isRetinue()) return;
+
+        // If we already have a bind pos, reset orphan counter
+        BlockPos bp = getBindPosOrNull();
+        if (bp != null) {
+            unboundTicks = 0;
+            return;
+        }
+
+        // No bind pos -> try to recover using homePos (which is jobPos in your setup)
+        if (homePos != null && sl.isLoaded(homePos)) {
+            var state = sl.getBlockState(homePos);
+            if (state.getBlock() instanceof name.kingdoms.jobBlock) {
+                // bind to it
+                this.setBindPos(homePos);
+                unboundTicks = 0;
+
+                // Optional: immediately validate slot ownership so duplicates die quickly
+                validateBinding(sl);
+
+                return;
+            }
+        }
+
+        // Still unbound; count up and delete after grace
+        unboundTicks++;
+
+        if (unboundTicks >= UNBOUND_GRACE_TICKS) {
+            this.discard();
+        }
+    }
+
+
+    private final class VisitTavernAtNightGoal extends net.minecraft.world.entity.ai.goal.Goal {
+        private final kingdomWorkerEntity mob;
+        private final double speed;
+        private int recheckCd = 0;
+
+        // Tuning
+        private static final float CHANCE = 0.35f;    // 35% nights go tavern
+        private static final int LOITER_MIN = 20 * 10; // 10s
+        private static final int LOITER_MAX = 20 * 40; // 40s
+
+        
+
+        VisitTavernAtNightGoal(kingdomWorkerEntity mob, double speed) {
+            this.mob = mob;
+            this.speed = speed;
+        }
+
+        @Override
+        public boolean canUse() {
+            if (!(mob.level() instanceof ServerLevel sl)) return false;
+            if (mob.isSleeping()) return false;
+            if (mob.isRetinue()) return false;
+
+ 
+
+            long time = sl.getDayTime() % 24000L;
+            boolean isNight = time >= 12500L && time <= 23500L;
+            if (!isNight) return false;
+
+            if (recheckCd-- > 0) return false;
+
+            // already doing a routine target
+            if (mob.routineTarget != null) return true;
+
+            // roll chance (don’t do this every tick)
+            if (sl.random.nextFloat() > CHANCE) {
+                recheckCd = 20 * 20; // 20s
+                return false;
+            }
+
+            BlockPos tav = findNearestPoiBlock(sl, mob.blockPosition(), ROUTINE_SEARCH_RADIUS, name.kingdoms.modBlock.tavern_block);
+            if (tav == null) {
+                recheckCd = 20 * 30; // 30s backoff
+                return false;
+            }
+
+            mob.routineTarget = tav;
+            mob.routineLoiterTicks = LOITER_MIN + sl.random.nextInt(Math.max(1, LOITER_MAX - LOITER_MIN));
+            return true;
+        }
+
+        @Override
+        public boolean canContinueToUse() {
+            if (!(mob.level() instanceof ServerLevel sl)) return false;
+            if (mob.isSleeping()) return false;
+            if (mob.routineTarget == null) return false;
+            if (mob.isRetinue()) return false;
+
+
+            long time = sl.getDayTime() % 24000L;
+            boolean isNight = time >= 12500L && time <= 23500L;
+            if (!isNight) return false;
+
+            return mob.routineLoiterTicks > 0 || !mob.getNavigation().isDone();
+        }
+
+        @Override
+        public void start() {
+            if (mob.routineTarget != null) {
+                mob.getNavigation().moveTo(
+                        mob.routineTarget.getX() + 0.5,
+                        mob.routineTarget.getY(),
+                        mob.routineTarget.getZ() + 0.5,
+                        speed
+                );
+            }
+        }
+
+        @Override
+        public void tick() {
+            if (!(mob.level() instanceof ServerLevel sl)) return;
+
+            if (mob.routineTarget == null) return;
+
+            double d2 = mob.blockPosition().distSqr(mob.routineTarget);
+
+            if (d2 <= 3.5 * 3.5) {
+                mob.getNavigation().stop();
+                mob.routineLoiterTicks--;
+
+                mob.tpHelper_clear();
+                return;
+            }
+
+            mob.tpHelper_tick(sl, mob.routineTarget, 4);
+
+        }
+
+        @Override
+        public void stop() {
+            mob.getNavigation().stop();
+            mob.routineTarget = null;
+            mob.routineLoiterTicks = 0;
+            recheckCd = 20 * 10; // small backoff
+            mob.tpHelper_clear();
+        }
+    }
+
+    private final class VisitMorningPoiGoal extends net.minecraft.world.entity.ai.goal.Goal {
+        private final kingdomWorkerEntity mob;
+        private final double speed;
+
+        private int recheckCd = 0;
+
+        private static final float CHANCE = 0.30f;       // 30% mornings do POI
+        private static final int LOITER = 20 * 20;        // 20 seconds
+        private static final long START = 1000L;          // your existing “morning”
+        private static final long END   = 3500L;
+
+        VisitMorningPoiGoal(kingdomWorkerEntity mob, double speed) {
+            this.mob = mob;
+            this.speed = speed;
+        }
+
+        @Override
+        public boolean canUse() {
+            if (!(mob.level() instanceof ServerLevel sl)) return false;
+            if (mob.isSleeping()) return false;
+            if (mob.isRetinue()) return false;
+
+
+            long t = sl.getDayTime() % 24000L;
+            if (t < START || t > END) return false;
+
+            if (recheckCd-- > 0) return false;
+
+            if (mob.routineTarget != null) return true;
+
+            if (sl.random.nextFloat() > CHANCE) {
+                recheckCd = 20 * 10; // 10s
+                return false;
+            }
+
+            // Prefer chapel sometimes, shop other times (and only if enabled)
+            BlockPos poi = null;
+
+            boolean preferChapel = sl.random.nextBoolean();
+            if (preferChapel) {
+                poi = findNearestPoiBlock(sl, mob.blockPosition(), ROUTINE_SEARCH_RADIUS, name.kingdoms.modBlock.chapel_block);
+            }
+            if (poi == null) {
+                poi = findNearestPoiBlock(sl, mob.blockPosition(), ROUTINE_SEARCH_RADIUS, name.kingdoms.modBlock.shop_block);
+            }
+            if (poi == null) {
+                poi = findNearestPoiBlock(sl, mob.blockPosition(), ROUTINE_SEARCH_RADIUS, name.kingdoms.modBlock.chapel_block);
+            }
+
+            if (poi == null) {
+                recheckCd = 20 * 15;
+                return false;
+            }
+
+            mob.routineTarget = poi;
+            mob.routineLoiterTicks = LOITER;
+            return true;
+        }
+
+        @Override
+        public boolean canContinueToUse() {
+            if (!(mob.level() instanceof ServerLevel sl)) return false;
+            if (mob.routineTarget == null) return false;
+            if (mob.isRetinue()) return false;
+
+
+            long t = sl.getDayTime() % 24000L;
+            if (t < START || t > END) return false;
+
+            return mob.routineLoiterTicks > 0 || !mob.getNavigation().isDone();
+        }
+
+        @Override
+        public void start() {
+            if (mob.routineTarget != null) {
+                mob.getNavigation().moveTo(
+                        mob.routineTarget.getX() + 0.5,
+                        mob.routineTarget.getY(),
+                        mob.routineTarget.getZ() + 0.5,
+                        speed
+                );
+            }
+        }
+
+        @Override
+        public void tick() {
+            if (!(mob.level() instanceof ServerLevel sl)) return;
+
+            if (mob.routineTarget == null) return;
+
+            double d2 = mob.blockPosition().distSqr(mob.routineTarget);
+            if (d2 <= 5 * 5) {
+                mob.getNavigation().stop();
+                mob.routineLoiterTicks--;
+
+   
+                mob.tpHelper_clear();
+                return;
+            }
+
+            mob.tpHelper_tick(sl, mob.routineTarget, 4); 
+
+        }
+
+        @Override
+        public void stop() {
+            mob.getNavigation().stop();
+            mob.routineTarget = null;
+            mob.routineLoiterTicks = 0;
+            recheckCd = 20 * 20; // don’t instantly re-trigger
+            mob.tpHelper_clear();
         }
     }
 

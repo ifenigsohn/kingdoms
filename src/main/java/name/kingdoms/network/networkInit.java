@@ -16,6 +16,8 @@ import name.kingdoms.kingdomState;
 import name.kingdoms.kingdomState.Kingdom;
 import name.kingdoms.modItem;
 import name.kingdoms.payload.CreateKingdomPayload;
+import name.kingdoms.payload.EcoBreakdownRequestC2SPayload;
+import name.kingdoms.payload.EcoBreakdownS2CPayload;
 import name.kingdoms.payload.OpenTreasuryS2CPayload;
 import name.kingdoms.payload.WorkerActionC2SPayload;
 import name.kingdoms.payload.aiTradeInfoS2CPayload;
@@ -45,10 +47,12 @@ import name.kingdoms.payload.treasuryOpenResultPayload;
 import name.kingdoms.payload.treasuryShopSyncPayload;
 import name.kingdoms.payload.warCommandCycleGroupC2SPayload;
 import name.kingdoms.payload.warCommandMoveOrderC2SPayload;
+import name.kingdoms.pressure.ForeignPressureActions;
 import name.kingdoms.pressure.KingdomPressureState;
 import name.kingdoms.pressure.PressureCatalog;
 import name.kingdoms.pressure.PressureUtil;
 import name.kingdoms.war.WarBattleManager;
+import name.kingdoms.war.WarState;
 import name.kingdoms.payload.mailActionC2SPayload;
 import name.kingdoms.payload.mailInboxRequestC2SPayload;
 import name.kingdoms.payload.mailInboxSyncPayload;
@@ -57,6 +61,7 @@ import name.kingdoms.treasuryShop;
 import name.kingdoms.payload.mailRecipientsRequestC2SPayload;
 import name.kingdoms.payload.mailRecipientsSyncS2CPayload;
 import name.kingdoms.diplomacy.AiLetterText;
+import name.kingdoms.diplomacy.AllianceState;
 import name.kingdoms.diplomacy.DiplomacyMailGenerator;
 import name.kingdoms.diplomacy.DiplomacyMailboxState;
 import name.kingdoms.diplomacy.DiplomacyResponseQueue;
@@ -117,7 +122,9 @@ public final class networkInit {
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.requestProposalC2SPayload.TYPE,name.kingdoms.payload.requestProposalC2SPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.WorkerActionC2SPayload.TYPE, name.kingdoms.payload.WorkerActionC2SPayload.STREAM_CODEC);
         PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.KingdomEventsRequestC2SPayload.TYPE,name.kingdoms.payload.KingdomEventsRequestC2SPayload.STREAM_CODEC);
-
+        PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.KingSpeakActionsRequestC2SPayload.TYPE,name.kingdoms.payload.KingSpeakActionsRequestC2SPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playC2S().register(name.kingdoms.payload.KingSpeakActionC2SPayload.TYPE,name.kingdoms.payload.KingSpeakActionC2SPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playC2S().register(EcoBreakdownRequestC2SPayload.TYPE, EcoBreakdownRequestC2SPayload.CODEC);
 
         // ----- S2C -----
         PayloadTypeRegistry.playS2C().register(aiTradeInfoS2CPayload.TYPE, aiTradeInfoS2CPayload.CODEC);
@@ -147,8 +154,10 @@ public final class networkInit {
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.calendarSyncPayload.TYPE,name.kingdoms.payload.calendarSyncPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.OpenWorkerActionsS2CPayload.TYPE, name.kingdoms.payload.OpenWorkerActionsS2CPayload.STREAM_CODEC);
         PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.KingdomEventsSyncS2CPayload.TYPE,name.kingdoms.payload.KingdomEventsSyncS2CPayload.STREAM_CODEC);
-
+        PayloadTypeRegistry.playS2C().register(name.kingdoms.payload.OpenKingSpeakActionsS2CPayload.TYPE,name.kingdoms.payload.OpenKingSpeakActionsS2CPayload.STREAM_CODEC);
+        PayloadTypeRegistry.playS2C().register(EcoBreakdownS2CPayload.TYPE, EcoBreakdownS2CPayload.CODEC);
     }
+
 
     public static void registerServerReceivers() {
 
@@ -281,6 +290,64 @@ public final class networkInit {
             });
         });
 
+        ServerPlayNetworking.registerGlobalReceiver(
+            EcoBreakdownRequestC2SPayload.TYPE,
+            (payload, ctx) -> ctx.server().execute(() -> {
+                var server = ctx.server();
+                var player = ctx.player();
+
+                var ks = name.kingdoms.kingdomState.get(server);
+                var k  = ks.getPlayerKingdom(player.getUUID());
+                if (k == null) return;
+
+                long now = server.getTickCount();
+
+                var mods = name.kingdoms.pressure.KingdomPressureState.get(server).getMods(k.id, now);
+                var pol  = name.kingdoms.pressure.PolicyModifiers.compute(server, k.id);
+
+                // IMPORTANT: you likely have a "raw happiness" issue (double security penalty).
+                // For now we show what compute() is doing, but we’ll calculate the pieces explicitly:
+                double sBase = k.securityValue();
+                double sEff  = Math.max(0.0, Math.min(1.0, sBase + mods.securityDelta()));
+                double sPress = mods.securityDelta();
+
+                double hBase = k.happiness(); // if this already includes security penalty, tooltip will reveal it
+                double hSecurityPenalty = 0.0;
+
+                // replicate your calc's security→happiness penalty:
+                double hEff = hBase;
+                if (k.populationJobs() > 5) {
+                    double req = name.kingdoms.kingdomState.Kingdom.REQUIRED_SECURITY; // 0.30
+                    double deficit01 = Math.max(0.0, Math.min(1.0, (req - sEff) / req));
+                    double maxPenalty = 3.0;
+                    hSecurityPenalty = maxPenalty * deficit01;
+                    hEff -= hSecurityPenalty;
+                }
+
+                double hPress = mods.happinessDelta();
+                hEff = Math.max(0.0, Math.min(10.0, hEff + hPress));
+
+                double pmFromH = 0.40 + (hEff / 10.0) * (1.20 - 0.40);
+                double pmFromS = 0.85 + (1.15 - 0.85) * sEff;
+
+                double pmEff = pmFromH * pmFromS;
+                pmEff = Math.max(0.40, Math.min(1.20, pmEff));
+
+                double pressureEconMult = mods.economyMult();
+
+                double finalMult = pmEff * pressureEconMult;
+
+                ServerPlayNetworking.send(player, new EcoBreakdownS2CPayload(
+                        hBase, hSecurityPenalty, hPress, hEff,
+                        sBase, sPress, sEff,
+                        pmFromH, pmFromS, pmEff,
+                        pressureEconMult,
+                        pol.tavernGoldInMult(),
+                        pol.shopGoldOutMult(),
+                        finalMult
+                ));
+            })
+    );
 
 
 
@@ -331,8 +398,31 @@ public final class networkInit {
 
                     int relation = PressureUtil.effectiveRelation(server, baseRel, fromKid, k.id);
 
+                    // ------------------------------------
+                    // Hover stats on PLAYER scale (0..10 and 0..1)
+                    // ------------------------------------
+                    double happinessValue;
+                    double securityValue;
 
+                    if (aiK != null) {
+                        // AI stores 0..100 internally
+                        happinessValue = Mth.clamp(aiK.happiness / 10.0, 0.0, 10.0);
+                        securityValue  = Mth.clamp(aiK.security  / 100.0, 0.0, 1.0);
+                    } else {
+                        // Player kingdom already uses player-scale methods
+                        happinessValue = Mth.clamp(k.happiness(), 0.0, 10.0);
+                        securityValue  = Mth.clamp(k.securityValue(), 0.0, 1.0);
+                    }
 
+                    // OPTIONAL (recommended): show effective values including pressure/policy modifiers.
+                    // viewer kingdom id = fromKid (may be null if player has no kingdom)
+                    try {
+                        var mods = name.kingdoms.pressure.KingdomModifiers.compute(server, fromKid, k.id);
+                        happinessValue = Mth.clamp(happinessValue + mods.happinessDelta(), 0.0, 10.0);
+                        securityValue  = Mth.clamp(securityValue  + mods.securityDelta(),  0.0, 1.0);
+                    } catch (Throwable ignored) {}
+
+                    
 
                     // soldiers + tickets
                     int soldiersAlive = 0, soldiersMax = 0;
@@ -434,6 +524,8 @@ public final class networkInit {
                         rulerName,
 
                         relation,
+                        happinessValue,
+                        securityValue,
 
                         soldiersAlive, soldiersMax,
                         ticketsAlive, ticketsMax,
@@ -536,7 +628,328 @@ public final class networkInit {
             });
         });
 
+        ServerPlayNetworking.registerGlobalReceiver(
+            name.kingdoms.payload.KingSpeakActionsRequestC2SPayload.TYPE,
+            (payload, ctx) -> ctx.server().execute(() -> {
+                var server = ctx.server();
+                var player = ctx.player();
+
+                var ks = name.kingdoms.kingdomState.get(server);
+                var pk = ks.getPlayerKingdom(player.getUUID());
+                if (pk == null) return;
+
+                // Validate entity id/uuid (prevents spoofing)
+                var ent = player.level().getEntity(payload.kingEntityId());
+                if (ent == null || !ent.getUUID().equals(payload.kingEntityUuid())) return;
+                if (player.distanceToSqr(ent) > 100.0) return; // 10 blocks
+
+                UUID targetKid = payload.targetKingdomId();
+                if (targetKid == null) return;
+
+                // Ensure target exists (AI kingdoms are in aiKingdomState, but you can still allow unknown)
+                String targetName = "";
+                var targetK = ks.getKingdom(targetKid);
+                if (targetK != null && targetK.name != null) targetName = targetK.name;
+
+                // Relation gating
+                var relState = name.kingdoms.diplomacy.DiplomacyRelationsState.get(server);
+                int baseRel = relState.getRelation(player.getUUID(), targetKid);
+                int rel = name.kingdoms.pressure.PressureUtil.effectiveRelation(server, baseRel, pk.id, targetKid);
+
+                // war/alliance gating
+                boolean atWar = false;
+                boolean allied = false;
+                try { atWar = name.kingdoms.war.WarState.get(server).isAtWar(pk.id, targetKid); } catch (Throwable ignored) {}
+                try { allied = name.kingdoms.diplomacy.AllianceState.get(server).isAllied(pk.id, targetKid); } catch (Throwable ignored) {}
+
+                
+               String channel = (payload.npcType() == null || payload.npcType().isBlank())
+                        ? ForeignPressureActions.CH_KING
+                        : payload.npcType();
+
+                // Build ALL allowed actions for this channel (this is the 25-action system)
+                java.util.List<String> ids = ForeignPressureActions.listAllowed(
+                        server,
+                        pk.id,
+                        targetKid,
+                        channel,
+                        rel,
+                        allied,
+                        atWar
+                );
+
+                // ------------------------------
+                // King-only “information + influence” actions
+                // ------------------------------
+                if (ForeignPressureActions.CH_KING.equals(channel)) {
+
+                    // Always available:
+                    ids.add("KING_WHATS_HAPPENING");
+
+                    // Add a limited set of “ask about / speak well / speak ill” targets to avoid huge packets
+                    var aiState = aiKingdomState.get(server);
+
+                    // Collect candidates: AI kingdoms only (recommended). If you want player kingdoms too, we can add later.
+                    var candidates = new java.util.ArrayList<java.util.UUID>();
+                    for (var aiK : aiState.kingdoms.values()) {
+                        if (aiK == null || aiK.id == null) continue;
+                        if (aiK.id.equals(targetKid)) continue; // don’t ask about self
+                        candidates.add(aiK.id);
+                    }
+
+                    // Build full list of other kings (sorted by name for stable UI)
+                    candidates.sort((a, b) -> {
+                        String an = safeKingName(aiState, a);
+                        String bn = safeKingName(aiState, b);
+                        return an.compareToIgnoreCase(bn);
+                    });
+
+                    // SAFETY CAP: keeps packet sizes sane if you ever have tons of AI kingdoms.
+                    // If you truly want "unlimited", raise this, but keep an upper bound.
+                    final int MAX_OTHER_KINGS = 120;
+
+                    int cap = Math.min(MAX_OTHER_KINGS, candidates.size());
+                    for (int i = 0; i < cap; i++) {
+                        UUID other = candidates.get(i);
+                        String oname = safeKingName(aiState, other);
+
+                        // Encode name so client can show it in the submenu.
+                        ids.add("KING_ASK_ABOUT|" + other + "|" + oname);
+                        ids.add("KING_SPEAK_WELL|" + other + "|" + oname);
+                        ids.add("KING_SPEAK_ILL|" + other + "|" + oname);
+                    }
+
+                }
+
+
+
+                ServerPlayNetworking.send(player, new name.kingdoms.payload.OpenKingSpeakActionsS2CPayload(
+                            payload.kingEntityId(),
+                            payload.kingEntityUuid(),
+                            targetKid,
+                            targetName,
+                            channel,
+                            rel,
+                            allied,
+                            atWar,
+                            ids
+                    ));
+                })
+        );
+
+        ServerPlayNetworking.registerGlobalReceiver(
+            name.kingdoms.payload.KingSpeakActionC2SPayload.TYPE,
+            (payload, ctx) -> ctx.server().execute(() -> {
+                var server = ctx.server();
+                var player = ctx.player();
+
+                var ks = name.kingdoms.kingdomState.get(server);
+                var pk = ks.getPlayerKingdom(player.getUUID());
+                if (pk == null) return;
+
+                // Validate entity
+                var ent = player.level().getEntity(payload.entityId());
+                if (ent == null || !ent.getUUID().equals(payload.entityUuid())) return;
+                if (player.distanceToSqr(ent) > 100.0) return;
+
+                UUID targetKid = payload.targetKingdomId();
+                if (targetKid == null) return;
+
+                // gates
+                var relState = name.kingdoms.diplomacy.DiplomacyRelationsState.get(server);
+                int baseRel = relState.getRelation(player.getUUID(), targetKid);
+                int rel = name.kingdoms.pressure.PressureUtil.effectiveRelation(server, baseRel, pk.id, targetKid);
+
+                boolean atWar = false;
+                boolean allied = false;
+                try { atWar = name.kingdoms.war.WarState.get(server).isAtWar(pk.id, targetKid); } catch (Throwable ignored) {}
+                try { allied = name.kingdoms.diplomacy.AllianceState.get(server).isAllied(pk.id, targetKid); } catch (Throwable ignored) {}
+
+
+                // Very simple mapping for now (expand to 25 later)
+               String channel = (payload.npcType() == null || payload.npcType().isBlank())
+                        ? ForeignPressureActions.CH_KING
+                        : payload.npcType();
+
+                // ------------------------------
+                // King-only “information + influence” actions (more)
+                // ------------------------------
+                if (ForeignPressureActions.CH_KING.equals(channel)) {
+
+                    var aiState = aiKingdomState.get(server);
+                    String act = payload.actionId();
+
+                    // 1) Ask what’s happening
+                    if ("KING_WHATS_HAPPENING".equals(act)) {
+                        String kname = kingdomNameFor(server, ks, aiState, targetKid);
+
+                        var warState = WarState.get(server);
+                        var alliance = AllianceState.get(server);
+
+                        var allyIds = new java.util.ArrayList<java.util.UUID>(alliance.alliesOf(targetKid));
+                        var zones = warState.getZonesFor(server, targetKid);
+                        var enemyIds = new java.util.ArrayList<java.util.UUID>(zones.size());
+                        for (var zv : zones) enemyIds.add(zv.enemyId());
+
+                        String allies = formatKingdomNameList(server, ks, aiState, allyIds, 4);
+                        String enemies = formatKingdomNameList(server, ks, aiState, enemyIds, 4);
+
+                        var ps2 = KingdomPressureState.get(server);
+                        long now2 = server.getTickCount();
+
+                        var names = new java.util.ArrayList<String>(4);
+                        for (var ev : ps2.getEvents(targetKid)) {
+                            if (ev == null) continue;
+                            if (now2 >= ev.endTick()) continue;
+
+                            names.add(prettyPressureName(ev.typeId()));
+                            if (names.size() >= 3) break; // only list top 3
+                        }
+
+                        String eventsStr = names.isEmpty() ? "None" : String.join(", ", names);
+
+
+                        player.sendSystemMessage(Component.literal(
+                                "King " + kname + ": Allies: " + allies + " | Wars: " + enemies + " | Events: " + eventsStr
+                        ));
+
+                        return;
+                    }
+
+                    // Helper to apply an AI↔AI relation pressure effect (spoken well/ill)
+                    java.util.function.BiConsumer<java.util.UUID, Integer> applyKingOpinionShift = (otherId, delta) -> {
+                        var ps2 = KingdomPressureState.get(server);
+                        long now2 = server.getTickCount();
+                        long dur = 12 * PressureCatalog.MINUTE;
+
+                        java.util.EnumMap<KingdomPressureState.Stat, Double> eff = new java.util.EnumMap<>(KingdomPressureState.Stat.class);
+                        eff.put(KingdomPressureState.Stat.RELATIONS, (double) delta);
+
+                        // targetKid's relation evaluation vs other
+                        ps2.addEvent(otherId, targetKid, "court_gossip", eff, KingdomPressureState.RelScope.CAUSER_ONLY, now2, dur);
+                        // other’s relation evaluation vs targetKid
+                        ps2.addEvent(targetKid, otherId, "court_gossip", eff, KingdomPressureState.RelScope.CAUSER_ONLY, now2, dur);
+
+                        ps2.markDirty();
+                    };
+
+                    // 2) Ask about another king
+                    if (act != null && act.startsWith("KING_ASK_ABOUT|")) {
+                    UUID other = parseActionUuid(act, "KING_ASK_ABOUT|");
+                    if (other == null) {
+                        player.sendSystemMessage(Component.literal("That name means nothing to me."));
+                        return;
+                    }
+
+
+                    var level = (ServerLevel) player.level();
+                    
+
+                    String me = kingdomNameFor(server, ks, aiState, targetKid);
+                    String them = kingdomNameFor(server, ks, aiState, other);
+
+                    int relKK = effectiveKingToKingRelation(server, targetKid, other);
+
+                    String line;
+                    if (relKK <= -16) line = pickLine(level, OPINION_HATE);
+                    else if (relKK <= -6) line = pickLine(level, OPINION_DISLIKE);
+                    else if (relKK <= 5) line = pickLine(level, OPINION_NEUTRAL);
+                    else if (relKK <= 15) line = pickLine(level, OPINION_LIKE);
+                    else line = pickLine(level, OPINION_LOVE);
+
+                    player.sendSystemMessage(Component.literal(
+                            "King " + me + " about " + them + " (relation " + relKK + "): " + line
+                    ));
+                    return;
+                }
+
+
+                    // 3) Speak ill of another king (pushes kings apart)
+                    if (act != null && act.startsWith("KING_SPEAK_ILL|")) {
+                    UUID other = parseActionUuid(act, "KING_SPEAK_ILL|");
+                    if (other == null) {
+                        player.sendSystemMessage(Component.literal("I don’t recognize that king."));
+                        return;
+                    }
+
+
+                        applyKingOpinionShift.accept(other, -10);
+
+                        String me = kingdomNameFor(server, ks, aiState, targetKid);
+                        String them = kingdomNameFor(server, ks, aiState, other);
+
+                        player.sendSystemMessage(Component.literal("You speak ill of " + them + ". King " + me + " seems receptive."));
+                        return;
+                    }
+
+                    // 4) Speak well of another king (pushes kings together)
+                    if (act != null && act.startsWith("KING_SPEAK_WELL|")) {
+                    UUID other = parseActionUuid(act, "KING_SPEAK_WELL|");
+                    if (other == null) {
+                        player.sendSystemMessage(Component.literal("I don’t recognize that king."));
+                        return;
+                    }
+
+
+                        applyKingOpinionShift.accept(other, +10);
+
+                        String me = kingdomNameFor(server, ks, aiState, targetKid);
+                        String them = kingdomNameFor(server, ks, aiState, other);
+
+                        player.sendSystemMessage(Component.literal("You praise " + them + ". King " + me + " listens carefully."));
+                        return;
+                    }
+                }
+
+
+                boolean ok = ForeignPressureActions.apply(
+                        server,
+                        player,
+                        pk.id,
+                        targetKid,
+                        channel,
+                        payload.actionId()
+                );
+
+                if (!ok) {
+                    player.sendSystemMessage(Component.literal("That action is not allowed right now."));
+                    return;
+                }
+
+                // Push Events tab refresh immediately
+                try { name.kingdoms.pressure.KingdomEventsNet.sendMyKingdomEvents(server, player); } catch (Throwable ignored) {}
+
+                // Optional: make the NPC say something
+                if (ent instanceof name.kingdoms.entity.ai.aiKingdomNPCEntity npc) {
+                    var a = ForeignPressureActions.byId(payload.actionId());
+                    if (a != null) {
+                        String line = ForeignPressureActions.pickNpcLine(
+                                a.speechPoolId(),
+                                ((ServerLevel) player.level()).random
+                        );
+                        if (line != null) npc.queueAmbientSpeech(player, channel, line, 20 * 12);
+                    }
+                } else if (ent instanceof name.kingdoms.entity.aiKingdomEntity) {
+                        String line = ForeignPressureActions.pickKingLineForAction(
+                                payload.actionId(),
+                                ((ServerLevel) player.level()).random
+                        );
+
+                        if (line == null || line.isBlank()) {
+                            line = "Very well.";
+                        }
+
+                        // Make it look like the king speaking
+                        player.sendSystemMessage(Component.literal("King: " + line));
+                    }
+
+
+
+            })
+    );
+    
         
+
         ServerPlayNetworking.registerGlobalReceiver(
             name.kingdoms.payload.mailPolicyRequestC2SPayload.TYPE,
             (payload, ctx) -> ctx.server().execute(() -> {
@@ -2643,6 +3056,165 @@ public final class networkInit {
             default -> 20L * 60L;
         };
     }
+
+    private static UUID safeParseUuid(String s) {
+        if (s == null) return null;
+        try { return UUID.fromString(s.trim()); }
+        catch (IllegalArgumentException e) { return null; }
+    }
+
+    private static String kingdomNameFor(MinecraftServer server, kingdomState ks, aiKingdomState aiState, UUID id) {
+        if (id == null) return "Unknown";
+        var k = ks.getKingdom(id);
+        if (k != null && k.name != null && !k.name.isBlank()) return k.name;
+
+        String aiName = aiState.getNameById(id);
+        if (aiName != null && !aiName.isBlank()) return aiName;
+
+        return "Unknown";
+    }
+
+    private static String prettyPressureName(String typeId) {
+        if (typeId == null) return "unknown";
+        return switch (typeId) {
+            // globals
+            case "global_plague" -> "Plague";
+            case "global_bountiful_harvest" -> "Bountiful Harvest";
+            case "global_bandit_wave" -> "Bandit Wave";
+            case "global_festival" -> "Festival Season";
+            case "global_drought" -> "Drought";
+
+            // player policies
+            case "double_pace" -> "Double Pace";
+            case "leisurely_pace" -> "Leisurely Pace";
+            case "increase_patrols" -> "Increased Patrols";
+            case "decrease_patrols" -> "Decreased Patrols";
+            case "double_rations" -> "Double Rations";
+            case "halve_rations" -> "Halved Rations";
+            case "alcohol_subsidies" -> "Alcohol Subsidies";
+            case "drunk_crackdowns" -> "Drink Crackdown";
+            case "frequent_services" -> "Frequent Services";
+            case "papal_authority" -> "Papal Authority";
+            case "diplomatic_envoys" -> "Diplomatic Envoys";
+            case "vassal_contributions" -> "Vassal Contributions";
+            case "market_subsidies" -> "Market Subsidies";
+            case "contraband_crackdowns" -> "Contraband Crackdowns";
+
+            // AI pressure (examples)
+            case "ai_trade_embargo" -> "Trade Embargo";
+            case "ai_fund_bandits" -> "Bandit Funding";
+            case "ai_border_raids" -> "Border Raids";
+            case "ai_spread_rumors" -> "Rumors";
+            case "ai_spy_network" -> "Spy Network";
+            case "ai_aid_supplies" -> "Foreign Aid";
+            case "ai_envoy_praise" -> "Envoy Praise";
+            case "ai_gift_grain" -> "Gift Grain";
+            case "ai_send_mercenaries" -> "Mercenaries";
+            case "ai_training_advisors" -> "Training Advisors";
+            case "ai_war_intel" -> "War Intelligence";
+            case "ai_smuggler_flood" -> "Smuggler Flood";
+            case "ai_bounty_hunters" -> "Bounty Hunters";
+            case "ai_sabotage_stores" -> "Sabotage";
+            case "ai_pilgrim_blessing" -> "Pilgrim Blessing";
+
+            // gossip
+            case "court_gossip" -> "Court Gossip";
+            case "spoken_ill" -> "Slander";
+
+            case "ai_trade_dispute" -> "Trade Dispute";
+            case "ai_border_incident" -> "Border Incident";
+            case "ai_envoys_between_kings" -> "Envoys Exchanged";
+            case "ai_gossip_praise" -> "Court Praise";
+            case "ai_gossip_slander" -> "Court Slander";
+
+
+            default -> typeId;
+        };
+    }
+
+    private static int effectiveKingToKingRelation(MinecraftServer server, UUID fromKid, UUID toKid) {
+        if (server == null || fromKid == null || toKid == null) return 0;
+
+        int baseRel = name.kingdoms.diplomacy.AiRelationsState.get(server).get(fromKid, toKid);
+
+        // optional: layer pressure on top
+        return name.kingdoms.pressure.PressureUtil.effectiveRelation(server, baseRel, fromKid, toKid);
+    }
+
+
+
+    private static final String[] OPINION_HATE = {
+            "I want their banners burned.",
+            "They are treacherous—never turn your back on them.",
+            "If they came to my gate begging, I’d still bar it.",
+            "They’ve earned only contempt from my court.",
+            "We will not forget what they’ve done."
+    };
+
+    private static final String[] OPINION_DISLIKE = {
+            "I don’t trust them.",
+            "They smile too easily. Watch them.",
+            "We have… disagreements.",
+            "They’re trouble dressed in velvet.",
+            "Keep your dealings cautious."
+    };
+
+    private static final String[] OPINION_NEUTRAL = {
+            "I know of them. I watch them.",
+            "They’re a factor, nothing more.",
+            "No strong feelings—yet.",
+            "They’ve made no move worth praising or damning.",
+            "Time will tell what sort they are."
+    };
+
+    private static final String[] OPINION_LIKE = {
+            "We’ve had fair dealings.",
+            "They’ve shown good sense more than once.",
+            "If they call, I listen.",
+            "They’re worth treating with respect.",
+            "They’ve earned a measure of goodwill."
+    };
+
+    private static final String[] OPINION_LOVE = {
+            "A friend of my house.",
+            "If they asked for help, I’d send it.",
+            "They are honorable—rare these days.",
+            "May our banners fly side by side.",
+            "I trust them as much as any king can."
+    };
+
+    private static String pickLine(ServerLevel level, String[] pool) {
+        if (pool == null || pool.length == 0) return "";
+        return pool[level.random.nextInt(pool.length)];
+    }
+
+    private static String safeKingName(aiKingdomState aiState, UUID id) {
+        try {
+            var k = aiState.kingdoms.get(id);
+            String n = (k == null || k.name == null || k.name.isBlank()) ? id.toString() : k.name;
+
+            // Avoid breaking our "A|B|C" encoding
+            n = n.replace('|', '/');
+
+            // Keep it short so packets stay small (also protects readUtf limits)
+            if (n.length() > 40) n = n.substring(0, 40);
+
+            return n;
+        } catch (Throwable t) {
+            return id.toString();
+        }
+    }
+
+    private static UUID parseActionUuid(String act, String prefix) {
+        if (act == null || !act.startsWith(prefix)) return null;
+
+        String rest = act.substring(prefix.length()); // "<uuid>|<name>" or "<uuid>"
+        int bar = rest.indexOf('|');
+        String uuidStr = (bar >= 0) ? rest.substring(0, bar) : rest;
+
+        return safeParseUuid(uuidStr);
+    }
+
 
 
 }

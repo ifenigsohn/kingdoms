@@ -115,6 +115,19 @@ public final class BlueprintPlacerEngine {
         LOGGER.info("[Kingdoms] Primed IN_FLIGHT from persisted queue: {}", primed);
     }
 
+    
+    public static void enqueueWorldgenForced(ServerLevel level, Blueprint bp, BlockPos origin,
+                                                String modId, boolean includeAir,
+                                                long roadsRegionKey, long jobKey,
+                                                Runnable onSuccess, Runnable onFail) {
+            enqueueInternal(level, bp, origin, modId, includeAir, onSuccess, onFail,
+                    jobKey,
+                    true,   // isWorldgenTask
+                    true    // bypassWorldgenToggle
+            );
+    }
+
+
     public static int getQueueSize() { return PREFLIGHT.size() + HEAVY.size(); }
     public static int getPreflightSize() { return PREFLIGHT.size(); }
     public static int getHeavySize() { return HEAVY.size(); }
@@ -136,6 +149,11 @@ public final class BlueprintPlacerEngine {
         ChunkForcer.resetRuntime();
 
         aliveTicks = 0;
+    }
+
+    public static void forcePreemptRuntime() {
+        clearAll(true);
+        IN_FLIGHT.clear();
     }
 
 
@@ -175,6 +193,8 @@ public final class BlueprintPlacerEngine {
             if (jobToRoad.remove(jobKey) != null) setDirty();
         }
 
+
+
         public record Pair(long jobKey, long roadsRegionKey) {
             public static final Codec<Pair> CODEC =
                     RecordCodecBuilder.create(inst -> inst.group(
@@ -210,6 +230,27 @@ public final class BlueprintPlacerEngine {
             return level.getDataStorage().computeIfAbsent(TYPE);
         }
     }
+
+    // Clears BOTH local queues and in-flight claims so force-gen can run immediately.
+    public static void forceClearAllNow(MinecraftServer server, boolean releaseTickets) {
+        // clear local queues (and optionally release chunk tickets)
+        clearAll(releaseTickets);
+
+        // IMPORTANT: clear in-flight job claims so nothing stays "reserved" forever
+        IN_FLIGHT.clear();
+
+        // Optional but recommended: if you use KingdomGenGate as a global pipeline lock,
+        // also clear it here (see note below).
+        try {
+            name.kingdoms.blueprint.KingdomGenGate.reset();
+            name.kingdoms.blueprint.KingdomGenGate.forceEnd();
+        } catch (Throwable ignored) {
+            // keep engine robust if gate class changes
+        }
+
+        LOGGER.info("[Kingdoms] FORCE CLEAR: queues + in-flight cleared (releaseTickets={})", releaseTickets);
+    }
+
 
     public static void init() {
         LOGGER.info("[Kingdoms] BlueprintPlacerEngine.init() CALLED");
@@ -263,6 +304,11 @@ public final class BlueprintPlacerEngine {
         });
     }
 
+    /** Clears runtime queues. Does NOT clear persisted state. */
+    public static void clearAll() {
+        clearAll(true); // releases forced chunk tickets + releases job claims
+    }
+
     private static void clearAll(boolean tryReleaseForces) {
         if (tryReleaseForces) {
             for (Task t : PREFLIGHT) {
@@ -293,9 +339,19 @@ public final class BlueprintPlacerEngine {
     }
 
     public static void enqueue(ServerLevel level, Blueprint bp, BlockPos origin,
-                               String modId, boolean includeAir,
-                               Runnable onSuccess, Runnable onFail,
-                               long jobKey) {
+                            String modId, boolean includeAir,
+                            Runnable onSuccess, Runnable onFail,
+                            long jobKey) {
+        enqueueInternal(level, bp, origin, modId, includeAir, onSuccess, onFail, jobKey,
+                false, false);
+    }
+
+    /** Internal enqueue with flags for worldgen gating. */
+    private static void enqueueInternal(ServerLevel level, Blueprint bp, BlockPos origin,
+                                        String modId, boolean includeAir,
+                                        Runnable onSuccess, Runnable onFail,
+                                        long jobKey,
+                                        boolean isWorldgenTask, boolean bypassWorldgenToggle) {
 
         if (jobKey != Long.MIN_VALUE) {
             if (!IN_FLIGHT.add(jobKey)) {
@@ -304,14 +360,25 @@ public final class BlueprintPlacerEngine {
             }
         }
 
-        Task t = new Task(level, bp, origin, modId, includeAir, onSuccess, onFail);
+        Task t = new Task(level, bp, origin, modId, includeAir, onSuccess, onFail,
+                isWorldgenTask, bypassWorldgenToggle);
         t.claimedJobKey = jobKey;
 
+        // 3-lane scheduler: everything starts in PREFLIGHT
         PREFLIGHT.add(t);
-
-        LOGGER.info("[Kingdoms] Queued blueprint '{}' at {} jobKey={} (preflight={}, heavy={}, total={})",
-                bp.id, origin, jobKey, PREFLIGHT.size(), HEAVY.size(), getQueueSize());
     }
+
+
+    public static void enqueueWorldgenForced(ServerLevel level, Blueprint bp, BlockPos origin,
+                                            String modId, boolean includeAir,
+                                            Runnable onSuccess, Runnable onFail,
+                                            long jobKey) {
+        enqueueInternal(level, bp, origin, modId, includeAir, onSuccess, onFail, jobKey,
+                true, true);
+    }
+
+
+
 
     // ======================================================================
     // WORLDGEN ENQUEUE (PERSISTED)
@@ -365,75 +432,63 @@ public final class BlueprintPlacerEngine {
 
         BlueprintFootprintState.get(level).addFootprint(roadsRegionKey, minX, minZ, maxX, maxZ);
 
-        enqueue(level, bp, origin, modId, includeAir,
-                () -> {
-                    KingdomsSpawnState.get(level).markSpawned(jobKey);
-                    KingdomsSpawnState.get(level).clearQueued(jobKey);
+        Runnable onSuccess = () -> {
+            KingdomsSpawnState.get(level).markSpawned(jobKey);
+            KingdomsSpawnState.get(level).clearQueued(jobKey);
 
-                    WorldgenBlueprintQueueState.get(level).remove(level, jobKey);
-                    JobToRoadRegionState.get(level).remove(jobKey);
+            WorldgenBlueprintQueueState.get(level).remove(level, jobKey);
+            JobToRoadRegionState.get(level).remove(jobKey);
 
-                    List<BlockPos> anchors = RoadAnchors.consumeBarrierAnchors(level, origin);
-                    if (anchors.isEmpty()) {
-                        BlockPos a1 = RoadAnchors.fallbackFromBlueprintOrigin(level, origin);
+            List<BlockPos> anchors = RoadAnchors.consumeBarrierAnchors(level, origin);
+            if (anchors.isEmpty()) {
+                BlockPos a1 = RoadAnchors.fallbackFromBlueprintOrigin(level, origin);
 
-                        // second anchor: offset, same Y (NO world reads)
-                        BlockPos a2 = new BlockPos(a1.getX() + 16, a1.getY(), a1.getZ());
-                        if (a2.equals(a1)) {
-                            a2 = new BlockPos(a1.getX(), a1.getY(), a1.getZ() + 16);
-                        }
+                // second anchor: offset, same Y (NO world reads)
+                BlockPos a2 = new BlockPos(a1.getX() + 16, a1.getY(), a1.getZ());
+                if (a2.equals(a1)) {
+                    a2 = new BlockPos(a1.getX(), a1.getY(), a1.getZ() + 16);
+                }
 
-                        anchors = new java.util.ArrayList<>(2);
-                        anchors.add(a1);
-                        anchors.add(a2);
-                    }
+                anchors = new ArrayList<>(2);
+                anchors.add(a1);
+                anchors.add(a2);
+            }
 
+            RoadAnchorState st = RoadAnchorState.get(level);
+            for (BlockPos anchorPos : anchors) {
+                st.add(roadsRegionKey, anchorPos);
+            }
 
-                    RoadAnchorState st = RoadAnchorState.get(level);
-                    for (BlockPos anchorPos : anchors) {
-                        st.add(roadsRegionKey, anchorPos);
-                    }
+            if (afterSuccess != null) {
+                try { afterSuccess.run(); } catch (Exception ignored) {}
+            }
 
-                    if (afterSuccess != null) {
-                        try { afterSuccess.run(); } catch (Exception ignored) {}
-                    }
+            RegionActivityState.get(level).end(roadsRegionKey);
 
-                    RegionActivityState.get(level).end(roadsRegionKey);
+            maybeStartRoads(level, roadsRegionKey);
+        };
 
-                    maybeStartRoads(level, roadsRegionKey);
-                },
-                () -> {
-                    BlueprintFootprintState.get(level).removeFootprint(roadsRegionKey, minX, minZ, maxX, maxZ);
+        Runnable onFail = () -> {
+            BlueprintFootprintState.get(level).removeFootprint(roadsRegionKey, minX, minZ, maxX, maxZ);
 
-                    KingdomsSpawnState.get(level).clearQueued(jobKey);
+            KingdomsSpawnState.get(level).clearQueued(jobKey);
 
-                    WorldgenBlueprintQueueState.get(level).remove(level, jobKey);
-                    JobToRoadRegionState.get(level).remove(jobKey);
+            WorldgenBlueprintQueueState.get(level).remove(level, jobKey);
+            JobToRoadRegionState.get(level).remove(jobKey);
 
-                    RegionActivityState.get(level).end(roadsRegionKey);
+            RegionActivityState.get(level).end(roadsRegionKey);
 
-                    if (afterFail != null) {
-                        try { afterFail.run(); } catch (Exception ignored) {}
-                    }
-                },
-                jobKey
-        );
+            if (afterFail != null) {
+                try { afterFail.run(); } catch (Exception ignored) {}
+            }
+        };
+
+        // IMPORTANT: worldgen tasks obey toggle (bypass=false)
+        enqueueInternal(level, bp, origin, modId, includeAir, onSuccess, onFail, jobKey,
+                true, false);
+
     }
 
-        private static boolean isWorldgenJob(ServerLevel level, long jobKey) {
-            // We don't assume a contains() exists; we check snapshot()
-            WorldgenBlueprintQueueState q = WorldgenBlueprintQueueState.get(level);
-            for (WorldgenBlueprintQueueState.Entry e : q.snapshot()) {
-                if (e.regionKey == jobKey) return true; // matches your usage: e.regionKey
-            }
-            return false;
-        }
-
-        private static boolean isWorldgenTask(Task t) {
-            if (t == null) return false;
-            if (t.claimedJobKey == Long.MIN_VALUE) return false;
-            return isWorldgenJob(t.level, t.claimedJobKey);
-        }
 
 
     private static void tick(MinecraftServer server) {
@@ -463,7 +518,7 @@ public final class BlueprintPlacerEngine {
             if (t == null) break;
 
             // If worldgen is disabled, keep worldgen tasks queued but don't run them.
-            if (!worldgenEnabled && isWorldgenTask(t)) {
+            if (!worldgenEnabled && t.isWorldgenTask && !t.bypassWorldgenToggle) {
                 PREFLIGHT.add(t);
                 advanced++;
                 continue;
@@ -500,14 +555,15 @@ public final class BlueprintPlacerEngine {
         // If worldgen is disabled, skip any worldgen-heavy tasks.
         if (!worldgenEnabled) {
             int n = HEAVY.size();
-            boolean foundNonWorldgen = false;
+            boolean foundRunnable = false;
 
             for (int i = 0; i < n; i++) {
                 Task top = HEAVY.peek();
                 if (top == null) break;
 
-                if (!isWorldgenTask(top)) {
-                    foundNonWorldgen = true;
+                boolean blocked = top.isWorldgenTask && !top.bypassWorldgenToggle;
+                if (!blocked) {
+                    foundRunnable = true;
                     break;
                 }
 
@@ -515,13 +571,14 @@ public final class BlueprintPlacerEngine {
                 HEAVY.add(HEAVY.poll());
             }
 
-            if (!foundNonWorldgen) {
-                return; // all heavy tasks are worldgen => pause everything
+            if (!foundRunnable) {
+                return; // all heavy tasks are blocked worldgen => pause
             }
 
             task = HEAVY.peek();
             if (task == null) return;
         }
+
 
 
         final long heavyDeadline = System.nanoTime() + MAX_NANOS_PER_TICK;
@@ -855,6 +912,11 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
 
         private final Runnable onSuccess;
         private final Runnable onFail;
+
+        // worldgen gating
+        private final boolean isWorldgenTask;
+        private final boolean bypassWorldgenToggle;
+
         private boolean placeLogged = false;
         private long claimedJobKey = Long.MIN_VALUE;
 
@@ -941,6 +1003,24 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
 
         private int gradeColsDone = 0;
         private boolean placeBeginLogged = false;
+
+        // --- Simple vegetation clear BEFORE grading ---
+        private static final int VEG_SCAN_STEP_XZ = 1;          // 1 = no misses
+        private static final int VEG_SCAN_ABOVE_SURFACE = 56;   // canopy band
+        private static final int VEG_SCAN_BELOW_SURFACE = 24;   // catch low branches
+        private static final boolean VEG_CLEAR_LOGS = true;
+        private static final boolean VEG_CLEAR_LEAVES = true;
+        private static final boolean VEG_CLEAR_VINES = true;
+
+        // run twice if you want extra safety (still cheap)
+        private static final int VEG_CLEAR_PASSES = 2;
+        private int vegPass = 0;
+        private boolean vegClearDone = false;
+
+        // cursors
+        private int vegX, vegZ;
+        private boolean vegInit = false;
+
 
         // === keep chunks loaded while we work ===
         private static final int FORCE_RADIUS_CHUNKS = 2;
@@ -1031,6 +1111,75 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
             return false;
         }
 
+        private boolean stepVegClear(MinecraftServer server, int budget, long deadlineNanos) {
+            int ops = 0;
+
+            if (!vegInit) {
+                vegInit = true;
+                vegX = prepMinX;
+                vegZ = prepMinZ;
+            }
+
+            while (ops < budget) {
+                if (System.nanoTime() >= deadlineNanos) return false;
+
+                if (vegZ > prepMaxZ) {
+                    // finish this pass
+                    vegPass++;
+                    if (vegPass < VEG_CLEAR_PASSES) {
+                        // reset for another pass
+                        vegInit = false;
+                        return false;
+                    }
+                    return true;
+                }
+
+                int x = vegX;
+                int z = vegZ;
+
+                vegX += VEG_SCAN_STEP_XZ;
+                if (vegX > prepMaxX) {
+                    vegX = prepMinX;
+                    vegZ += VEG_SCAN_STEP_XZ;
+                }
+
+                int cX = x >> 4, cZ = z >> 4;
+                if (!ensureChunkLoadedDuringPreflight(cX, cZ, server)) return false;
+
+                int surface = BlueprintPlacerEngine.surfaceY(level, x, z);
+                int yTop = Math.min(level.getMaxY() - 1, surface + VEG_SCAN_ABOVE_SURFACE);
+                int yBot = Math.max(level.getMinY(), surface - VEG_SCAN_BELOW_SURFACE);
+
+                for (int y = yTop; y >= yBot; y--) {
+                    if (ops >= budget) break;
+                    if (System.nanoTime() >= deadlineNanos) return false;
+
+                    scratch.set(x, y, z);
+                    BlockState bs = level.getBlockState(scratch);
+                    if (bs.isAir()) continue;
+
+                    if (VEG_CLEAR_LEAVES && isLeaf(bs)) {
+                        level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
+                        ops++;
+                        continue;
+                    }
+                    if (VEG_CLEAR_VINES && bs.is(Blocks.VINE)) {
+                        level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
+                        ops++;
+                        continue;
+                    }
+                    if (VEG_CLEAR_LOGS && isLog(bs)) {
+                        level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
+                        ops++;
+                    }
+                }
+
+                ops++;
+            }
+
+            return false;
+        }
+
 
         // Treat a log as "natural trunk" even without leaves, but ONLY if it looks exposed
         // and not near any protected build blocks (so log houses survive).
@@ -1112,21 +1261,6 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
         }
 
 
-        private void resetTreeCleanupState() {
-            treeScanInit = false;
-            treePhase = TreePhase.FIND_TOPLOGS;
-
-            logQueue.clear();
-            leafQueue.clear();
-
-            visitedLogs.clear();
-            visitedLeaves.clear();
-
-            removedLogs.clear();
-            removedLogArray = null;
-            removedLogIndex = 0;
-        }
-
 
 
         private static final int GRADE_SYNC_LOADS_PER_TICK = 1;
@@ -1152,20 +1286,36 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
         }
 
 
-        private static final int PREFLIGHT_SYNC_LOADS_PER_TICK = 0;
+        private static final int PREFLIGHT_SYNC_LOADS_PER_TICK = 1;
         private int preflightSyncLoadsThisTick = 0;
         private int lastPreflightTick = -1;
 
         private boolean ensureChunkLoadedDuringPreflight(int cX, int cZ, MinecraftServer server) {
-            // Tickets handle loading; we just wait until it is present.
-            return level.getChunkSource().getChunk(cX, cZ, ChunkStatus.SURFACE, false) != null;
+            int tick = server.getTickCount();
+            if (tick != lastPreflightTick) {
+                lastPreflightTick = tick;
+                preflightSyncLoadsThisTick = 0;
+            }
 
+            if (level.getChunkSource().getChunkNow(cX, cZ) != null) return true;
+
+            if (preflightSyncLoadsThisTick < PREFLIGHT_SYNC_LOADS_PER_TICK) {
+                level.getChunk(cX, cZ); // load/generate + builds heightmaps
+                preflightSyncLoadsThisTick++;
+                return true;
+            }
+
+            return false;
         }
 
 
 
+
+
         private Task(ServerLevel level, Blueprint bp, BlockPos origin, String modId, boolean includeAir,
-                     Runnable onSuccess, Runnable onFail) {
+             Runnable onSuccess, Runnable onFail,
+             boolean isWorldgenTask, boolean bypassWorldgenToggle) {
+
             this.level = level;
             this.bp = bp;
             this.origin = origin;
@@ -1173,8 +1323,12 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
             this.includeAir = includeAir;
             this.onSuccess = onSuccess;
             this.onFail = onFail;
+            this.isWorldgenTask = isWorldgenTask;
+            this.bypassWorldgenToggle = bypassWorldgenToggle;
+
         }
 
+      
         PreflightResult stepPreflight(MinecraftServer server, int budget, long deadlineNanos) throws IOException {
             if (failed) return PreflightResult.FINISHED;
 
@@ -1438,6 +1592,12 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
 
             baseY = chosen - FOUNDATION_BURY;
             originYShift = baseY - origin.getY();
+
+            // If yShift is absurd, reject
+            if (Math.abs(originYShift) > 48) {
+                prepRejected = true;
+                return true;
+            }
 
             checkX = footMinX;
             checkZ = footMinZ;
@@ -1866,25 +2026,23 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
                         + " bounds=(" + prepMinX + "," + prepMinZ + ")->(" + prepMaxX + "," + prepMaxZ + ")");
             }
 
-            // NEW: One-time tree cleanup pass before any column grading starts.
-            if (!treeCleanupDone) {
-                boolean done = stepTreeCleanup(Math.min(budget, 1200), deadlineNanos);
+            // NEW: Simple vegetation clear BEFORE grading so logs don't poison surfaceY.
+            if (!vegClearDone) {
+                boolean done = stepVegClear(server, Math.min(budget, 1400), deadlineNanos);
                 if (!done) return false;
 
-                treeCleanupPass++;
+                vegClearDone = true;
 
-                if (treeCleanupPass < TREE_CLEANUP_PASSES) {
-                    // Prepare for another cleanup pass
-                    resetTreeCleanupState();
-                    return false; // yield so next pass runs on next tick
-                }
-
-                treeCleanupDone = true;
-
-                // Reset grading cursors
+                // IMPORTANT: reset grading cursors after we changed the world
                 scanX = prepMinX;
                 scanZ = prepMinZ;
+
+                // Also reset column state just in case
+                colActive = false;
+                colStage = 0;
+                colYInit = false;
             }
+
 
 
 
@@ -2190,8 +2348,7 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
                   
                 }
 
-              // Safety: if colStage somehow gets invalid, bail out of this column
-                colStage = 4; 
+              
             }
             return false;
         }
@@ -2535,264 +2692,137 @@ private static boolean waitBrieflyForChunk(ServerLevel level, int cx, int cz) {
             return (hi << 8) | lo;
         }
 
+        private static final int TREE_SCAN_STEP_XZ = 1;          // 1 = strongest, 2 = good
+        private static final int TREE_SCAN_ABOVE_SURFACE = 48;   // you already have TREE_CLEAR_EXTRA_HEIGHT ~48
+      
+        private static final int TREE_LEAF_RADIUS = 3;           // leaf proximity classification
+        private static final int TREE_CLEAR_LEAF_RADIUS = 4;     // leaf clear around deleted logs
+
+
+        // --- Tree cleanup cursors ---
+        private int treeCX, treeCZ;
+        private boolean treeCleanupInit = false;
+
         private boolean stepTreeCleanup(int budget, long deadlineNanos) {
             int ops = 0;
 
-            // init cursors once
-            if (!treeScanInit) {
-                treeScanInit = true;
-                treePhase = TreePhase.FIND_TOPLOGS;
-
-                treeScanX = prepMinX;
-                treeScanZ = prepMinZ;
-
-                removedLogArray = null;
-                removedLogIndex = 0;
+            if (!treeCleanupInit) {
+                treeCleanupInit = true;
+                treeCX = prepMinX;
+                treeCZ = prepMinZ;
             }
 
             while (ops < budget) {
                 if (System.nanoTime() >= deadlineNanos) return false;
 
-                // -------------------------
-                // Phase 1: FIND_TOPLOGS
-                // -------------------------
-                if (treePhase == TreePhase.FIND_TOPLOGS) {
-                    if (treeScanZ > prepMaxZ) {
-                        treePhase = TreePhase.LOG_BFS;
-                        continue;
-                    }
-
-                    int x = treeScanX;
-                    int z = treeScanZ;
-
-                    treeScanX++;
-                    if (treeScanX > prepMaxX) {
-                        treeScanX = prepMinX;
-                        treeScanZ++;
-                    }
-
-                    int cX = x >> 4, cZ = z >> 4;
-                    if (level.getChunkSource().getChunkNow(cX, cZ) == null) return false;
-
-                    // scan from canopy-ish down a bit; top logs are usually above surface
-                    treeSurfaceY = BlueprintPlacerEngine.surfaceY(level, x, z);
-                    int yEnd = Math.min(level.getMaxY() - 1, treeSurfaceY + TREE_CLEAR_EXTRA_HEIGHT);
-                    int yStart = Math.max(level.getMinY(), treeSurfaceY - 4);
-
-                    for (int y = yEnd; y >= yStart; y--) {
-                        scratch.set(x, y, z);
-                        BlockState bs = level.getBlockState(scratch);
-                        if (!isLog(bs)) continue;
-
-                        BlockPos p = scratch.immutable();
-                        if (isTopLog(p)) {
-                            long k = p.asLong();
-                            if (!visitedLogs.contains(k)) {
-                                logQueue.add(p);
-                                treePhase = TreePhase.LOG_BFS;
-                                break;
-                            }
-                        }
-                        
-                        if (hasLeavesNearby(x, y, z, 2)) {
-                            BlockState below = level.getBlockState(p.below());
-                            if (isLog(below)) {
-                                long k = p.asLong();
-                                if (!visitedLogs.contains(k)) {
-                                    logQueue.add(p);
-                                    treePhase = TreePhase.LOG_BFS;
-                                    break;
-                                }
-                            }
-                        }
-                                                
-                    }
-
-                    ops++;
-                    continue;
-                }
-
-                // -------------------------
-                // Phase 2: LOG_BFS
-                // -------------------------
-                if (treePhase == TreePhase.LOG_BFS) {
-                    if (logQueue.isEmpty()) {
-                        // done deleting logs => prep for leaf clear radius
-                        if (removedLogArray == null) {
-                            removedLogArray = removedLogs.toLongArray();
-                            removedLogIndex = 0;
-                        }
-                        treePhase = TreePhase.LEAF_RADIUS_CLEAR;
-                        continue;
-                    }
-
-                    BlockPos p = logQueue.poll();
-                    if (p == null) continue;
-
-                    long pk = p.asLong();
-                    if (visitedLogs.contains(pk)) continue;
-                    visitedLogs.add(pk);
-
-                    BlockState bs = level.getBlockState(p);
-                    if (!isLog(bs)) continue;
-
-                    // delete log
-                    level.setBlock(p, Blocks.AIR.defaultBlockState(), 2);
-                    removedLogs.add(pk);
-
-                    // enqueue connected logs
-                    enqueueNeighborLogs(p);
-
-                    ops++;
-                    continue;
-                }
-
-                // -------------------------
-                // Phase 3: LEAF_RADIUS_CLEAR
-                // -------------------------
-                if (treePhase == TreePhase.LEAF_RADIUS_CLEAR) {
-                    if (removedLogArray == null || removedLogIndex >= removedLogArray.length) {
-                        // Only prune floating leaf groups if we actually removed some logs.
-                        if (removedLogs.isEmpty()) {
-                            treePhase = TreePhase.DONE;
-                        } else {
-                            treePhase = TreePhase.LEAF_GROUP_PRUNE;
-                        }
-                        continue;
-                    }
-
-                    BlockPos logPos = BlockPos.of(removedLogArray[removedLogIndex++]);
-
-                    // delete leaves within 5 blocks of deleted logs,
-                    // but don't touch leaves that are near other non-deleted logs
-                    int r = 5;
-                    for (int dx = -r; dx <= r; dx++) {
-                        for (int dy = -r; dy <= r; dy++) {
-                            for (int dz = -r; dz <= r; dz++) {
-                                if (ops >= budget) break;
-                                if (System.nanoTime() >= deadlineNanos) return false;
-
-                                scratch.set(logPos.getX() + dx, logPos.getY() + dy, logPos.getZ() + dz);
-                                BlockState s = level.getBlockState(scratch);
-                                if (!isLeaf(s)) continue;
-
-                                // If this leaf is close to a kept (non-removed) log, skip it
-                                BlockPos leafPos = scratch.immutable();
-                                if (hasNonRemovedLogNearby(leafPos, 2)) continue;
-
-                                level.setBlock(leafPos, Blocks.AIR.defaultBlockState(), 2);
-                                ops++;
-                            }
-                        }
-                    }
-
-                    ops++;
-                    continue;
-                }
-
-                // -------------------------
-                // Phase 4: LEAF_GROUP_PRUNE
-                // -------------------------
-                if (treePhase == TreePhase.LEAF_GROUP_PRUNE) {
-                    // scan leaves in prep rect; BFS groups; remove if floating & not near kept logs
-                    if (treeScanZ > prepMaxZ) {
-                        treePhase = TreePhase.DONE;
-                        continue;
-                    }
-
-                    int x = treeScanX;
-                    int z = treeScanZ;
-
-                    treeScanX++;
-                    if (treeScanX > prepMaxX) {
-                        treeScanX = prepMinX;
-                        treeScanZ++;
-                    }
-
-                    int cX = x >> 4, cZ = z >> 4;
-                    if (level.getChunkSource().getChunkNow(cX, cZ) == null) return false;
-
-                    int y = BlueprintPlacerEngine.surfaceY(level, x, z) + 20; // canopy-ish band
-                    y = Math.min(level.getMaxY() - 1, y);
-
-                    scratch.set(x, y, z);
-                    BlockPos start = scratch.immutable();
-                    BlockState startState = level.getBlockState(start);
-                    if (!isLeaf(startState)) { ops++; continue; }
-
-                    long sk = start.asLong();
-                    if (visitedLeaves.contains(sk)) { ops++; continue; }
-
-                    // BFS this leaf group
-                    ArrayList<BlockPos> group = new ArrayList<>();
-                    leafQueue.clear();
-                    leafQueue.add(start);
-                    visitedLeaves.add(sk);
-
-                    while (!leafQueue.isEmpty() && ops < budget) {
-                        if (System.nanoTime() >= deadlineNanos) return false;
-
-                        BlockPos p = leafQueue.poll();
-                        if (p == null) continue;
-
-                        BlockState ps = level.getBlockState(p);
-                        if (!isLeaf(ps)) continue;
-
-                        // only consider "floating-style" leaves as candidates
-                        if (!touchesOnlyLeavesOrAir(p)) {
-                            // still mark as in group so we don't revisit, but it anchors => keep group
-                        }
-
-                        group.add(p);
-                        ops++;
-
-                        for (Direction d : DIR6) {
-                            BlockPos n = p.relative(d);
-                            long nk = n.asLong();
-                            if (visitedLeaves.contains(nk)) continue;
-
-                            BlockState ns = level.getBlockState(n);
-                            if (isLeaf(ns)) {
-                                visitedLeaves.add(nk);
-                                leafQueue.add(n);
-                            }
-                        }
-                    }
-
-                    // decide whether to delete this group
-                    boolean hasAnchorOrKeptLog = groupHasAnchorOrNearbyKeptLog(group, 2);
-
-                    if (!hasAnchorOrKeptLog) {
-                        // also require that the group is mostly "floating" leaves
-                        // (if you want stricter: ensure ALL are touchesOnlyLeavesOrAir)
-                        for (BlockPos p : group) {
-                            if (ops >= budget) break;
-                            if (System.nanoTime() >= deadlineNanos) return false;
-
-                            // only remove leaves that are not near kept logs
-                            if (hasNonRemovedLogNearby(p, 2)) continue;
-
-                            if (isLeaf(level.getBlockState(p))) {
-                                level.setBlock(p, Blocks.AIR.defaultBlockState(), 2);
-                                ops++;
-                            }
-                        }
-                    }
-
-                    ops++;
-                    continue;
-                }
-
-                // DONE
-                if (treePhase == TreePhase.DONE) {
+                if (treeCZ > prepMaxZ) {
+                    // done
                     return true;
                 }
+
+                int x = treeCX;
+                int z = treeCZ;
+
+                // advance cursor (grid step)
+                treeCX += TREE_SCAN_STEP_XZ;
+                if (treeCX > prepMaxX) {
+                    treeCX = prepMinX;
+                    treeCZ += TREE_SCAN_STEP_XZ;
+                }
+
+                // must be loaded
+                int cX = x >> 4, cZ = z >> 4;
+                if (level.getChunkSource().getChunkNow(cX, cZ) == null) return false;
+
+                int surfaceY = BlueprintPlacerEngine.surfaceY(level, x, z);
+
+                int yTop = Math.min(level.getMaxY() - 1, surfaceY + TREE_SCAN_ABOVE_SURFACE);
+                int yBot = Math.max(level.getMinY(), surfaceY - TREE_SCAN_BELOW_SURFACE);
+
+                // scan down through canopy band
+                for (int y = yTop; y >= yBot; y--) {
+                    if (ops >= budget) break;
+                    if (System.nanoTime() >= deadlineNanos) return false;
+
+                    scratch.set(x, y, z);
+                    BlockState bs = level.getBlockState(scratch);
+                    if (!isLog(bs)) continue;
+
+                    boolean treeish = hasLeavesNearby(x, y, z, TREE_LEAF_RADIUS)
+                            || isLikelyBareTreeTrunk(x, y, z);
+
+                    if (!treeish) continue;
+
+                    // wipe a vertical run of logs (handles trunks + adjacent “branch columns”)
+                    ops += deleteVerticalLogRunAndLocalLeaves(x, y, z, budget - ops, deadlineNanos);
+                    break; // after deleting one tree-ish hit in this column, move on
+                }
+
+                ops++;
             }
 
             return false;
         }
 
+        /** Deletes contiguous logs up/down from (x,y,z) and clears leaves/vines near them. Returns ops used. */
+        private int deleteVerticalLogRunAndLocalLeaves(int x, int y, int z, int budgetLeft, long deadlineNanos) {
+            int ops = 0;
 
+            // 1) delete logs downward
+            int y0 = y;
+            while (ops < budgetLeft) {
+                if (System.nanoTime() >= deadlineNanos) return ops;
+
+                scratch.set(x, y0, z);
+                BlockState s = level.getBlockState(scratch);
+                if (!isLog(s)) break;
+
+                // protect build-adjacent logs? optional, but your isLikelyBareTreeTrunk already checks
+                level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
+                ops++;
+
+                y0--;
+                if (y0 < level.getMinY()) break;
+            }
+
+            // 2) delete logs upward a bit too (branches that form “columns”)
+            int y1 = y + 1;
+            int upLimit = Math.min(level.getMaxY() - 1, y + 20);
+            while (ops < budgetLeft && y1 <= upLimit) {
+                if (System.nanoTime() >= deadlineNanos) return ops;
+
+                scratch.set(x, y1, z);
+                BlockState s = level.getBlockState(scratch);
+                if (!isLog(s)) break;
+
+                level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
+                ops++;
+
+                y1++;
+            }
+
+            // 3) clear leaves/vines in radius around the original hit (cheap, effective)
+            int r = TREE_CLEAR_LEAF_RADIUS;
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dy = -r; dy <= r; dy++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        if (ops >= budgetLeft) return ops;
+                        if (System.nanoTime() >= deadlineNanos) return ops;
+
+                        scratch.set(x + dx, y + dy, z + dz);
+                        BlockState s = level.getBlockState(scratch);
+                        if (isLeaf(s) || s.is(Blocks.VINE)) {
+                            level.setBlock(scratch, Blocks.AIR.defaultBlockState(), 2);
+                            ops++;
+                        }
+                    }
+                }
+            }
+
+            return ops;
+        }
+
+        
 
     }
 }

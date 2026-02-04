@@ -1,5 +1,8 @@
 {
   "variants": {
-    "": { "model": "kingdoms:block/blacksmith"}
+    "facing=north": { "model": "kingdoms:block/blacksmith", "y": 0 },
+    "facing=east":  { "model": "kingdoms:block/blacksmith", "y": 90 },
+    "facing=south": { "model": "kingdoms:block/blacksmith", "y": 180 },
+    "facing=west":  { "model": "kingdoms:block/blacksmith", "y": 270 }
   }
 }

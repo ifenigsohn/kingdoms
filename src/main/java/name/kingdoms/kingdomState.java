@@ -96,6 +96,20 @@ public class kingdomState extends SavedData {
         setDirty();
     }
 
+    public double productionMultiplierWithPressure(MinecraftServer server, Kingdom k) {
+        long now = server.getTickCount();
+        var mods = name.kingdoms.pressure.KingdomPressureState.get(server).getMods(k.id, now);
+
+        double sEff = securityValueWithPressure(server, k);
+        double hEff = happinessWithPressure(server, k);
+
+        double pmFromH = 0.40 + (hEff / 10.0) * (1.20 - 0.40);
+        double pmFromS = 0.85 + (1.15 - 0.85) * sEff;
+
+        return Math.max(0.40, Math.min(1.20, pmFromH * pmFromS)) * mods.economyMult();
+    }
+
+
     public Kingdom ensureAiKingdom(UUID id, UUID owner, String name, BlockPos origin) {
         Kingdom k = kingdoms.get(id);
         if (k != null) return k;
@@ -575,13 +589,28 @@ public class kingdomState extends SavedData {
             h += 3.0 * getActive("chapel");
             h += 1.0 * getActive("tavern");
 
-            if (isSecurityLow()) h -= 2.0;   
+            // SECURITY -> HAPPINESS (sliding)
+            if (pop > 5) {
+                double s = securityValue(); // base security (no pressure here)
+                double req = REQUIRED_SECURITY; // 0.30
+                double deficit01 = Math.max(0.0, Math.min(1.0, (req - s) / req));
+                double MAX_PENALTY = 3.0; // match EconomyCalc for consistency
+                h -= MAX_PENALTY * deficit01;
+            }
+
 
             if (h < 0) h = 0;
             if (h > 10) h = 10;
             return h;
         }
 
+        public double happinessEff(MinecraftServer server) {
+            return kingdomState.get(server).happinessWithPressure(server, this);
+        }
+
+        public double securityEff(MinecraftServer server) {
+            return kingdomState.get(server).securityValueWithPressure(server, this);
+        }
 
 
         public static final double REQUIRED_SECURITY = 0.30;

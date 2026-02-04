@@ -61,6 +61,9 @@ public class kingdomsClient implements ClientModInitializer {
         }
 
 
+        public static volatile name.kingdoms.payload.EcoBreakdownS2CPayload CLIENT_ECO_BREAKDOWN;
+
+
     public static volatile treasuryShopSyncPayload CLIENT_TREASURY_SHOP =
             new treasuryShopSyncPayload(java.util.List.of());
 

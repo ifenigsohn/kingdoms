@@ -1,5 +1,7 @@
 package name.kingdoms.network;
 
+import java.util.UUID;
+
 import org.jetbrains.annotations.Nullable;
 
 import name.kingdoms.clientWarZoneCache;
@@ -14,6 +16,7 @@ import name.kingdoms.client.ClientMailRecipientsCache;
 import name.kingdoms.client.KingdomTransitionHUD;
 import name.kingdoms.client.diploScreen;
 import name.kingdoms.menu.diploMenu;
+import name.kingdoms.payload.KingSpeakActionsRequestC2SPayload;
 import name.kingdoms.payload.KingdomEventsSyncS2CPayload;
 import name.kingdoms.payload.OpenMailS2CPayload;
 import name.kingdoms.payload.OpenTreasuryS2CPayload;
@@ -34,11 +37,14 @@ import name.kingdoms.payload.openKingdomMenuPayload;
 import name.kingdoms.payload.opendiplomacyS2CPayload;
 import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundEvents;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import name.kingdoms.payload.treasuryShopSyncPayload;
 import name.kingdoms.payload.warCommandGroupSyncS2CPayload;
 import name.kingdoms.payload.warZonesSyncPayload;
+import name.kingdoms.pressure.ForeignPressureActions;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.core.BlockPos;
 import name.kingdoms.client.ScribeLines;
@@ -98,6 +104,12 @@ public final class clientNetworkInit {
             });
         });
 
+        ClientPlayNetworking.registerGlobalReceiver(
+                name.kingdoms.payload.EcoBreakdownS2CPayload.TYPE,
+                (payload, ctx) -> ctx.client().execute(() -> {
+                    name.kingdoms.kingdomsClient.CLIENT_ECO_BREAKDOWN = payload;
+                })
+        );
 
 
         ClientPlayNetworking.registerGlobalReceiver(warZonesSyncPayload.TYPE, (payload, ctx) -> {
@@ -315,6 +327,48 @@ public final class clientNetworkInit {
                     s.onEventsSync(payload);
                 }
             });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(
+                name.kingdoms.payload.OpenKingSpeakActionsS2CPayload.TYPE,
+                (payload, ctx) -> ctx.client().execute(() -> {
+                    net.minecraft.client.Minecraft.getInstance().setScreen(
+                            new name.kingdoms.client.KingSpeakScreen(payload)
+                    );
+                })
+        );
+
+        // somewhere in client init, e.g. kingdomsClient.init() or clientNetworkInit init:
+        net.fabricmc.fabric.api.event.player.UseEntityCallback.EVENT.register((player, world, hand, entity, hitResult) -> {
+            if (world.isClientSide() && hand == InteractionHand.MAIN_HAND) {
+                if (entity instanceof name.kingdoms.entity.ai.aiKingdomNPCEntity npc) {
+
+                    // You can compute channel on client too, or just send npcType = npc.getAiTypeId()
+                    String t = npc.getAiTypeId();
+                    String channel = switch (t) {
+                        case "noble", "envoy", "scholar" -> ForeignPressureActions.CH_NOBLE;
+                        case "guard", "soldier", "scout" -> ForeignPressureActions.CH_GUARD;
+                        default -> ForeignPressureActions.CH_VILLAGER;
+                    };
+
+                    // targetKid is stored in synched data string; you can read it client-side too:
+                    UUID targetKid = npc.getKingdomUUID();
+                    if (targetKid == null) return InteractionResult.PASS;
+
+                    // Send request C2S (this is the correct direction)
+                    net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.send(
+                        new KingSpeakActionsRequestC2SPayload(
+                            npc.getId(),
+                            npc.getUUID(),
+                            targetKid,
+                            channel
+                        )
+                    );
+
+                    return InteractionResult.SUCCESS;
+                }
+            }
+            return InteractionResult.PASS;
         });
 
 

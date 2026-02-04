@@ -12,12 +12,13 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
 
-public class kingdomBlock extends Block {
+public class kingdomBlock extends HorizontalFacingNoCullBlock {
 
-    public kingdomBlock(Properties props) {
+      public kingdomBlock(BlockBehaviour.Properties props) {
         super(props);
     }
 
