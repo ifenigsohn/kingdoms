@@ -24,17 +24,19 @@ public final class PressureUtil {
      * @param toKingdomId   The causee/target kingdom being evaluated
      */
     public static int effectiveRelation(MinecraftServer server, int baseRel, UUID fromKingdomId, UUID toKingdomId) {
-        if (server == null || toKingdomId == null) return clampRel(baseRel);
+        if (server == null) return clampRel(baseRel);
+        if (fromKingdomId == null || toKingdomId == null) return clampRel(baseRel);
 
-        // Gate: don't apply pressure logic to AI kingdoms the player hasn't discovered.
-        // Player kingdoms always allowed.
-        if (isUnknownAi(server, toKingdomId)) {
+        // Optional discovery gate: only gate PLAYER -> unknown AI
+        if (isPlayerEvaluatingUnknownAi(server, fromKingdomId, toKingdomId)) {
             return clampRel(baseRel);
         }
 
         long now = server.getTickCount();
         var ps = KingdomPressureState.get(server);
-        var list = ps.getEvents(toKingdomId);
+
+        // IMPORTANT: scan events on the evaluator (fromKingdomId), not the target.
+        var list = ps.getEvents(fromKingdomId);
         if (list.isEmpty()) return clampRel(baseRel);
 
         int delta = 0;
@@ -55,40 +57,30 @@ public final class PressureUtil {
             if (scope == KingdomPressureState.RelScope.GLOBAL) {
                 delta += (int) Math.round(r);
             } else {
-                // CAUSER_ONLY: only apply if fromKingdomId matches event.causer
-                if (fromKingdomId != null && fromKingdomId.equals(e.causer())) {
+                // CAUSER_ONLY applies when evaluating vs the event.causer (which should be the "other" kingdom)
+                if (toKingdomId.equals(e.causer())) {
                     delta += (int) Math.round(r);
                 }
             }
         }
-
-        // Also apply GLOBAL relation modifiers on the FROM side.
-        // This lets "envoys", "legitimacy crisis", etc. affect how this kingdom relates to everyone.
-        if (fromKingdomId != null && !isUnknownAi(server, fromKingdomId)) {
-            var fromList = ps.getEvents(fromKingdomId);
-            for (var e : fromList) {
-                if (e == null) continue;
-                if (now >= e.endTick()) continue;
-
-                var eff = e.effects();
-                if (eff == null) continue;
-
-                Double r = eff.get(KingdomPressureState.Stat.RELATIONS);
-                if (r == null) continue;
-
-                var scope = e.relScope();
-                if (scope == null) scope = KingdomPressureState.RelScope.GLOBAL;
-
-                // Only GLOBAL applies from the sender side (outgoing posture).
-                if (scope == KingdomPressureState.RelScope.GLOBAL) {
-                    delta += (int) Math.round(r);
-                }
-            }
-        }
-
 
         return clampRel(baseRel + delta);
     }
+
+    /** Gate only PLAYER -> unknown AI. Never gate AI->AI or AI->player evaluations. */
+    private static boolean isPlayerEvaluatingUnknownAi(MinecraftServer server, UUID fromKingdomId, UUID toKingdomId) {
+        var ai = aiKingdomState.get(server);
+
+        boolean fromIsAi = ai.getById(fromKingdomId) != null;
+        boolean toIsAi   = ai.getById(toKingdomId) != null;
+
+        // only gate when a PLAYER kingdom is evaluating an AI kingdom
+        if (fromIsAi) return false;
+        if (!toIsAi) return false;
+
+        return !KingdomPressureState.get(server).isKnownAi(toKingdomId);
+    }
+
 
     private static boolean isUnknownAi(MinecraftServer server, UUID kingdomId) {
         var ai = aiKingdomState.get(server);

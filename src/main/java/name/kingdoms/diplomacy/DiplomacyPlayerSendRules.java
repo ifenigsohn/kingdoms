@@ -18,10 +18,6 @@ public final class DiplomacyPlayerSendRules {
         public static Decision no(String why) { return new Decision(false, why); }
     }
 
-    // “long cooldown” knobs (tune freely)
-    public static final long COMPLIMENT_COOLDOWN_TICKS = 20L * 60L * 8L; // 10 minutes
-    public static final long INSULT_COOLDOWN_TICKS     = 20L * 60L * 8L; // 10 minutes
-
     /** “Deal” letters in your GDD */
     public static boolean isDealKind(Letter.Kind k) {
         return k == Letter.Kind.REQUEST || k == Letter.Kind.OFFER || k == Letter.Kind.CONTRACT;
@@ -127,9 +123,9 @@ public final class DiplomacyPlayerSendRules {
             var cd = DiplomacyCooldownState.get(mailLevel);
 
             // IMPORTANT: use the same clock everywhere (recommended)
-            long nowTick = server.getTickCount();
-
+            long nowTick = server.overworld().getGameTime();
             long rem = cd.remaining(fromK.id, toK.id, kind, nowTick);
+
             if (rem > 0) {
                 return Decision.no("On cooldown (" + (rem / 20L) + "s remaining).");
             }
@@ -146,12 +142,10 @@ public final class DiplomacyPlayerSendRules {
 
         ServerLevel mailLevel = server.overworld();
         var cd = DiplomacyCooldownState.get(mailLevel);
-        long nowTick = server.getTickCount();
-        long cooldown = (kind == Letter.Kind.COMPLIMENT)
-                ? COMPLIMENT_COOLDOWN_TICKS
-                : INSULT_COOLDOWN_TICKS;
-
+        long nowTick = server.overworld().getGameTime();
+        long cooldown = DiplomacyCooldowns.baseTicks(kind);
         cd.markSent(fromKingdomId, toKingdomId, kind, nowTick, cooldown);
+
 
     }
 }

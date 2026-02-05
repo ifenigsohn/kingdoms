@@ -1,6 +1,7 @@
 package name.kingdoms.diplomacy;
 
 import name.kingdoms.aiKingdomState;
+import name.kingdoms.pressure.PressureUtil;
 import name.kingdoms.war.WarState;
 import net.minecraft.server.MinecraftServer;
 
@@ -57,7 +58,7 @@ public final class DiplomacyAiSendRules {
 
         // Relation gates (AI↔AI)
         int baseRel = AiRelationsState.get(server).get(fromAiId, toAiId);
-        int rel = name.kingdoms.pressure.PressureUtil.effectiveRelation(server, baseRel, toAiId);
+        int rel = PressureUtil.effectiveRelation(server, baseRel, fromAiId, toAiId);
 
 
         // Keep the same gates you want for AI diplomacy:

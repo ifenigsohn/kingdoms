@@ -367,7 +367,8 @@ private int ambientAnchorRadius = 0;
         int baseRel = relState.getRelation(sp.getUUID(), kingdomId);
 
         // effective relation for UI/evals
-        int rel = PressureUtil.effectiveRelation(sl.getServer(), baseRel, kingdomId);
+        int rel = PressureUtil.effectiveRelation(sl.getServer(), baseRel, kingdomId, kingdomId);
+
 
         ServerPlayNetworking.send(sp, new opendiplomacyS2CPayload(
                 this.getId(),

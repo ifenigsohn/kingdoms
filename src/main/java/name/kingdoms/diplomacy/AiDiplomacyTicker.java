@@ -3,6 +3,7 @@ package name.kingdoms.diplomacy;
 import name.kingdoms.aiKingdomState;
 import name.kingdoms.kingdomState;
 import name.kingdoms.news.KingdomNewsState;
+import name.kingdoms.pressure.PressureUtil;
 import name.kingdoms.war.WarState;
 
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
@@ -345,7 +346,7 @@ public final class AiDiplomacyTicker {
 
                 // Recipient perspective: recipient is "decider"
                 int baseRel = aiRel.get(fromId, toId);
-                int relBefore = name.kingdoms.pressure.PressureUtil.effectiveRelation(server, baseRel, toId);
+                int relBefore = PressureUtil.effectiveRelation(server, baseRel, fromId, toId);
                 int rel = relBefore;
 
                 String execOutcome = null; // set only if something actually executes
@@ -815,7 +816,7 @@ public final class AiDiplomacyTicker {
 
                     // event capture (REL BEFORE/AFTER)
                     int relAfterBase = aiRel.get(fromId, toId);
-                    int relAfterEff  = name.kingdoms.pressure.PressureUtil.effectiveRelation(server, relAfterBase, toId);
+                    int relAfterEff  = PressureUtil.effectiveRelation(server, relAfterBase, fromId, toId);
                     int relDeltaEff  = relAfterEff - relBefore;
 
 
