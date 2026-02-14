@@ -23,6 +23,12 @@ public final class DiplomacyAiSendRules {
         if (server == null || fromAiId == null || toAiId == null || kind == null) return Decision.no("Invalid.");
         if (fromAiId.equals(toAiId)) return Decision.no("Same kingdom.");
 
+        // Diplomatic range gate (AI uses kingdom IDs)
+        if (!name.kingdoms.diplomacy.DiplomaticRangeUtil.canReach(server, fromAiId, toAiId)) {
+            return Decision.no("Outside diplomatic range.");
+        }
+
+
         var aiState = aiKingdomState.get(server);
         if (aiState.getById(fromAiId) == null) return Decision.no("Sender not AI.");
         if (aiState.getById(toAiId) == null) return Decision.no("Recipient not AI.");

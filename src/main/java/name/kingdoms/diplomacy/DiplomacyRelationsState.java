@@ -18,6 +18,10 @@ public final class DiplomacyRelationsState extends SavedData {
     // player -> (kingdom -> rel)
     private final Map<UUID, Map<UUID, Integer>> rel = new HashMap<>();
 
+    // baseline relation target (attractor), stored per (player, kingdom)
+    private final java.util.Map<java.util.UUID, java.util.Map<java.util.UUID, Integer>> relBaseline = new java.util.HashMap<>();
+
+
     /* -----------------------------
        PERSISTENCE (STATE CODEC)
      ----------------------------- */
@@ -28,21 +32,34 @@ public final class DiplomacyRelationsState extends SavedData {
     private static final Codec<Map<UUID, Map<UUID, Integer>>> REL_CODEC =
             Codec.unboundedMap(UUID_CODEC, Codec.unboundedMap(UUID_CODEC, Codec.INT));
 
+    private static final Codec<Map<UUID, Map<UUID, Integer>>> BASELINE_CODEC =
+        Codec.unboundedMap(UUID_CODEC, Codec.unboundedMap(UUID_CODEC, Codec.INT));
+
+
     private static final Codec<DiplomacyRelationsState> CODEC =
-            RecordCodecBuilder.create(inst -> inst.group(
-                    REL_CODEC.fieldOf("rel").forGetter(s -> s.rel)
-            ).apply(inst, (loadedRel) -> {
-                DiplomacyRelationsState s = new DiplomacyRelationsState();
+        RecordCodecBuilder.create(inst -> inst.group(
+                REL_CODEC.fieldOf("rel").forGetter(s -> s.rel),
+                BASELINE_CODEC.optionalFieldOf("relBaseline", java.util.Map.of()).forGetter(s -> s.relBaseline)
+        ).apply(inst, (loadedRel, loadedBaseline) -> {
+            DiplomacyRelationsState s = new DiplomacyRelationsState();
 
-                // Deep copy so inner maps are always mutable
-                for (var e : loadedRel.entrySet()) {
-                    UUID playerId = e.getKey();
-                    Map<UUID, Integer> inner = e.getValue();
-                    s.rel.put(playerId, new HashMap<>(inner));
-                }
+            // Deep copy REL so inner maps are mutable
+            for (var e : loadedRel.entrySet()) {
+                UUID playerId = e.getKey();
+                Map<UUID, Integer> inner = e.getValue();
+                s.rel.put(playerId, new HashMap<>(inner));
+            }
 
-                return s;
-            }));
+            // Deep copy BASELINE so inner maps are mutable
+            for (var e : loadedBaseline.entrySet()) {
+                UUID playerId = e.getKey();
+                Map<UUID, Integer> inner = e.getValue();
+                s.relBaseline.put(playerId, new HashMap<>(inner));
+            }
+
+            return s;
+        }));
+
 
     private static final SavedDataType<DiplomacyRelationsState> TYPE =
             new SavedDataType<>(
@@ -52,11 +69,25 @@ public final class DiplomacyRelationsState extends SavedData {
                     null
             );
 
+            
+
     public static DiplomacyRelationsState get(MinecraftServer server) {
         ServerLevel overworld = server.getLevel(Level.OVERWORLD);
         if (overworld == null) return new DiplomacyRelationsState();
         return overworld.getDataStorage().computeIfAbsent(TYPE);
     }
+
+    /** Initialize relation for first discovery: sets both current and baseline. */
+    public void initRelation(java.util.UUID playerId, java.util.UUID kingdomId, int baseline) {
+        // set current (reuse your existing setter if you have one)
+        setRelation(playerId, kingdomId, baseline);
+
+        // set baseline only if missing (so you don't overwrite later)
+        if (!hasBaseline(playerId, kingdomId)) {
+            setBaseline(playerId, kingdomId, baseline);
+        }
+    }
+
 
     public int getRelation(UUID player, UUID kingdom) {
         if (player == null || kingdom == null) return 0;
@@ -102,6 +133,29 @@ public final class DiplomacyRelationsState extends SavedData {
         Map<UUID, Integer> inner = rel.get(player);
         return inner != null && inner.containsKey(kingdom);
     }
+
+    public boolean hasBaseline(java.util.UUID playerId, java.util.UUID kingdomId) {
+        var m = relBaseline.get(playerId);
+        return m != null && m.containsKey(kingdomId);
+    }
+
+    public int getBaseline(java.util.UUID playerId, java.util.UUID kingdomId) {
+        var m = relBaseline.get(playerId);
+        if (m == null || !m.containsKey(kingdomId)) {
+            // Backfill baseline to current for old saves
+            int cur = getRelation(playerId, kingdomId);
+            setBaseline(playerId, kingdomId, cur);
+            return cur;
+        }
+        return m.get(kingdomId);
+    }
+
+
+    public void setBaseline(java.util.UUID playerId, java.util.UUID kingdomId, int baseline) {
+        relBaseline.computeIfAbsent(playerId, k -> new java.util.HashMap<>()).put(kingdomId, baseline);
+        setDirty();
+    }
+
 
 
     

@@ -492,6 +492,14 @@ public class aiKingdomState extends SavedData {
                   return Mth.clamp(this.security / 100.0, 0.0, 1.0); // 0..1
         }
 
+        // --- economy accessors (for WarPeaceEffects etc.) ---
+        public int goldInt()  { return (int) Math.floor(this.gold); }
+        public int woodInt()  { return (int) Math.floor(this.wood); }
+        public int metalInt() { return (int) Math.floor(this.metal); }
+
+        public void setGoldInt(int v)  { this.gold  = Math.max(0, v); }
+        public void setWoodInt(int v)  { this.wood  = Math.max(0, v); }
+        public void setMetalInt(int v) { this.metal = Math.max(0, v); }
 
         // army pool
         public int maxSoldiers;   // 50..300 (by size)

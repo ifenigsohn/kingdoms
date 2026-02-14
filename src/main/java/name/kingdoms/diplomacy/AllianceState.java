@@ -2,6 +2,10 @@ package name.kingdoms.diplomacy;
 
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
+
+import name.kingdoms.aiKingdomState;
+import name.kingdoms.kingdomState;
+import name.kingdoms.news.KingdomNewsState;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.saveddata.SavedData;
@@ -148,4 +152,67 @@ public final class AllianceState extends SavedData {
         if (changed) setDirty();
         return changed;
     }
+
+    public boolean addAlliance(MinecraftServer server, UUID a, UUID b) {
+        boolean ok = addAlliance(a, b);
+        if (ok && server != null) {
+            try {
+                var ks = kingdomState.get(server);
+                var ai = aiKingdomState.get(server);
+
+                String an = name(ks, ai, a);
+                String bn = name(ks, ai, b);
+
+                // Name-only: avoids UUID parsing so this is NEVER range-gated.
+                KingdomNewsState.get(server.overworld()).add(server.getTickCount(),
+                        "[ALLIANCE] " + an + " and " + bn + " have formed an alliance.");
+            } catch (Throwable ignored) {}
+        }
+        return ok;
+    }
+
+    public boolean breakAlliance(MinecraftServer server, UUID a, UUID b) {
+        boolean ok = breakAlliance(a, b);
+        if (ok && server != null) {
+            try {
+                var ks = kingdomState.get(server);
+                var ai = aiKingdomState.get(server);
+
+                String an = name(ks, ai, a);
+                String bn = name(ks, ai, b);
+
+                // Name-only: avoids UUID parsing so this is NEVER range-gated.
+                KingdomNewsState.get(server.overworld()).add(server.getTickCount(),
+                        "[ALLIANCE] " + an + " and " + bn + " have broken their alliance.");
+            } catch (Throwable ignored) {}
+        }
+        return ok;
+    }
+
+    /** Name resolution for both player and AI kingdoms. */
+    /** Name resolution for both player and AI kingdoms. */
+    private static String name(kingdomState ks, aiKingdomState ai, UUID kid) {
+        if (kid == null) return "Unknown Kingdom";
+
+        // Prefer the main kingdomState if present
+        if (ks != null) {
+            var k = ks.getKingdom(kid);
+            if (k != null && k.name != null && !k.name.isBlank()) return k.name;
+        }
+
+        // Fallback: AI state lookup
+        if (ai != null) {
+            // If ai has full object access
+            var ak = ai.getById(kid);
+            if (ak != null && ak.name != null && !ak.name.isBlank()) return ak.name;
+
+            // Or if you only have name mapping
+            String n = ai.getNameById(kid);
+            if (n != null && !n.isBlank()) return n;
+        }
+
+        return "Unknown Kingdom";
+    }
+
+
 }

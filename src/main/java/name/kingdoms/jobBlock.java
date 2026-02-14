@@ -45,13 +45,13 @@ public class jobBlock extends HorizontalFacingNoCullBlock implements EntityBlock
     private final String jobId;
     private final jobDefinition job;
 
-    public jobBlock(jobDefinition job, BlockBehaviour.Properties props) {
+    public jobBlock(Properties props, String jobId) {
         super(props);
-        this.job = job;
-        this.jobId = job.getId();
 
-        // default state (include enabled + facing default is handled by base class,
-        // but we explicitly set enabled here)
+        this.jobId = jobId;
+        this.job = jobDefinition.byId(jobId);
+
+        // default state
         this.registerDefaultState(
                 this.stateDefinition.any()
                         .setValue(FACING, net.minecraft.core.Direction.NORTH)
@@ -62,6 +62,13 @@ public class jobBlock extends HorizontalFacingNoCullBlock implements EntityBlock
     public String getJobId() {
         return jobId;
     }
+
+    public jobBlock(jobDefinition job, Properties props) {
+        this(props, job.getId());
+    }
+
+
+
 
     /* -----------------------------
        BLOCKSTATE
@@ -218,4 +225,36 @@ public class jobBlock extends HorizontalFacingNoCullBlock implements EntityBlock
         if (type != Kingdoms.JOB_BLOCK_ENTITY) return null;
         return (lvl, p, st, be) -> jobBlockEntity.tick(lvl, p, st, (jobBlockEntity) be);
     }
+
+    @Override
+    public void setPlacedBy(net.minecraft.world.level.Level level,
+                            net.minecraft.core.BlockPos pos,
+                            net.minecraft.world.level.block.state.BlockState state,
+                            @org.jetbrains.annotations.Nullable net.minecraft.world.entity.LivingEntity placer,
+                            net.minecraft.world.item.ItemStack stack) {
+        super.setPlacedBy(level, pos, state, placer, stack);
+
+        // mappings: use method, not field
+        if (level.isClientSide()) return;
+        if (!(level instanceof net.minecraft.server.level.ServerLevel sl)) return;
+        if (!(placer instanceof net.minecraft.server.level.ServerPlayer sp)) return;
+
+        // Only envoy job blocks
+        if (!"envoy".equals(this.getJobId())) return;
+
+        var be = sl.getBlockEntity(pos);
+        if (!(be instanceof name.kingdoms.jobBlockEntity jbe)) return;
+
+        var ks = name.kingdoms.kingdomState.get(sl.getServer());
+        var pk = ks.getPlayerKingdom(sp.getUUID());
+        if (pk == null) return;
+
+        // ✅ set explicit ownership so envoys outside borders still work
+        jbe.setOwnerKingdomId(pk.id);
+
+        // ✅ optional: immediately create anchor so range applies instantly
+        ks.upsertEnvoyAnchor(pk.id, sl.dimension(), pos, 1500);
+        ks.markDirty();
+    }
+
 }

@@ -81,6 +81,7 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
+import name.kingdoms.diplomacy.DiplomaticRangeUtil;
 import name.kingdoms.payload.mailSendC2SPayload;
 
 public final class networkInit {
@@ -236,6 +237,12 @@ public final class networkInit {
             return;
         }
 
+        if (!DiplomaticRangeUtil.canReach(server, playerK.id, toK.id)) {
+            player.displayClientMessage(Component.literal("That kingdom is out of diplomatic range."), false);
+            return;
+        }
+
+
         // cooldown (same map as in-person proposals)
         long nowTick = server.getTickCount();
         ServerLevel mailLevel = server.overworld();
@@ -387,7 +394,7 @@ public final class networkInit {
                         if (!relState.hasRelation(player.getUUID(), k.id)) {
                             double tb = (aiK.personality == null) ? 0.50 : aiK.personality.trustBias();
                             int init = (int) Math.round((tb - 0.50) * 40.0); // ~ -20..+20
-                            relState.setRelation(player.getUUID(), k.id, init);
+                            relState.initRelation(player.getUUID(), k.id, init);
                         }
                     }
 
@@ -395,6 +402,7 @@ public final class networkInit {
                     UUID fromKid = null;
                     var pk = kingdomState.get(server).getPlayerKingdom(player.getUUID());
                     if (pk != null) fromKid = pk.id;
+                    boolean inRange = inDiplomaticRange(server, ks, fromKid, k);
 
                     int relation = PressureUtil.effectiveRelation(server, baseRel, fromKid, k.id);
 
@@ -485,9 +493,14 @@ public final class networkInit {
                     // allies = alliance members
                     var allyIds = new java.util.ArrayList<java.util.UUID>(allianceState.alliesOf(k.id));
 
+                    // puppets = direct puppets of this kingdom (master -> puppets)
+                    var puppetIds = ks.getPuppetsOf(k.id);
+
                     // format short strings for tooltip
-                    String allies = formatKingdomNameList(server, ks, aiState, allyIds, 3);
+                    String allies  = formatKingdomNameList(server, ks, aiState, allyIds, 3);
+                    String puppets = puppetIds.isEmpty() ? "" : formatKingdomNameList(server, ks, aiState, puppetIds, 3);
                     String enemies = formatKingdomNameList(server, ks, aiState, enemyIds, 3);
+
 
 
                     if (isAi) {
@@ -519,7 +532,7 @@ public final class networkInit {
                     ServerPlayNetworking.send(player, new name.kingdoms.payload.kingdomHoverSyncS2CPayload(
                         k.id,
                         (k.name == null ? "" : k.name),
-
+                        inRange,  
                         rulerId,
                         rulerName,
 
@@ -532,6 +545,7 @@ public final class networkInit {
 
                         atWar,
                         allies,
+                        puppets,
                         enemies,
 
                         gold,
@@ -555,6 +569,7 @@ public final class networkInit {
 
                 var ks = name.kingdoms.kingdomState.get(server);
                 var pk = ks.getPlayerKingdom(player.getUUID());
+                UUID playerKid = (pk == null) ? null : pk.id;
 
                 // Player kingdom name (used to identify "player-related" news lines globally)
                 final String playerKingdomName =
@@ -605,6 +620,13 @@ public final class networkInit {
                     if (outNewestFirst.size() >= limit) break;
                     String t = e.text();
                     if (t == null || t.isBlank()) continue;
+                    if (playerKid != null) {
+                        boolean ok = true;
+                        for (UUID id : extractUuids(t)) {
+                            if (!DiplomaticRangeUtil.canReach(server, playerKid, id)) { ok = false; break; }
+                        }
+                        if (!ok) continue;
+                    }
                     if (seen.add(t)) outNewestFirst.add(t);
                 }
 
@@ -618,6 +640,13 @@ public final class networkInit {
 
                     String t = e.text();
                     if (t == null || t.isBlank()) continue;
+                    if (playerKid != null) {
+                        boolean ok = true;
+                        for (UUID id : extractUuids(t)) {
+                            if (!DiplomaticRangeUtil.canReach(server, playerKid, id)) { ok = false; break; }
+                        }
+                        if (!ok) continue;
+                    }
                     if (seen.add(t)) outNewestFirst.add(t);
                 }
 
@@ -965,6 +994,19 @@ public final class networkInit {
                 Kingdom fromK = ks.getPlayerKingdom(player.getUUID());
                 if (fromK == null) return;
 
+                if (!DiplomaticRangeUtil.canReach(server, fromK.id, toId)) {
+                    // send "all blocked" decisions
+                    var out = new java.util.ArrayList<name.kingdoms.payload.mailPolicySyncS2CPayload.Entry>();
+                    for (Letter.Kind k : Letter.Kind.values()) {
+                        out.add(new name.kingdoms.payload.mailPolicySyncS2CPayload.Entry(
+                                k.ordinal(), false, "Out of diplomatic range.", 0
+                        ));
+                    }
+                    ServerPlayNetworking.send(player, new name.kingdoms.payload.mailPolicySyncS2CPayload(toId, out));
+                    return;
+                }
+
+
                 UUID fromId = fromK.id;
 
                 ServerLevel level = (ServerLevel) player.level();
@@ -1053,6 +1095,16 @@ public final class networkInit {
                             new mailSendResultS2CPayload(payload.requestId(), false, "You can't send mail to your own kingdom."));
                     return;
                 }
+
+                // ----------------------------
+                // Diplomatic range enforcement
+                // ----------------------------
+                if (!DiplomaticRangeUtil.canReach(server, playerK.id, toK.id)) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "That kingdom is out of diplomatic range."));
+                    return;
+                }
+
 
                 // ----------------------------
                 // Cooldown enforcement (server authoritative)
@@ -1394,6 +1446,16 @@ public final class networkInit {
                     return;
                 }
 
+                // ----------------------------
+                // Diplomatic range enforcement
+                // ----------------------------
+                if (!DiplomaticRangeUtil.canReach(server, playerK.id, toK.id)) {
+                    ServerPlayNetworking.send(player,
+                            new mailSendResultS2CPayload(payload.requestId(), false, "That kingdom is out of diplomatic range."));
+                    return;
+                }
+
+
                 // server-authoritative in-person range check
                 var kingEnt = level.getEntity(payload.kingEntityId());
                 if (!(kingEnt instanceof LivingEntity) || kingEnt.isRemoved()) {
@@ -1535,7 +1597,11 @@ public final class networkInit {
                 var ks = kingdomState.get(server);
                 var aiState = aiKingdomState.get(server);
                 var relState = name.kingdoms.diplomacy.DiplomacyRelationsState.get(server);
-
+                var pk = ks.getPlayerKingdom(player.getUUID());
+                if (pk == null) {
+                    ServerPlayNetworking.send(player, new mailRecipientsSyncS2CPayload(java.util.List.of()));
+                    return;
+                }
                 var out = new java.util.ArrayList<mailRecipientsSyncS2CPayload.Entry>();
                 var seen = new java.util.HashSet<java.util.UUID>();
 
@@ -1560,8 +1626,9 @@ public final class networkInit {
                     String nm = kName + " (" + ownerOnline.getName().getString() + ")";
 
                     int baseRel = relState.getRelation(player.getUUID(), k.id);
-                    var pk = ks.getPlayerKingdom(player.getUUID());
+                    
                     UUID fromKid = (pk == null) ? null : pk.id;
+
 
                     // later...
                     int rel = PressureUtil.effectiveRelation(server, baseRel, fromKid, k.id);
@@ -1590,13 +1657,14 @@ public final class networkInit {
                     if (aiK == null) continue;
 
                     UUID id = aiK.id;
-                    var pk = ks.getPlayerKingdom(player.getUUID());
+      
                     UUID fromKid = (pk == null) ? null : pk.id;
                     if (id == null) continue;
                     
 
                     name.kingdoms.pressure.KingdomPressureState.get(server).markKnownAi(id);
 
+                    if (!DiplomaticRangeUtil.canReach(server, fromKid, id)) continue;
 
                     // skip duplicates if already added via ks loop
                     if (seen.contains(id)) continue;
@@ -1611,7 +1679,8 @@ public final class networkInit {
                         // personality-based baseline
                         double tb = (aiK.personality == null) ? 0.50 : aiK.personality.trustBias();
                         int init = (int) Math.round((tb - 0.50) * 40.0); // ~ -20..+20
-                        relState.setRelation(player.getUUID(), id, init);
+                        relState.initRelation(player.getUUID(), id, init);
+
                     }
 
                     int baseRel = relState.getRelation(player.getUUID(), id);
@@ -2583,6 +2652,24 @@ public final class networkInit {
         mailbox.setDirty();
     }
 
+    private static boolean inDiplomaticRange(
+            MinecraftServer server,
+            kingdomState ks,
+            UUID fromKid,
+            kingdomState.Kingdom toK
+    ) {
+        if (server == null || ks == null || toK == null || toK.id == null) return false;
+
+        // If viewer has no kingdom, treat as out-of-range (UI can show “unknown” / blocked)
+        if (fromKid == null) return false;
+
+        // Same kingdom is always “in range”
+        if (fromKid.equals(toK.id)) return true;
+
+        return DiplomaticRangeUtil.canReach(server, fromKid, toK.id);
+    }
+
+
 
     private static boolean applyAccept(kingdomState kState, kingdomState.Kingdom playerK, kingdomState.Kingdom fromK, Letter letter) {
         return switch (letter.kind()) {
@@ -3139,6 +3226,20 @@ public final class networkInit {
 
         // optional: layer pressure on top
         return name.kingdoms.pressure.PressureUtil.effectiveRelation(server, baseRel, fromKid, toKid);
+    }
+
+    private static java.util.Set<UUID> extractUuids(String s) {
+        var out = new java.util.HashSet<UUID>();
+        if (s == null) return out;
+
+        // Very simple UUID scan: split on whitespace/punct and try parse
+        String[] parts = s.split("[^0-9a-fA-F\\-]+");
+        for (String p : parts) {
+            if (p == null || p.length() < 32) continue;
+            UUID id = safeParseUuid(p);
+            if (id != null) out.add(id);
+        }
+        return out;
     }
 
 

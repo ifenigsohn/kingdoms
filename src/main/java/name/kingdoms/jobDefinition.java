@@ -531,7 +531,7 @@ public class jobDefinition {
                     .cost(10, 0,0,0, 5,5,0,0, 0,0,0);
 
     public static final jobDefinition STABLE_JOB =
-            reg(new jobDefinition("stable", 200))
+            reg(new jobDefinition("stable", 4000))
                     .requiresBlock("minecraft:hay_block", 5)
                     .requiresBlock("#minecraft:fence_gates", 1)
                     .requiresBlock("#minecraft:fences", 1)
@@ -564,7 +564,7 @@ public class jobDefinition {
 
 
     public static final jobDefinition GARRISON_JOB =
-            reg(new jobDefinition("garrison", 200))
+            reg(new jobDefinition("garrison", 4000))
                     .requiresBlock("#minecraft:beds", 3)
                     .requiresBlock("minecraft:barrel", 1)
                     .requiresBlock("#minecraft:anvil", 1)
@@ -612,6 +612,17 @@ public class jobDefinition {
                     .outputs(3, 0,0,0, 0,
                             0,0,0, 0,0,0)
                     .cost(10, 0,0,0, 0,0,0,0, 5,0,0);
+        
+
+    public static final jobDefinition ENVOY_JOB =
+            reg(new jobDefinition("envoy", 20 * 60)) // runs every 60 seconds
+            .requiresBlock("#minecraft:beds", 1)
+            .requiresBlock("minecraft:gold_block", 1)
+            .requiresBlock("minecraft:bookshelf", 4)
+                    // upkeep to keep the envoy anchor active
+                    .inputsFood(4.0, 3.0, 0,0,0,0,0,0,0) // 1 gold + 2 effective food per minute
+                    // purchase cost for shop UI / buying
+                    .costFood(50.0, 20.0, 0,0,0,0,0,0,0);
 
 
         // -----------------------------

@@ -3,6 +3,7 @@ package name.kingdoms;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 
+import name.kingdoms.aiKingdomState.BorderData;
 import name.kingdoms.kingdomState.Kingdom;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
@@ -121,6 +122,10 @@ public class kingdomState extends SavedData {
         created.hasTerminal = false;
         created.terminalDim = Level.OVERWORLD;
         created.terminalPos = origin.immutable();
+        created.hasTerminal = false;
+        created.terminalDim = Level.OVERWORLD;
+        created.terminalPos = origin.immutable();
+        created.diplomacyRangeBlocks = 2000; 
 
         kingdoms.put(id, created);
         setDirty();
@@ -219,6 +224,58 @@ public class kingdomState extends SavedData {
         setDirty();
     }
 
+        /* -----------------------------
+        ENVOY ANCHORS HELPERS
+        ----------------------------- */
+
+        public void upsertEnvoyAnchor(UUID kid, ResourceKey<Level> dim, BlockPos pos, int radius) {
+            if (kid == null || dim == null || pos == null) return;
+            Kingdom k = getKingdom(kid);
+            if (k == null) return;
+
+            BlockPos ipos = pos.immutable();
+            int rr = Math.max(0, radius);
+
+            // Remove any existing anchor at this exact spot
+            k.envoyAnchors.removeIf(a -> a != null && a.dim().equals(dim) && a.pos().equals(ipos));
+
+            // Add
+            k.envoyAnchors.add(new DiplomacyAnchor(dim, ipos, rr));
+            setDirty();
+        }
+
+        public void removeEnvoyAnchor(UUID kid, ResourceKey<Level> dim, BlockPos pos) {
+            if (kid == null || dim == null || pos == null) return;
+            Kingdom k = getKingdom(kid);
+            if (k == null) return;
+
+            BlockPos ipos = pos.immutable();
+            boolean changed = k.envoyAnchors.removeIf(a -> a != null && a.dim().equals(dim) && a.pos().equals(ipos));
+            if (changed) setDirty();
+        }
+
+        /** Removes anchors whose block no longer exists. */
+        public void validateEnvoyAnchors(MinecraftServer server) {
+            boolean changed = false;
+
+            for (Kingdom k : kingdoms.values()) {
+                if (k == null || k.envoyAnchors.isEmpty()) continue;
+
+                changed |= k.envoyAnchors.removeIf(a -> {
+                    if (a == null) return true;
+
+                    ServerLevel lvl = server.getLevel(a.dim());
+                    if (lvl == null) return true;
+
+                    // anchor is valid ONLY if block exists
+                    return !lvl.getBlockState(a.pos()).is(modBlock.envoy_block);
+                });
+            }
+
+            if (changed) setDirty();
+        }
+
+
     public kingdomState() {}
     public void markDirty() { setDirty(); }
 
@@ -238,6 +295,9 @@ public class kingdomState extends SavedData {
 
     /** player → kingdom id */
     private final Map<UUID, UUID> playerKingdom = new HashMap<>();
+
+    /** puppetKid -> masterKid */
+    private final Map<UUID, UUID> puppetMaster = new HashMap<>();
 
     /** claim → kingdom id */
     private final Map<ClaimKey, UUID> claims = new HashMap<>();
@@ -413,6 +473,25 @@ public class kingdomState extends SavedData {
     private static final Codec<Map<UUID, UUID>> UUID_MAP_CODEC =
             Codec.unboundedMap(UUID_CODEC, UUID_CODEC);
 
+
+        /* -----------------------------
+        DIPLOMACY ANCHORS
+        ----------------------------- */
+
+        public record DiplomacyAnchor(ResourceKey<Level> dim, BlockPos pos, int radiusBlocks) {
+            public static final Codec<DiplomacyAnchor> CODEC =
+                    RecordCodecBuilder.create(inst -> inst.group(
+                            DIM_KEY_CODEC.fieldOf("dim").forGetter(DiplomacyAnchor::dim),
+                            BLOCKPOS_CODEC.fieldOf("pos").forGetter(DiplomacyAnchor::pos),
+                            Codec.INT.optionalFieldOf("radius", 600).forGetter(DiplomacyAnchor::radiusBlocks)
+                    ).apply(inst, (dim, pos, radius) ->
+                            new DiplomacyAnchor(dim, pos.immutable(), Math.max(0, radius))
+                    ));
+        }
+
+
+
+
     /* -----------------------------
        CLAIM TYPES
      ----------------------------- */
@@ -543,6 +622,16 @@ public class kingdomState extends SavedData {
         /** Placed job blocks per jobId (population). */
         public final Map<String, Integer> placed = new HashMap<>();
 
+        // --- economy accessors (for WarPeaceEffects etc.) ---
+        public int goldInt()  { return (int) Math.floor(this.gold); }
+        public int woodInt()  { return (int) Math.floor(this.wood); }
+        public int metalInt() { return (int) Math.floor(this.metal); }
+
+        public void setGoldInt(int v)  { this.gold  = Math.max(0, v); }
+        public void setWoodInt(int v)  { this.wood  = Math.max(0, v); }
+        public void setMetalInt(int v) { this.metal = Math.max(0, v); }
+
+
         public double gold, meat, grain, fish,
                 wood, metal, armor, weapons,
                 gems, horses, potions;
@@ -555,6 +644,11 @@ public class kingdomState extends SavedData {
         public boolean hasTerminal;
         public ResourceKey<Level> terminalDim = Level.OVERWORLD;
         public BlockPos terminalPos = BlockPos.ZERO;
+
+        // diplomacy
+        public int diplomacyRangeBlocks = 0;
+        public final java.util.List<DiplomacyAnchor> envoyAnchors = new java.util.ArrayList<>();
+
 
         public Kingdom(UUID id, UUID owner, String name, BlockPos origin) {
             this.id = id;
@@ -704,6 +798,10 @@ public class kingdomState extends SavedData {
                         Codec.BOOL.optionalFieldOf("hasTerminal", false).forGetter(k -> k.hasTerminal),
                         DIM_KEY_CODEC.optionalFieldOf("terminalDim", Level.OVERWORLD).forGetter(k -> k.terminalDim),
                         BLOCKPOS_CODEC.optionalFieldOf("terminalPos", BlockPos.ZERO).forGetter(k -> k.terminalPos),
+                        Codec.INT.optionalFieldOf("diplomacyRangeBlocks", 0).forGetter(k -> k.diplomacyRangeBlocks),
+                        DiplomacyAnchor.CODEC.listOf().optionalFieldOf("envoyAnchors", List.of())
+                                .forGetter(k -> k.envoyAnchors),
+
                        Extras.CODEC.optionalFieldOf("extras", Extras.DEFAULT).forGetter(k -> new Extras(
                             k.royalGuardsEnabled,
                             k.ticketsAlive,
@@ -716,9 +814,14 @@ public class kingdomState extends SavedData {
                     ))
 
 
-                ).apply(inst, (id, owner, name, origin,
-                               activeMap, placedMap, heraldry, soldierSkinId,
-                               eco, border, hasTerminal, terminalDim, terminalPos, extras) -> {
+                                               ).apply(inst, (id, owner, name, origin,
+                               activeMap, placedMap,
+                               heraldry,
+                               soldierSkinId,
+                               eco, border,
+                               hasTerminal, terminalDim, terminalPos,
+                               diplomacyRangeBlocks, envoyAnchors,
+                               extras) -> {
 
                     Kingdom k = new Kingdom(id, owner, name, origin);
 
@@ -728,17 +831,27 @@ public class kingdomState extends SavedData {
                     k.placed.clear();
                     k.placed.putAll(placedMap);
 
+                    // economy
                     eco.apply(k);
 
+                    // border
                     k.hasBorder = border.set();
                     k.borderMinX = border.minX();
                     k.borderMaxX = border.maxX();
                     k.borderMinZ = border.minZ();
                     k.borderMaxZ = border.maxZ();
 
+                    // terminal
                     k.hasTerminal = hasTerminal;
                     k.terminalDim = terminalDim;
                     k.terminalPos = terminalPos;
+
+                    // diplomacy
+                    k.diplomacyRangeBlocks = Math.max(0, diplomacyRangeBlocks);
+                    k.envoyAnchors.clear();
+                    if (envoyAnchors != null) k.envoyAnchors.addAll(envoyAnchors);
+
+                    // extras
                     k.royalGuardsEnabled = (extras != null && extras.royalGuardsEnabled());
                     k.ticketsAlive = (extras == null) ? -1 : extras.ticketsAlive();
                     k.ticketsRegenBuf = (extras == null) ? 0.0 : extras.ticketsRegenBuf();
@@ -747,13 +860,14 @@ public class kingdomState extends SavedData {
                     k.retinueScribe = (r == null || NIL_UUID.equals(r.scribe())) ? null : r.scribe();
                     k.retinueTreasurer = (r == null || NIL_UUID.equals(r.treasurer())) ? null : r.treasurer();
                     k.retinueGeneral = (r == null || NIL_UUID.equals(r.general())) ? null : r.general();
+
+                    // cosmetics
                     k.heraldry = (heraldry == null) ? ItemStack.EMPTY : heraldry;
                     k.soldierSkinId = net.minecraft.util.Mth.clamp(
                             soldierSkinId,
                             0,
                             SoldierSkins.MAX_SKIN_ID
                     );
-
 
                     return k;
                 }));
@@ -785,6 +899,9 @@ public class kingdomState extends SavedData {
         k.hasTerminal = true;
         k.terminalDim = level.dimension();
         k.terminalPos = origin.immutable();
+
+        k.diplomacyRangeBlocks = 1500; // default player diplo range (tune later)
+
 
         kingdoms.put(id, k);
         playerKingdom.put(player, id);
@@ -846,6 +963,80 @@ public class kingdomState extends SavedData {
 
         UUID kid = claimsFast.get(packClaimKey(level.dimension(), gx, gz));
         return (kid == null) ? null : kingdoms.get(kid);
+    }
+
+    // -----------------------------
+    // PUPPETS
+    // -----------------------------
+
+    public UUID getMasterOf(UUID puppetKid) {
+        return puppetMaster.get(puppetKid);
+    }
+
+    public boolean isPuppet(UUID kid) {
+        return puppetMaster.containsKey(kid);
+    }
+
+    public boolean isMaster(UUID kid) {
+        return puppetMaster.containsValue(kid);
+    }
+
+    public java.util.List<UUID> getPuppetsOf(UUID masterKid) {
+        var out = new java.util.ArrayList<UUID>();
+        for (var e : puppetMaster.entrySet()) {
+            if (masterKid.equals(e.getValue())) out.add(e.getKey());
+        }
+        return out;
+    }
+
+    /** Follow chain, but never allow cycles. */
+    public UUID getUltimateMaster(UUID kid) {
+        if (kid == null) return null;
+        UUID cur = kid;
+        java.util.HashSet<UUID> seen = new java.util.HashSet<>();
+        while (true) {
+            UUID m = puppetMaster.get(cur);
+            if (m == null) return cur;
+            if (!seen.add(cur)) return cur; // cycle guard
+            cur = m;
+        }
+    }
+
+    /** Master/puppet are treated as allied automatically. */
+    public boolean isPuppetAllied(UUID a, UUID b) {
+        if (a == null || b == null) return false;
+        UUID am = puppetMaster.get(a);
+        UUID bm = puppetMaster.get(b);
+
+        // a is puppet of b, or b is puppet of a
+        if (b.equals(am)) return true;
+        if (a.equals(bm)) return true;
+
+        // share the same ultimate master (optional; keeps puppet blocks together)
+        UUID ua = getUltimateMaster(a);
+        UUID ub = getUltimateMaster(b);
+        return ua != null && ua.equals(ub) && !ua.equals(a) && !ub.equals(b);
+    }
+
+    /** Set puppet -> master (prevents self + cycles). */
+    public boolean setPuppet(UUID puppetKid, UUID masterKid) {
+        if (puppetKid == null || masterKid == null) return false;
+        if (puppetKid.equals(masterKid)) return false;
+
+        // prevent cycles: master cannot (directly or indirectly) be a puppet of puppet
+        UUID um = getUltimateMaster(masterKid);
+        UUID up = getUltimateMaster(puppetKid);
+        if (um != null && um.equals(puppetKid)) return false; // would loop
+
+        puppetMaster.put(puppetKid, masterKid);
+        setDirty();
+        return true;
+    }
+
+    public void clearPuppet(UUID puppetKid) {
+        if (puppetMaster.remove(puppetKid) != null) {
+            setDirty();
+        }
     }
 
 
@@ -1005,12 +1196,16 @@ public class kingdomState extends SavedData {
                                     out.add(new ClaimEntry(ck.dim(), ck.gx(), ck.gz(), e.getValue()));
                                 }
                                 return out;
-                            })
-            ).apply(inst, (kingdomList, playerMap, claimList) -> {
+                            }),
+                    UUID_MAP_CODEC.optionalFieldOf("puppetMaster", Map.of())
+                    .forGetter(s -> s.puppetMaster)
+
+            ).apply(inst, (kingdomList, playerMap, claimList, puppetMap) -> {
                 kingdomState s = new kingdomState();
 
                 for (Kingdom k : kingdomList) s.kingdoms.put(k.id, k);
                 s.playerKingdom.putAll(playerMap);
+                s.puppetMaster.putAll(puppetMap);
 
                 for (ClaimEntry ce : claimList) {
                     s.claims.put(new ClaimKey(ce.dim(), ce.gx(), ce.gz()), ce.kid());
@@ -1040,8 +1235,27 @@ public class kingdomState extends SavedData {
     public static kingdomState get(MinecraftServer server) {
         ServerLevel overworld = server.getLevel(Level.OVERWORLD);
         if (overworld == null) return new kingdomState();
-        return overworld.getDataStorage().computeIfAbsent(TYPE);
+
+        kingdomState s = overworld.getDataStorage().computeIfAbsent(TYPE);
+
+        // ✅ Migration: ensure sane diplomacy range defaults for old saves
+        boolean changed = false;
+        for (Kingdom k : s.kingdoms.values()) {
+            if (k == null) continue;
+
+            if (k.diplomacyRangeBlocks <= 0) {
+                // player kingdoms tend to be smaller / more local
+                boolean isPlayer = (k.owner != null && s.playerKingdom.containsKey(k.owner));
+
+                k.diplomacyRangeBlocks = isPlayer ? 1500 : 1500;
+                changed = true;
+            }
+        }
+
+        if (changed) s.setDirty();
+        return s;
     }
+
 
 
 

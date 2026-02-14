@@ -20,6 +20,9 @@ import java.util.UUID;
 public final class AiDiplomacyTicker {
     private AiDiplomacyTicker() {}
 
+
+        
+
         public record SimDiploEvent(
             long tick,
             Letter.Kind kind,
@@ -217,6 +220,25 @@ public final class AiDiplomacyTicker {
         news.add(nowTick, text, lvl, pos.getX(), pos.getZ());
     }
 
+    private static void addGlobalNews(MinecraftServer server, long nowTick, KingdomNewsState news, String text) {
+        if (text == null || text.isBlank()) return;
+        // "Global" = do NOT attach a specific position, so it can't be distance-gated.
+        // Uses the old overload: dim defaults + x/z 0/0.
+        news.add(nowTick, text);
+    }
+
+    private static boolean shouldPostLocalDiploNews(Letter.Kind kind) {
+        // DECLUTTER RULE:
+        // Only the "big geopolitical" stuff is always visible.
+        // Everything else is suppressed or handled via rare chance where needed.
+        return switch (kind) {
+            case WAR_DECLARATION, WHITE_PEACE, SURRENDER, ALLIANCE_PROPOSAL, ALLIANCE_BREAK -> false; // handled as GLOBAL
+            default -> false; // default OFF for AI→AI local spam
+        };
+    }
+
+
+
 
     /**
      * Run one diplomacy cycle using the SAME logic as the normal ticker,
@@ -346,14 +368,51 @@ public final class AiDiplomacyTicker {
 
                 // Recipient perspective: recipient is "decider"
                 int baseRel = aiRel.get(fromId, toId);
-                int relBefore = PressureUtil.effectiveRelation(server, baseRel, fromId, toId);
+                int biased = biasByMaster(server, baseRel, fromId, toId);
+                int relBefore = PressureUtil.effectiveRelation(server, biased, fromId, toId);
+
                 int rel = relBefore;
 
                 String execOutcome = null; // set only if something actually executes
 
-                boolean alliedNow = alliance.isAllied(fromId, toId);
+                boolean alliedNow = alliance.isAllied(fromId, toId) || ks.isPuppetAllied(fromId, toId);
+
                 boolean atWarWithOther = warState.isAtWar(fromId, toId);
                 boolean atWarWithAnyone = warState.isAtWarWithAny(toId); // recipient side
+
+                // --------------------
+                // PUPPET REBELLION (puppet -> master)
+                // --------------------
+                UUID masterOfSender = ks.getMasterOf(fromId);
+                boolean toIsMaster = (masterOfSender != null && masterOfSender.equals(toId));
+
+                if (!atWarWithOther && toIsMaster) {
+                    // Only rebellion wars: puppet declaring on its master.
+                    if (shouldPuppetRebel(server, fromId)) {
+                        warState.declareWar(server, fromId, toId);
+                        aiRel.addScaled(fromId, toId, -80);
+
+                        var fromK = ks.getKingdom(fromId);
+                        String fromName = nameOf(ks, aiState, fromId);
+                        String toName   = nameOf(ks, aiState, toId);
+
+                        addLocalNews(server, nowTick, news, fromK,
+                                "[REBELLION] " + fromName + " rose up against " + toName + "!");
+
+                        aiState.setDirty();
+
+                        actions++;
+                        if (--budget <= 0) return actions;
+
+                        // This counts as the AI's one action this cycle.
+                        didSomething = true;
+                        break;
+                    } else {
+                        // If target is master and no rebellion triggered, don't do normal diplomacy with master.
+                        continue;
+                    }
+                }
+
 
                 int recipientSoldiers = Math.max(0, toAi.aliveSoldiers);
                 int senderSoldiersEst = Math.max(0, fromAi.aliveSoldiers);
@@ -600,12 +659,26 @@ public final class AiDiplomacyTicker {
                 // --------------------
 
                 if (kind == Letter.Kind.WAR_DECLARATION) {
-                    warState.declareWar(server, fromId, toId);
+
+                // Block master<->puppet wars here; rebellion is handled earlier.
+                UUID masterFrom = ks.getMasterOf(fromId);
+                UUID masterTo   = ks.getMasterOf(toId);
+                boolean directPuppetPair =
+                        (masterFrom != null && masterFrom.equals(toId)) ||
+                        (masterTo != null && masterTo.equals(fromId));
+
+                if (directPuppetPair) {
+                    emitEvent(events, nowTick, kind, fromId, toId, "BLOCKED_PUPPET_PAIR", relBefore, relBefore);
+                    continue;
+                }
+
+                warState.declareWar(server, fromId, toId);
+                aiRel.addScaled(fromId, toId, -80);
+                execOutcome = "WAR_DECLARED";
                     aiRel.addScaled(fromId, toId, -80);
                     execOutcome = "WAR_DECLARED";
 
-                    addLocalNews(server,nowTick, news, fromK,
-                            "[WAR] " + fromName + " declared war on " + toName + ".");
+                 
                     didSomething = true;
                 }
                 else if (kind == Letter.Kind.ALLIANCE_PROPOSAL) {
@@ -620,8 +693,7 @@ public final class AiDiplomacyTicker {
                     if (accepted) {
                         alliance.addAlliance(fromId, toId);
                         aiRel.addScaled(fromId, toId, +30);
-                        addLocalNews(server, nowTick, news, fromK,
-                                "[ALLIANCE] " + fromName + " formed an alliance with " + toName + ".");
+                       
                                 execOutcome = "ALLIANCE_FORMED";
 
                     } else {
@@ -638,9 +710,7 @@ public final class AiDiplomacyTicker {
                 else if (kind == Letter.Kind.ALLIANCE_BREAK) {
                     alliance.breakAlliance(fromId, toId);
                     aiRel.addScaled(fromId, toId, -10);
-                    addLocalNews(server, nowTick, news, fromK,
-                            "[ALLIANCE] " + fromName + " broke alliance with " + toName + ".");
-                            execOutcome = "ALLIANCE_BROKEN";
+             
                     didSomething = true;
                 }
                 else if (kind == Letter.Kind.WHITE_PEACE || kind == Letter.Kind.SURRENDER) {
@@ -658,7 +728,7 @@ public final class AiDiplomacyTicker {
 
                 if (peaceDecision  == PeaceEvaluator.Decision.ACCEPT) {
                     warState.makePeace(fromId, toId);
-                    addLocalNews(server, nowTick, news, fromK,
+                    addGlobalNews(server, nowTick, news,
                             "[PEACE] " + fromName + " made peace with " + toName + ".");
                              execOutcome = "PEACE_ACCEPTED";
                 } else {
@@ -723,10 +793,10 @@ public final class AiDiplomacyTicker {
                                         relBefore
                                 );
                                 aiRel.addScaled(fromId, toId, d);
-
-                                addLocalNews(server, nowTick, news, (toK != null ? toK : fromK),
-                                        "[TRADE] " + toName + " fulfilled a request from " + fromName + " (" + fmt(aAmt) + " " + aType + ").");
-
+                                if (rng.nextFloat() < 0.08f) {
+                                      addLocalNews(server, nowTick, news, (toK != null ? toK : fromK),
+                                         "[TRADE] " + toName + " fulfilled a request from " + fromName + " (" + fmt(aAmt) + " " + aType + ").");
+                                }
                                 execOutcome = "REQUEST_ACCEPTED";
                                 didSomething = true;
                             }
@@ -743,10 +813,10 @@ public final class AiDiplomacyTicker {
                                         relBefore
                                 );
                                 aiRel.addScaled(fromId, toId, d);
-
-                                addLocalNews(server, nowTick, news, fromK,
-                                        "[TRADE] " + fromName + " sent an offer to " + toName + " (" + fmt(aAmt) + " " + aType + ").");
-
+                                if (rng.nextFloat() < 0.08f) {
+                                     addLocalNews(server, nowTick, news, fromK,
+                                          "[TRADE] " + fromName + " sent an offer to " + toName + " (" + fmt(aAmt) + " " + aType + ").");
+                                }  
                                 execOutcome = "REQUEST_ACCEPTED";
                                 didSomething = true;
                             }
@@ -767,12 +837,12 @@ public final class AiDiplomacyTicker {
                                         relBefore
                                 );
                                 aiRel.addScaled(fromId, toId, d);
-
-                                addLocalNews(server, nowTick, news, fromK,
-                                        "[TRADE] " + fromName + " and " + toName + " signed a contract: "
-                                                + fmt(bAmt) + " " + bType + " → " + fmt(aAmt) + " " + aType
-                                                + " (cap " + fmt(maxAmt) + ").");
-
+                                if (rng.nextFloat() < 0.08f) {
+                                             addLocalNews(server, nowTick, news, fromK,
+                                                "[TRADE] " + fromName + " and " + toName + " signed a contract: "
+                                                        + fmt(bAmt) + " " + bType + " → " + fmt(aAmt) + " " + aType
+                                                        + " (cap " + fmt(maxAmt) + ").");
+                                }
                                 execOutcome = "CONTRACT_ACCEPTED";
                                 didSomething = true;
                             }
@@ -781,21 +851,27 @@ public final class AiDiplomacyTicker {
                                 if (kind == Letter.Kind.COMPLIMENT) {
                                     execOutcome = "COMPLIMENT_SENT";
                                     didSomething = true;
-                                    addLocalNews(server, nowTick, news, fromK,
-                                    "[DIPLOMACY] " + fromName + " praised " + toName + ".");
-                                    
+                                    if (rng.nextFloat() < 0.08f) {
+                                          addLocalNews(server, nowTick, news, fromK,
+                                           "[DIPLOMACY] " + fromName + " praised " + toName + ".");
+                                    }   
                                 }
                                 else if (kind == Letter.Kind.INSULT) {
+                                    
                                     execOutcome = "INSULT_SENT";
                                     didSomething = true;
+                                    if (rng.nextFloat() < 0.08f) {
                                         addLocalNews(server, nowTick, news, fromK,
                                                 "[DIPLOMACY] " + fromName + " insulted " + toName + ".");
+                                    }
                                 }
                                 else if (kind == Letter.Kind.WARNING) {
                                     execOutcome = "WARNING_SENT";
                                     didSomething = true;
+                                    if (rng.nextFloat() < 0.08f) {
                                         addLocalNews(server, nowTick, news, fromK,
                                                 "[DIPLOMACY] " + fromName + " warned " + toName + ".");
+                                    }
                                     
                                 }
 
@@ -1219,6 +1295,22 @@ public final class AiDiplomacyTicker {
         return Math.max(1.0, Math.round(raw * jitter));
     }
 
+    private static int biasByMaster(MinecraftServer server, int rawRel, UUID fromId, UUID toId) {
+        var ks = kingdomState.get(server);
+        var aiRel = AiRelationsState.get(server);
+
+        UUID master = ks.getMasterOf(fromId);
+        if (master == null) return rawRel;
+
+        // if master relation unknown, keep raw
+        int masterRel = aiRel.get(master, toId);
+
+        // Blend: 65% master, 35% puppet's own
+        double blended = (0.65 * masterRel) + (0.35 * rawRel);
+        return net.minecraft.util.Mth.clamp((int) Math.round(blended), -100, 100);
+    }
+
+
     private static int economicRelDelta(
                         Letter.Kind kind,
                         aiKingdomState.AiKingdom giver,
@@ -1344,7 +1436,32 @@ public final class AiDiplomacyTicker {
         name.kingdoms.network.networkInit.addAi(k, t, delta);
     }
 
-   
+    private static boolean shouldPuppetRebel(net.minecraft.server.MinecraftServer server, java.util.UUID puppetKid) {
+        var ks = name.kingdoms.kingdomState.get(server);
+        java.util.UUID master = ks.getMasterOf(puppetKid);
+        if (master == null) return false;
+
+        // If we don't have AI stats for this kingdom, keep it conservative.
+        var aiState = name.kingdoms.aiKingdomState.get(server);
+        var puppetAi = aiState.getById(puppetKid);
+        if (puppetAi == null) {
+            // Players (or unknown) can still rebel, but much less often.
+            return server.overworld().random.nextDouble() < 0.005; // 0.5% per check
+        }
+
+        // Convert happiness/security into "instability" 0..1
+        double h = net.minecraft.util.Mth.clamp(puppetAi.happiness, 0.0, 100.0) / 100.0;
+        double s = net.minecraft.util.Mth.clamp(puppetAi.security, 0.0, 100.0) / 100.0;
+
+        double instability = (1.0 - h) * 0.55 + (1.0 - s) * 0.45; // weighted
+
+        // Baseline chance + instability scaling
+        // Example: if very unstable, can reach ~12% per check.
+        double chance = 0.01 + (0.11 * instability);
+
+        return server.overworld().random.nextDouble() < chance;
+    }
+
     
     
 

@@ -69,6 +69,8 @@ public class Kingdoms implements ModInitializer {
     public static EntityType<aiKingdomNPCEntity> AI_KINGDOM_NPC_ENTITY_TYPE;
     public static EntityType<name.kingdoms.entity.ai.RoadAmbientNPCEntity> ROAD_AMBIENT_NPC;
 
+
+
     
     public static SimpleParticleType SLEEP_Z_PARTICLE;
 
@@ -108,6 +110,8 @@ public class Kingdoms implements ModInitializer {
         if (terminalTickCounter >= 20) { // 1 second
             terminalTickCounter = 0;
             kingdomState.get(server).validateTerminals(server);
+            kingdomState.get(server).validateEnvoyAnchors(server);
+
         }
 
         ecoTickCounter++;
@@ -596,9 +600,12 @@ public class Kingdoms implements ModInitializer {
                         modBlock.chapel_block,
                         modBlock.tavern_block,
                         modBlock.shop_block,
-                        modBlock.nobility_block
+                        modBlock.nobility_block,
+                        modBlock.envoy_block
                 ).build()
         );
+
+
 
         // ---- Commands ----
         registerCommands();

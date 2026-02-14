@@ -232,4 +232,13 @@ public class modBlock {
             BlockBehaviour.Properties.of().strength(1.5F, 6.0F).sound(SoundType.STONE),
             true
     );
+
+        public static final Block envoy_block = register(
+                "envoy_block",
+                props -> new jobBlock(jobDefinition.ENVOY_JOB, props),
+                BlockBehaviour.Properties.of().strength(1.5F, 6.0F).sound(SoundType.STONE),
+                true
+        );
+
+
 }

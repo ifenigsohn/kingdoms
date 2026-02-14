@@ -18,7 +18,7 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
-
+import name.kingdoms.news.KingdomNewsState;
 import java.util.*;
 
 public final class WarState extends SavedData {
@@ -31,7 +31,144 @@ public final class WarState extends SavedData {
     private final Map<String, BattleZone> siegeZones = new HashMap<>();
     private final Map<String, String> pairToRoot = new HashMap<>();
 
-    
+    public enum WarEndReason { SURRENDER, WHITE_PEACE, NEGOTIATED, TIMEOUT }
+    public enum WarEndSource { AI_SIM, PLAYER_BATTLE, LETTER }
+
+    public record WarEndResult(
+            UUID winnerRoot,
+            UUID loserRoot,
+            WarEndReason reason,
+            boolean puppetCreated,
+            Map<String, Integer> transferred // resource -> amount
+    ) {}
+
+    public WarEndResult endWar(MinecraftServer server, UUID winnerRoot, UUID loserRoot,
+                                WarEndReason reason, WarEndSource source) {
+
+            if (server == null || winnerRoot == null || loserRoot == null) {
+                return new WarEndResult(winnerRoot, loserRoot, reason, false, Map.of());
+            }
+
+            // Map WarEndReason -> PeaceType
+            WarPeaceEffects.PeaceType pt = switch (reason) {
+                case WHITE_PEACE -> WarPeaceEffects.PeaceType.WHITE_PEACE;
+                case SURRENDER -> WarPeaceEffects.PeaceType.SURRENDER;
+                default -> WarPeaceEffects.PeaceType.WHITE_PEACE; // negotiated/timeout treated as soft
+            };
+
+            WarPeaceEffects.SettlementResult settlement = WarPeaceEffects.apply(server, winnerRoot, loserRoot, pt);
+
+            // If you still want the "transferred" map for UI/logs:
+            Map<String, Integer> transferred = new HashMap<>();
+            if (settlement.goldTaken()  > 0) transferred.put("gold",  settlement.goldTaken());
+            if (settlement.woodTaken()  > 0) transferred.put("wood",  settlement.woodTaken());
+            if (settlement.metalTaken() > 0) transferred.put("metal", settlement.metalTaken());
+
+            try {
+                emitWarEndDiplomacy(server, winnerRoot, loserRoot, reason, source, transferred);
+            } catch (Throwable t) {
+                Kingdoms.LOGGER.warn("[War] endWar: diplomacy emit failed: {}", t.toString());
+            }
+
+            // Actually end the war
+            makePeace(winnerRoot, loserRoot);
+
+            return new WarEndResult(
+                    winnerRoot, loserRoot, reason,
+                    settlement.puppetCreated(),
+                    transferred
+            );
+        }
+
+            // -----------------------------
+            // Diplomacy / news emission
+            // -----------------------------
+
+            private void emitWarEndDiplomacy(
+                    MinecraftServer server,
+                    UUID winnerRoot,
+                    UUID loserRoot,
+                    WarEndReason reason,
+                    WarEndSource source,
+                    Map<String, Integer> transferred
+            ) {
+                if (server == null || winnerRoot == null || loserRoot == null) return;
+
+                String winnerName = nameOf(server, winnerRoot);
+                String loserName  = nameOf(server, loserRoot);
+
+                String reasonText = switch (reason) {
+                    case SURRENDER   -> "surrendered";
+                    case WHITE_PEACE -> "agreed to white peace";
+                    case NEGOTIATED  -> "negotiated peace";
+                    case TIMEOUT     -> "ended the war (timeout)";
+                };
+
+                // GLOBAL news: surrenders + white peace + peace always show
+                if (server.overworld() != null) {
+                    String w = winnerName;
+                    String l = loserName;
+
+
+                    String prefix = switch (reason) {
+                        case SURRENDER   -> "[SURRENDER] ";
+                        case WHITE_PEACE -> "[PEACE] ";
+                        default          -> "[PEACE] ";
+                    };
+
+                    String newsMsg = switch (reason) {
+                        case SURRENDER   -> prefix + l + " surrendered to " + w + ".";
+                        case WHITE_PEACE -> prefix + w + " and " + l + " agreed to white peace.";
+                        default          -> prefix + w + " and " + l + " made peace.";
+                    };
+
+                    // Use the old overload: name-only + no UUIDs => cannot be range-gated.
+                    KingdomNewsState.get(server.overworld()).add(server.getTickCount(), newsMsg);
+                }
+
+
+
+                String lootText = "";
+                if (transferred != null && !transferred.isEmpty()) {
+                    // Keep it short for UI/snippets
+                    StringBuilder sb = new StringBuilder(" Reparations: ");
+                    boolean first = true;
+                    for (var e : transferred.entrySet()) {
+                        int amt = (e.getValue() == null) ? 0 : e.getValue();
+                        if (amt <= 0) continue;
+                        if (!first) sb.append(", ");
+                        first = false;
+                        sb.append(amt).append(" ").append(e.getKey());
+                    }
+                    if (!first) lootText = sb.toString();
+                }
+
+                String msg = switch (reason) {
+                    case SURRENDER ->
+                            loserName + " surrendered to " + winnerName + "." + lootText;
+                    case WHITE_PEACE ->
+                            winnerName + " and " + loserName + " agreed to white peace." + lootText;
+                    default ->
+                            winnerName + " and " + loserName + " made peace." + lootText;
+                };
+
+
+                try {
+                    var events = AiDiplomacyEventState.get(server.overworld());
+                    events.add(new AiDiplomacyEvent(
+                            winnerRoot,
+                            loserRoot,
+                            AiDiplomacyEvent.Type.PEACE_SIGNED, // reuse existing type
+                            server.getTickCount(),
+                            msg
+                    ));
+                } catch (Throwable t) {
+                    Kingdoms.LOGGER.warn("[War] emitWarEndDiplomacy failed: {}", t.toString());
+                }
+            }
+
+
+
 
     // Simulated war state for AI vs AI (morale per side)
     private final Map<String, AiWarSim> aiSim = new HashMap<>();
@@ -39,6 +176,9 @@ public final class WarState extends SavedData {
     private record AiWarSim(double moraleA, double moraleB, int startA, int startB) {}
 
     private static final int AI_WAR_TICK_INTERVAL = 20 * 60 * 1; // 1 MINUTE DEBUG FOR DEV
+
+    private static final double PUPPET_ON_WIN_CHANCE = 0.15; // 15% chance winner puppets loser DEBUG FOR DEV
+
 
     // -----------------------------
     // Pending war zone computation (no hitch)
@@ -455,6 +595,20 @@ public final class WarState extends SavedData {
 
         // Create all pair-links and ally joins, WITHOUT computing zone
         declareWarInternal(server, rootA, rootB, rootA, rootB, false);
+
+        // GLOBAL news: war declarations always show
+        var level = server.overworld();
+        if (level != null) {
+            String aName = nameOf(server, rootA);
+            String bName = nameOf(server, rootB);
+            KingdomNewsState.get(level).add(
+                    server.getTickCount(),
+                    "[WAR] " + aName + " declared war on " + bName + ".",
+                    level,
+                    0, 0
+            );
+        }
+
     }
 
     private static boolean isChunkLoaded(ServerLevel level, int x, int z) {
@@ -548,9 +702,11 @@ public final class WarState extends SavedData {
             if (zones.containsKey(rootKey)) {
                 pendingRoots.remove(rootKey);
                 pendingJobs.remove(rootKey);
+                pendingQueue.removeIf(k -> k.equals(rootKey));
                 setDirty();
                 continue;
             }
+
 
 
             ZoneJob job = pendingJobs.get(rootKey);
@@ -778,6 +934,17 @@ public final class WarState extends SavedData {
         tickAiWars(server, server.getTickCount());
     }
 
+    private static String nameOf(MinecraftServer server, UUID kid) {
+        var ks = kingdomState.get(server);
+        var k = ks.getKingdom(kid);
+        if (k != null && k.name != null && !k.name.isBlank()) return k.name;
+
+        var ai = aiKingdomState.get(server);
+        String n = ai.getNameById(kid);
+        return (n == null || n.isBlank()) ? "Unknown" : n;
+    }
+
+
     // New overload for sim (clockable)
     public void tickAiWars(MinecraftServer server, long nowTick) {
         if (nowTick % AI_WAR_TICK_INTERVAL != 0) return;
@@ -866,22 +1033,22 @@ public final class WarState extends SavedData {
             boolean aSurrenders = (aiA.aliveSoldiers <= 0) || (moraleA <= 0.0);
             boolean bSurrenders = (aiB.aliveSoldiers <= 0) || (moraleB <= 0.0);
 
-            if (aSurrenders && !bSurrenders) {
-                makePeace(a, b);
+           if (aSurrenders && !bSurrenders) {
+                endWar(server, b, a, WarEndReason.SURRENDER, WarEndSource.AI_SIM);
                 logAiPeace(server, aiB, aiA);
             } else if (bSurrenders && !aSurrenders) {
-                makePeace(a, b);
+                endWar(server, a, b, WarEndReason.SURRENDER, WarEndSource.AI_SIM);
                 logAiPeace(server, aiA, aiB);
             } else if (aSurrenders && bSurrenders) {
-                // tie case: pick a winner deterministically/randomly
                 if (rng.nextBoolean()) {
-                    makePeace(a, b);
+                    endWar(server, b, a, WarEndReason.SURRENDER, WarEndSource.AI_SIM);
                     logAiPeace(server, aiB, aiA);
                 } else {
-                    makePeace(a, b);
+                    endWar(server, a, b, WarEndReason.SURRENDER, WarEndSource.AI_SIM);
                     logAiPeace(server, aiA, aiB);
                 }
             }
+
         }
 
          if (changed) {
@@ -1245,7 +1412,9 @@ public final class WarState extends SavedData {
 
 
 
-       public void makePeaceWithAllies(MinecraftServer server, UUID a, UUID b) {
+        public void makePeaceWithAllies(MinecraftServer server, UUID a, UUID b) {
+            if (server == null || a == null || b == null) return;
+
             var alliance = name.kingdoms.diplomacy.AllianceState.get(server);
 
             // closure on each side
@@ -1259,25 +1428,50 @@ public final class WarState extends SavedData {
 
             while (!qa.isEmpty()) {
                 UUID cur = qa.removeFirst();
-                for (UUID ally : alliance.alliesOf(cur)) if (sideA.add(ally)) qa.addLast(ally);
+                for (UUID ally : alliance.alliesOf(cur)) if (ally != null && sideA.add(ally)) qa.addLast(ally);
             }
             while (!qb.isEmpty()) {
                 UUID cur = qb.removeFirst();
-                for (UUID ally : alliance.alliesOf(cur)) if (sideB.add(ally)) qb.addLast(ally);
+                for (UUID ally : alliance.alliesOf(cur)) if (ally != null && sideB.add(ally)) qb.addLast(ally);
             }
 
             boolean changed = false;
+
+
+            // Remove zones by ROOT KEY (dedupe roots)
+            HashSet<String> rootsToRemove = new HashSet<>();
+
             for (UUID x : sideA) {
                 for (UUID y : sideB) {
-                    String k = key(x, y);
-                    changed |= wars.remove(k);
-                    changed |= (zones.remove(k) != null);
-                    changed |= (aiSim.remove(k) != null);
+                    String pairKey = key(x, y);
+
+                    // capture root BEFORE removing mapping
+                    String rootKey = pairToRoot.getOrDefault(pairKey, pairKey);
+                    rootsToRemove.add(rootKey);
+
+                    if (wars.remove(pairKey)) changed = true;
+                    if (aiSim.remove(pairKey) != null) changed = true;
+                    pairToRoot.remove(pairKey);
                 }
             }
 
+            for (String rootKey : rootsToRemove) {
+                if (zones.remove(rootKey) != null) changed = true;
+
+                // cancel pending work too
+                PendingRootWar pr = pendingRoots.remove(rootKey);
+                if (pr != null) {
+                    ensurePendingRuntimeInit();
+                    pendingJobs.remove(rootKey);
+                    pendingQueue.removeIf(k -> k.equals(rootKey));
+                    changed = true;
+                }
+            }
+
+
             if (changed) setDirty();
         }
+
 
         private final class ZoneJob {
 
@@ -1427,7 +1621,6 @@ public final class WarState extends SavedData {
             return new StepResult(false, bestPass, bestAny, candidatesLeft);
         }
     }
-
 
 
     public WarState() {}

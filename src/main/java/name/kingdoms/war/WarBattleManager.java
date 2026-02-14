@@ -2294,73 +2294,74 @@ public final class WarBattleManager {
     // Finish
     // --------------------
     private static void finishBattle(MinecraftServer server, BattleInstance battle, Side winner, String msg) {
-        
-        COMMANDER_INDEX.remove(battle.friendCommanderUuid);
-        if (battle.enemyCommanderUuid != null) COMMANDER_INDEX.remove(battle.enemyCommanderUuid);
 
-        // optional: clear HUD for both commanders
-        var fp = server.getPlayerList().getPlayer(battle.friendCommanderUuid);
-        if (fp != null) clearHud(fp);
-        if (battle.enemyCommanderUuid != null) {
-            var ep = server.getPlayerList().getPlayer(battle.enemyCommanderUuid);
-            if (ep != null) clearHud(ep);
-        }
+        // 1) Cleanup battle entities + commander mappings + HUDs (for ALL commanders, not just 2)
+        cleanupBattle(server, battle, msg);
 
-        for (UUID id : new ArrayList<>(battle.units.keySet())) {
-            Entity e = battle.level.getEntity(id);
-            if (e != null) e.discard();
-        }
-        battle.units.clear();
+        // 2) Determine winner/loser ROOT kingdoms
+        UUID winnerRoot = (winner == Side.FRIEND) ? battle.friendRootKingdomId : battle.enemyRootKingdomId;
+        UUID loserRoot  = (winner == Side.FRIEND) ? battle.enemyRootKingdomId  : battle.friendRootKingdomId;
 
-        boolean playerWon = (winner == Side.FRIEND);
-
+        // 3) End the war THROUGH WarState (this applies puppet rules, reparations, diplomacy emit, then peace)
         WarState ws = WarState.get(server);
-        ws.makePeace(battle.friendRootKingdomId, battle.enemyRootKingdomId);
 
+        WarState.WarEndResult result = ws.endWar(
+                server,
+                winnerRoot,
+                loserRoot,
+                WarState.WarEndReason.SURRENDER,
+                WarState.WarEndSource.PLAYER_BATTLE
+        );
 
-
-       
-
-
-
-
-        String enemyName = null;
+        // 4) Optional: notify online rulers of roots (and/or allies)
+        //    (Keep it minimal; you already broadcast battle end below.)
         var ks = kingdomState.get(server);
-        var ek = ks.getKingdom(battle.enemyRootKingdomId);
-        if (ek != null && ek.name != null && !ek.name.isBlank()) {
-            enemyName = ek.name;
-        } else {
-            var ai = aiKingdomState.get(server).getById(battle.enemyRootKingdomId);
-            if (ai != null) {
-                // your AiKingdom seems to sometimes expose 'name' but if not, be defensive:
-                try { enemyName = ai.name; } catch (Exception ignored) {}
-                if (enemyName == null || enemyName.isBlank()) {
-                    try { enemyName = (String) ai.getClass().getField("name").get(ai); } catch (Exception ignored) {}
-                }
-            }
+
+        String summary = formatWarSettlementSummary(result);
+
+        // message root winner owner
+        var wk = ks.getKingdom(winnerRoot);
+        if (wk != null && wk.owner != null) {
+            var wp = server.getPlayerList().getPlayer(wk.owner);
+            if (wp != null) wp.displayClientMessage(Component.literal(summary), false);
         }
 
-
-        var friendCommander = server.getPlayerList().getPlayer(battle.friendCommanderUuid);
-        var enemyCommander = (battle.enemyCommanderUuid != null)
-                ? server.getPlayerList().getPlayer(battle.enemyCommanderUuid)
-                : null;
-
-        if (friendCommander != null) {
-            friendCommander.displayClientMessage(Component.literal(msg), false);
-            friendCommander.displayClientMessage(Component.literal(
-                    "You " + ((winner == Side.FRIEND) ? "won" : "lost") + " the battle vs " + enemyName + "."
-            ), false);
+        // message root loser owner
+        var lk = ks.getKingdom(loserRoot);
+        if (lk != null && lk.owner != null) {
+            var lp = server.getPlayerList().getPlayer(lk.owner);
+            if (lp != null) lp.displayClientMessage(Component.literal(summary), false);
         }
 
-        if (enemyCommander != null) {
-            enemyCommander.displayClientMessage(Component.literal(msg), false);
-            enemyCommander.displayClientMessage(Component.literal(
-                    "You " + ((winner == Side.ENEMY) ? "won" : "lost") + " the battle vs " + enemyName + "."
-            ), false);
-        }
-
+        // 5) Broadcast end text (your existing behavior)
+        broadcastBattleEnd(server, battle, Component.literal(msg));
+        broadcastBattleEnd(server, battle, Component.literal(
+                "Battle ended: " + (winner == Side.FRIEND ? "FRIEND side won" : "ENEMY side won") + "."
+        ));
     }
+
+    /** Small helper: turn WarEndResult.transferred into a readable string. */
+    private static String formatWarSettlementSummary(WarState.WarEndResult r) {
+        if (r == null) return "War settlement complete.";
+
+        Map<String, Integer> moved = (r.transferred() == null) ? Map.of() : r.transferred();
+        if (moved.isEmpty()) {
+            return r.puppetCreated()
+                    ? "War settlement: no reparations. (PUPPET CREATED)"
+                    : "War settlement: no reparations.";
+        }
+
+        StringBuilder sb = new StringBuilder("War settlement: ");
+        boolean first = true;
+        for (var e : moved.entrySet()) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append("+").append(e.getValue()).append(" ").append(e.getKey());
+        }
+        if (r.puppetCreated()) sb.append(" (PUPPET CREATED)");
+        return sb.toString();
+    }
+
 
     // --------------------
     // Ticket computation
@@ -2436,6 +2437,29 @@ public final class WarBattleManager {
         }
     }
 
+    private static void broadcastBattleEnd(MinecraftServer server, BattleInstance battle, Component msg) {
+        var ks = kingdomState.get(server);
+
+        // message all ONLINE rulers on either side
+        HashSet<UUID> all = new HashSet<>();
+        all.addAll(battle.friendContribKingdoms);
+        all.addAll(battle.enemyContribKingdoms);
+
+        for (UUID kid : all) {
+            var k = ks.getKingdom(kid);
+            if (k == null || k.owner == null) continue;
+
+            ServerPlayer p = server.getPlayerList().getPlayer(k.owner);
+            if (p != null) p.displayClientMessage(msg, false);
+        }
+
+        // optional: message any participant player physically in the zone
+        AABB box = battle.zone.toTallAabb();
+        for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+            if (!p.getBoundingBox().intersects(box)) continue;
+            p.displayClientMessage(msg, false);
+        }
+    }
 
 
 }

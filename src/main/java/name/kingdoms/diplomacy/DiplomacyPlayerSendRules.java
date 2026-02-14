@@ -41,6 +41,12 @@ public final class DiplomacyPlayerSendRules {
         if (toK == null) return Decision.no("That kingdom does not exist.");
         if (toK.id.equals(fromK.id)) return Decision.no("You can't send mail to your own kingdom.");
 
+        // Diplomatic range gate
+        if (!name.kingdoms.diplomacy.DiplomaticRangeUtil.canReach(server, fromK.id, toK.id)) {
+            return Decision.no("Outside diplomatic range. Place an Envoy closer to their realm.");
+        }
+
+
         // AI vs Player target
         var aiState = aiKingdomState.get(server);
         var aiK = aiState.getById(toK.id);

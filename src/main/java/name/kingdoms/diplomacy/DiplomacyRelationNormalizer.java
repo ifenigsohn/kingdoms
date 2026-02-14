@@ -8,7 +8,7 @@ public final class DiplomacyRelationNormalizer {
     private DiplomacyRelationNormalizer() {}
 
     // Every 20 minutes: 20 min * 60 sec * 20 ticks = 24000 ticks
-    private static final long PERIOD_TICKS = 20L * 60L * 20L; // DEBUG FOR PLAYTEST 20 MINUTES
+    private static final long PERIOD_TICKS = 20L * 60L * 30L; // DEV DEBUG FOR PLAYTEST 20 MINUTES
 
     // Move 5 points toward 0 each period
     private static final int STEP = 2;
@@ -34,7 +34,9 @@ public final class DiplomacyRelationNormalizer {
             if (aiState.getById(e.kingdomId()) == null) continue;
 
             int v = e.value();
-            int nv = nudgeTowardZero(v, STEP);
+            int target = relState.getBaseline(e.playerId(), e.kingdomId());
+            int nv = nudgeTowardTarget(v, target, STEP);
+
 
             if (nv != v) {
                 relState.setRelationNoDirty(e.playerId(), e.kingdomId(), nv);
@@ -47,9 +49,10 @@ public final class DiplomacyRelationNormalizer {
         }
     }
 
-    private static int nudgeTowardZero(int v, int step) {
-        if (v > 0) return Math.max(0, v - step);
-        if (v < 0) return Math.min(0, v + step);
-        return 0;
+    private static int nudgeTowardTarget(int v, int target, int step) {
+        if (v < target) return Math.min(target, v + step);
+        if (v > target) return Math.max(target, v - step);
+        return v;
     }
+
 }

@@ -40,8 +40,13 @@ public class jobBlockEntity extends BlockEntity {
     private boolean countedPlaced = false;
     @Nullable private UUID countedKingdomId;
 
+    private static final String ENVOY_ID = "envoy";
+    private static final int ENVOY_RADIUS = 600; // or pull from your envoyBlockEntity constant if you want
+
+
     // Worker ownership
     @Nullable private UUID workerUuid;
+    @Nullable private UUID ownerKingdomId;
 
     // Missing-requirements FX state (poof, not spam)
     private boolean wasMissingReqs = false;
@@ -152,6 +157,23 @@ public class jobBlockEntity extends BlockEntity {
 
         kingdomState ks = kingdomState.get(serverLevel.getServer());
         kingdomState.Kingdom kingdom = ks.getKingdomAt(serverLevel, pos);
+
+        boolean isEnvoy = "envoy".equals(be.job.getId());
+
+        if (isEnvoy && kingdom != null && be.ownerKingdomId == null) {
+            be.setOwnerKingdomId(kingdom.id);
+            ks.upsertEnvoyAnchor(kingdom.id, serverLevel.dimension(), pos, ENVOY_RADIUS);
+            ks.markDirty();
+        }
+
+
+        if (isEnvoy && kingdom == null) {
+            // allow envoy to run outside borders using explicit owner
+            if (be.ownerKingdomId != null) {
+                kingdom = ks.getKingdom(be.ownerKingdomId);
+            }
+        }
+
 
         // ---- Reconcile placed/active counts if borders changed ----
         UUID nowKid = (kingdom == null) ? null : kingdom.id;
@@ -280,6 +302,21 @@ public class jobBlockEntity extends BlockEntity {
 
         // Active ONLY if requirements met AND inputs available (for chapel/tavern happiness gating)
         be.setCountedActive(serverLevel, ks, kingdom, canWorkNow);
+
+        if ("envoy".equals(be.job.getId())) {
+            UUID okid = (be.ownerKingdomId != null) ? be.ownerKingdomId : (kingdom != null ? kingdom.id : null);
+
+            if (okid != null) {
+                if (canWorkNow) {
+                    ks.upsertEnvoyAnchor(okid, serverLevel.dimension(), pos, ENVOY_RADIUS);
+                } else {
+                    ks.removeEnvoyAnchor(okid, serverLevel.dimension(), pos);
+                }
+                ks.markDirty();
+            }
+        }
+
+
 
        if (!canWorkNow) {
             if ((serverLevel.getGameTime() % 40L) == 0L) {
@@ -591,6 +628,7 @@ public class jobBlockEntity extends BlockEntity {
     protected void saveAdditional(ValueOutput out) {
         super.saveAdditional(out);
 
+        if (ownerKingdomId != null) out.putString("OwnerKingdomId", ownerKingdomId.toString());
         out.putInt("CountedPlaced", countedPlaced ? 1 : 0);
         out.putInt("CountedActive", countedActive ? 1 : 0);
         out.putInt("TickCounter", tickCounter);
@@ -615,6 +653,7 @@ public class jobBlockEntity extends BlockEntity {
         countedPlaced = in.getInt("CountedPlaced").orElse(0) != 0;
         countedActive = in.getInt("CountedActive").orElse(0) != 0;
         tickCounter = in.getInt("TickCounter").orElse(0);
+        ownerKingdomId = in.getString("OwnerKingdomId").map(UUID::fromString).orElse(null);
 
         wasMissingReqs = in.getInt("WasMissingReqs").orElse(0) != 0;
         nextMissingReqPoofTick = in.getLong("NextMissingReqPoof").orElse(0L);
@@ -633,6 +672,12 @@ public class jobBlockEntity extends BlockEntity {
     public void setRemoved() {
         if (this.level instanceof ServerLevel sl) {
             despawnWorker(sl);
+
+            if (job != null && ENVOY_ID.equals(job.getId()) && ownerKingdomId != null) {
+                kingdomState.get(sl.getServer()).removeEnvoyAnchor(ownerKingdomId, sl.dimension(), worldPosition);
+            }
+
+
 
             if (job != null) {
                 kingdomState ks = kingdomState.get(sl.getServer());
@@ -678,5 +723,14 @@ public class jobBlockEntity extends BlockEntity {
             }
         }
     }
+
+    public void setOwnerKingdomId(@Nullable UUID id) {
+        this.ownerKingdomId = id;
+        this.setChanged();
+    }
+
+    @Nullable
+    public UUID getOwnerKingdomId() { return ownerKingdomId; }
+
 
 }

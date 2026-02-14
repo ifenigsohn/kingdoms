@@ -50,6 +50,12 @@ public class kingdomBordersMapScreen extends Screen {
     private static final int CACHE_W = 4096;
     private static final int CACHE_H = 4096;
 
+    // Diplomatic range overlay (client-side)
+    private boolean showDiploRange = false;
+
+    // if you already have a constant server-side, mirror it here
+    private static final int DIPLO_RANGE_BLOCKS = 2500; // <-- set this to your actual range
+
     // Cache pixels represent this many blocks (fixed, independent of UI zoom)
     private static final int CACHE_SCALE_BLOCKS = 4;
 
@@ -76,7 +82,7 @@ public class kingdomBordersMapScreen extends Screen {
     private int samplesPerUpdate = 2500;
 
     // Update radius around player in world blocks
-    private int updateRadiusBlocks = 300;
+    private int updateRadiusBlocks = 400;
 
     // Draw coarseness on screen
     private int drawStepPx = 5;
@@ -455,7 +461,7 @@ public class kingdomBordersMapScreen extends Screen {
 
         // Draw cached terrain
         drawCachedTerrainAsTexture(g, left, top, right, bottom, cx, cy, px, pz);
-
+        drawDiploRangeOverlay(g, left, top, right, bottom, cx, cy, px, pz);
 
         // -------------------------
         // Borders overlay
@@ -929,12 +935,17 @@ public class kingdomBordersMapScreen extends Screen {
 
         boolean war = card.atWar();
 
+        boolean inRange = card.inDiplomaticRange();
+        boolean dim = !inRange;
+
         // Height: header region + dynamic lines
         int base = 6 + 16 + 6;  // top padding + head box + spacing
         int lines = 0;
 
         // Lines we draw below name:
         lines += 1; // Allies
+        boolean hasPuppets = card.puppets() != null && !card.puppets().isBlank();
+        if (hasPuppets) lines += 1; // Puppets
         if (war) lines += 2; // "⚔ AT WAR" + Enemies
         lines += 1; // Relation
         lines += 1; // Happiness/Security (player scale)
@@ -953,6 +964,16 @@ public class kingdomBordersMapScreen extends Screen {
         // background + border (war = red tint + red outline)
         int bg = war ? 0xCC2A0000 : 0xCC000000;        // semi-transparent dark red vs black
         int border = war ? 0xFFFF4444 : 0xFFAAAAAA;    // bright red vs gray
+
+        if (dim) {
+            bg = 0xCC1A1A1A;
+            border = 0xFF666666;
+        }
+
+        int titleColor  = dim ? 0xFFB0B0B0 : 0xFFFFFFFF;
+        int minorColor  = dim ? 0xFF909090 : 0xFFFFCCCC;
+        int normalColor = dim ? 0xFF8A8A8A : 0xFFC0C0C0;
+        int goldColor   = dim ? 0xFF9A8F60 : 0xFFFFD700;
 
         g.fill(x, y, x + w, y + h, bg);
         g.hLine(x, x + w, y, border);
@@ -985,15 +1006,20 @@ public class kingdomBordersMapScreen extends Screen {
 
         int titleMaxW = (x + w) - tx - 6 - 16 - 4; // leave space for icon
         String title = this.font.plainSubstrByWidth(card.kingdomName(), titleMaxW);
-        g.drawString(this.font, Component.literal(title), tx, ty, 0xFFFFFFFF, false);
+        g.drawString(this.font, Component.literal(title), tx, ty, titleColor, false);
         ty += 12;
 
         
         // Allies always visible
         String allies = card.allies();
         if (allies == null || allies.isBlank()) allies = "None";
-        g.drawString(this.font, Component.literal("Allies: " + allies), tx, ty, 0xFFFFCCCC, false);
+        g.drawString(this.font, Component.literal("Allies: " + allies), tx, ty, minorColor, false);
         ty += 12;
+
+        if (hasPuppets) {
+            g.drawString(this.font, Component.literal("Puppets: " + card.puppets()), tx, ty, 0xFFFFCCCC, false);
+            ty += 12;
+        }
 
         // War banner + enemies only when at war
         if (war) {
@@ -1007,7 +1033,7 @@ public class kingdomBordersMapScreen extends Screen {
         }
 
 
-        g.drawString(this.font, Component.literal("Relation: " + card.relation()), tx, ty, 0xFFC0C0C0, false);
+        g.drawString(this.font, Component.literal("Relation: " + card.relation()), tx, ty, normalColor, false);
         ty += 12;
 
         // Happiness and Security on PLAYER scale
@@ -1022,12 +1048,14 @@ public class kingdomBordersMapScreen extends Screen {
         // - warning: light red (either stat low)
         // - danger: brighter red (either stat very low)
         int hsColor;
-        if (hap < 2.5 || sec < 0.20) {
-            hsColor = 0xFFFF6666;   // danger
+        if (dim) {
+            hsColor = normalColor; 
+        } else if (hap < 2.5 || sec < 0.20) {
+            hsColor = 0xFFFF6666;
         } else if (hap < 4.0 || sec < 0.35) {
-            hsColor = 0xFFFFAAAA;   // warning
+            hsColor = 0xFFFFAAAA;
         } else {
-            hsColor = 0xFFC0C0C0;   // normal
+            hsColor = normalColor;
         }
 
         g.drawString(this.font, Component.literal(hs), tx, ty, hsColor, false);
@@ -1039,11 +1067,11 @@ public class kingdomBordersMapScreen extends Screen {
 
         // economy quick lines (keep it short in tooltip)
         g.drawString(this.font, Component.literal("Gold: " + (int)card.gold()
-                + "  Food: " + (int)(card.meat() + card.grain() + card.fish())), tx, ty, 0xFFFFD700, false);
+                + "  Food: " + (int)(card.meat() + card.grain() + card.fish())), tx, ty, goldColor, false);
         ty += 12;
 
         g.drawString(this.font, Component.literal("Wood " + (int)card.wood() + "  Metal " + (int)card.metal()
-                + "  Arms " + (int)(card.armor() + card.weapons())), tx, ty, 0xFFC0C0C0, false);
+                + "  Arms " + (int)(card.armor() + card.weapons())), tx, ty, normalColor, false);
     }
 
 
@@ -1178,6 +1206,36 @@ public class kingdomBordersMapScreen extends Screen {
             // If none worked, we just render a plain player head (still fine)
         } catch (Throwable ignored) {}
     }
+
+    private void drawDiploRangeOverlay(GuiGraphics g,
+                                    int left, int top, int right, int bottom,
+                                    int cx, int cy,
+                                    int px, int pz) {
+        if (!showDiploRange) return;
+
+        int r = DIPLO_RANGE_BLOCKS;
+
+        int x1 = (int) Math.round(cx + ((px - r) - px) / scale);
+        int x2 = (int) Math.round(cx + ((px + r) - px) / scale);
+        int z1 = (int) Math.round(cy + ((pz - r) - pz) / scale);
+        int z2 = (int) Math.round(cy + ((pz + r) - pz) / scale);
+
+        // clamp to panel
+        x1 = Math.max(left, Math.min(right, x1));
+        x2 = Math.max(left, Math.min(right, x2));
+        z1 = Math.max(top, Math.min(bottom, z1));
+        z2 = Math.max(top, Math.min(bottom, z2));
+
+        int lx = Math.min(x1, x2), rx = Math.max(x1, x2);
+        int tz = Math.min(z1, z2), bz = Math.max(z1, z2);
+
+        int color = 0x66FFFFFF; // translucent white outline
+        g.hLine(lx, rx, tz, color);
+        g.hLine(lx, rx, bz, color);
+        g.vLine(lx, tz, bz, color);
+        g.vLine(rx, tz, bz, color);
+    }
+
 
 
 }

@@ -11,7 +11,7 @@ import java.util.UUID;
 public record kingdomHoverSyncS2CPayload(
         UUID kingdomId,
         String kingdomName,
-
+        boolean inDiplomaticRange, 
         UUID rulerId,
         String rulerName,
 
@@ -28,6 +28,7 @@ public record kingdomHoverSyncS2CPayload(
 
         boolean atWar,
         String allies,
+        String puppets, 
         String enemies,
 
         double gold,
@@ -49,7 +50,7 @@ public record kingdomHoverSyncS2CPayload(
                 (buf, p) -> {
                     buf.writeUUID(p.kingdomId());
                     buf.writeUtf(p.kingdomName());
-
+                    buf.writeBoolean(p.inDiplomaticRange()); 
                     buf.writeUUID(p.rulerId());
                     buf.writeUtf(p.rulerName());
 
@@ -67,6 +68,7 @@ public record kingdomHoverSyncS2CPayload(
                     // war info (MUST come here to match record order)
                     buf.writeBoolean(p.atWar());
                     buf.writeUtf(p.allies());
+                    buf.writeUtf(p.puppets());
                     buf.writeUtf(p.enemies());
 
                     // economy
@@ -91,6 +93,8 @@ public record kingdomHoverSyncS2CPayload(
                 (buf) -> new kingdomHoverSyncS2CPayload(
                         buf.readUUID(),
                         buf.readUtf(),
+                        
+                        buf.readBoolean(),
 
                         buf.readUUID(),
                         buf.readUtf(),
@@ -109,8 +113,10 @@ public record kingdomHoverSyncS2CPayload(
                         // war info
                         buf.readBoolean(),
                         buf.readUtf(),
+                        buf.readUtf(),  
                         buf.readUtf(),
 
+                        
                         // economy
                         buf.readDouble(),
                         buf.readDouble(),

@@ -140,12 +140,6 @@ public class kingdomWorkerEntity extends PathfinderMob {
                     } catch (Throwable ignored) {}
                 }
 
-                // must be enabled if it’s a jobBlock with ENABLED property
-                if (bs.getBlock() instanceof name.kingdoms.jobBlock) {
-                    try {
-                        if (!bs.getValue(name.kingdoms.jobBlock.ENABLED)) continue;
-                    } catch (Throwable ignored) {}
-                }
 
                 int d2 = dx * dx + dz * dz + dy * dy;
                 if (d2 < bestD2) {
@@ -206,7 +200,7 @@ public class kingdomWorkerEntity extends PathfinderMob {
     @Nullable private BlockPos assignedBedPos;
 
     // Teleport safety (retinue uses HARD_TELEPORT_RADIUS too)
-    private static final int HARD_TELEPORT_RADIUS = 70;
+    private static final int HARD_TELEPORT_RADIUS = 150;
 
     // Retinue teleport gating
     private static final double RETINUE_OWNER_MAX_TP_SPEED = 0.18; // blocks/tick (tune)
@@ -1376,9 +1370,9 @@ protected void registerGoals() {
         private int recheckCd = 0;
 
         // Tuning
-        private static final float CHANCE = 0.35f;    // 35% nights go tavern
-        private static final int LOITER_MIN = 20 * 10; // 10s
-        private static final int LOITER_MAX = 20 * 40; // 40s
+        private static final float CHANCE = 0.50f;    // 50% nights go tavern
+        private static final int LOITER_MIN = 20 * 60; // 60s
+        private static final int LOITER_MAX = 20 * 200; // 200s
 
         
 
@@ -1484,8 +1478,8 @@ protected void registerGoals() {
 
         private int recheckCd = 0;
 
-        private static final float CHANCE = 0.30f;       // 30% mornings do POI
-        private static final int LOITER = 20 * 20;        // 20 seconds
+        private static final float CHANCE = 0.40f;       // 40% mornings do POI
+        private static final int LOITER = 20 * 200;        // 200 seconds
         private static final long START = 1000L;          // your existing “morning”
         private static final long END   = 3500L;
 

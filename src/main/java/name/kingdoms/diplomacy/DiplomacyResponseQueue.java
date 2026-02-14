@@ -20,8 +20,26 @@ import java.util.UUID;
 
 public final class DiplomacyResponseQueue {
 
+    
     /** DEBUG: instant AI responses (DEV ONLY) */
     public static boolean DEBUG_INSTANT = false;
+
+    // -------------------------------------------------
+    // News tuning (declutter)
+    // -------------------------------------------------
+    /** If false, no trade/news lines are generated for economic letters. */
+    private static final boolean NEWS_TRADES_ENABLED = true;
+
+    /** Minimum amount for a trade to generate news (declutter). */
+    private static final double NEWS_MIN_TRADE_AMOUNT = 25.0;
+
+    private static boolean shouldPostTradeNews(ResourceType type, double amount) {
+        if (!NEWS_TRADES_ENABLED) return false;
+        if (amount <= 0) return false;
+        return amount >= NEWS_MIN_TRADE_AMOUNT;
+    }
+
+
 
     private record PendingMail(
             UUID playerId,
@@ -456,7 +474,7 @@ public final class DiplomacyResponseQueue {
                         networkInit.addAi(aiK, p.aType, -p.aAmount);
                         EconomyMutator.add(playerK, p.aType, +p.aAmount);
                         relState.addRelation(p.playerId, p.aiId, +3);
-
+                        
                         addLocalNews(server, news,
                                 playerK,
                                 "[TRADE] " + an + " fulfilled a request from " + pn + " (" +
@@ -682,5 +700,12 @@ public final class DiplomacyResponseQueue {
         if (rel < -100) return -100;
         return rel;
     }
+
+    private static void addGlobalNews(MinecraftServer server, String text) {
+        var level = server.overworld();
+        if (level == null) return;
+        name.kingdoms.news.KingdomNewsState.get(level).add(server.getTickCount(), text, level, 0, 0);
+    }
+
 
 }
